@@ -41,8 +41,11 @@ type wireMessage struct {
 // depends on Type; omitempty keeps each variant to its own fields.
 type wireBlock struct {
 	Type string `json:"type"`
-	// text / thinking
+	// text
 	Text string `json:"text,omitempty"`
+	// thinking
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
 	// tool_use
 	ID    string          `json:"id,omitempty"`
 	Name  string          `json:"name,omitempty"`
@@ -141,9 +144,10 @@ func (p *Provider) buildSystem(system string, credKind provider.CredKind) []syst
 }
 
 // convertMessages maps the internal message model to Anthropic wire messages.
-// Reasoning blocks are dropped on the way out: the API requires a cryptographic
-// signature to replay a thinking block, which the internal ContentBlock model
-// does not carry.
+// A reasoning block is replayed as a signed thinking block when it carries the
+// Anthropic signature in its Meta (required when extended thinking and tool use
+// combine across turns); an unsigned reasoning block is dropped, since the API
+// rejects a thinking block without its signature.
 func convertMessages(msgs []provider.Message) []wireMessage {
 	out := make([]wireMessage, 0, len(msgs))
 	for _, m := range msgs {
@@ -152,6 +156,11 @@ func convertMessages(msgs []provider.Message) []wireMessage {
 			switch b.Type {
 			case provider.BlockText:
 				blocks = append(blocks, wireBlock{Type: "text", Text: b.Text})
+			case provider.BlockReasoning:
+				if sig := b.Meta[metaSignatureKey]; sig != "" {
+					blocks = append(blocks, wireBlock{Type: "thinking", Thinking: b.Text, Signature: sig})
+				}
+				// Unsigned reasoning cannot be replayed; drop it.
 			case provider.BlockToolUse:
 				input := b.ToolInput
 				if len(input) == 0 {
@@ -164,9 +173,8 @@ func convertMessages(msgs []provider.Message) []wireMessage {
 				blocks = append(blocks, wireBlock{
 					Type: "tool_result", ToolUseID: b.ToolUseID, Content: b.ToolResult, IsError: b.IsError,
 				})
-			case provider.BlockReasoning, provider.BlockImage:
-				// Reasoning needs a signature we do not retain; image blocks are
-				// an M1 placeholder. Both are omitted from the outgoing request.
+			case provider.BlockImage:
+				// Image blocks are an M1 placeholder, omitted from the request.
 			}
 		}
 		if len(blocks) == 0 {

@@ -130,6 +130,7 @@ type sseDelta struct {
 	Type         string `json:"type,omitempty"`
 	Text         string `json:"text,omitempty"`
 	Thinking     string `json:"thinking,omitempty"`
+	Signature    string `json:"signature,omitempty"`
 	PartialJSON  string `json:"partial_json,omitempty"`
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
@@ -219,6 +220,18 @@ func (h *streamHandle) onBlockDelta(e sseEvent) (provider.StreamEvent, bool, err
 		return provider.StreamEvent{Type: provider.StreamTextDelta, Text: e.Delta.Text}, true, nil
 	case "thinking_delta":
 		return provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: e.Delta.Thinking}, true, nil
+	case "signature_delta":
+		// The signature seals the preceding thinking block; the API requires it
+		// replayed on a later turn when extended thinking and tool use combine.
+		// Carry it as opaque block metadata on an (empty-text) reasoning delta so
+		// the loop merges it onto the assembled reasoning block.
+		if e.Delta.Signature == "" {
+			return provider.StreamEvent{}, false, nil
+		}
+		return provider.StreamEvent{
+			Type: provider.StreamReasoningDelta,
+			Meta: map[string]string{metaSignatureKey: e.Delta.Signature},
+		}, true, nil
 	case "input_json_delta":
 		st := h.blocks[e.Index]
 		if st != nil {

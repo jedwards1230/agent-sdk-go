@@ -157,11 +157,22 @@ func TestStreamReasoning(t *testing.T) {
 	if reasoning != "Let me think. " {
 		t.Errorf("reasoning = %q", reasoning)
 	}
-	// signature_delta must not surface as an event.
+	// signature_delta must not surface as reasoning TEXT, but must be carried
+	// as opaque block metadata on an (empty-text) reasoning delta.
+	var sig string
 	for _, e := range got {
 		if e.Type == provider.StreamReasoningDelta && e.Text == "abc" {
-			t.Error("signature_delta leaked as reasoning")
+			t.Error("signature_delta leaked as reasoning text")
 		}
+		if v, ok := e.Meta[metaSignatureKey]; ok {
+			if e.Type != provider.StreamReasoningDelta || e.Text != "" {
+				t.Errorf("signature meta on wrong event: %+v", e)
+			}
+			sig = v
+		}
+	}
+	if sig != "abc" {
+		t.Errorf("signature meta = %q, want abc", sig)
 	}
 }
 

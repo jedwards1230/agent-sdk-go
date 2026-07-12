@@ -30,6 +30,12 @@ const (
 	// prepends when authenticating with a subscription OAuth token. It must be
 	// sent verbatim — the OAuth grant is scoped to this client identity.
 	systemIdentity = "You are Claude Code, Anthropic's official CLI for Claude."
+
+	// metaSignatureKey is the provider-namespaced ContentBlock.Meta key under
+	// which a reasoning block's Anthropic thinking signature is carried. The API
+	// requires this signature replayed when extended thinking and tool use
+	// combine across turns.
+	metaSignatureKey = "anthropic.signature"
 )
 
 // oauthBetas are the anthropic-beta feature flags the Claude Code CLI sends with
