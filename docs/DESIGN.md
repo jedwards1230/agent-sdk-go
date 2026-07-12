@@ -19,6 +19,18 @@ implementer should need no other context.
   message than any provider speaks; project down at the call boundary
   (`convertToLLM`), never up.
 
+**Implementation (M1, `loop/`).** `loop.Run(ctx, Config, messages) (Result,
+error)` drives the loop: each iteration is one model call (a `turn.*` pair
+carrying that call's usage + priced cost), the provider stream is converted to
+contract events (`message.*`, `tool.call.*`), and on a `tool_use` stop the loop
+executes the requested tools and appends `tool_result` blocks before the next
+call. Hooks are never-throw — a hook's error emits a non-fatal `session.error`
+and the loop proceeds with the pre-hook value. The loop consumes a `ToolRegistry`
+interface declared consumer-side in `loop/` (the `tool` package's registry
+satisfies it — no reverse dependency). `compose.LoopConfig(m, LoopDeps)` wires a
+provider + model + tools + broker from a manifest; `compose.CredentialSource(m)`
+resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
+
 ## Provider parity & credentials (M1)
 
 - **No flagship provider.** `provider.Provider` (`Stream(ctx, Request)
