@@ -1,0 +1,6 @@
+# Example agent manifest. At M0 the only provider is the deterministic faux
+# provider, so `compose.Load("agent.yaml")` runs entirely offline.
+name: demo
+model: faux-1
+provider:
+  type: faux

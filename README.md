@@ -37,13 +37,16 @@ because everything in the model's context went through code you own.
 sess, err := compose.Load(ctx, "agent.yaml") // manifest → wired session
 if err != nil { ... }
 
-events := sess.Subscribe(event.TierMustDeliver)
-go sess.Prompt(ctx, "hello")
+sub := sess.Subscribe(event.FilterAll)
+defer sub.Close()
+go func() { _ = sess.Prompt(ctx, "hello") }()
 
-for ev := range events {
+for ev := range sub.C {
     switch e := ev.(type) {
     case event.MessageFinished:
         fmt.Println(e.Content)
+    case event.TurnFinished:
+        return
     }
 }
 ```

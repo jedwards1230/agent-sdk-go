@@ -38,7 +38,7 @@ all there.
 ```bash
 go build ./... && go vet ./... && go test ./...   # the CI gate
 golangci-lint run                                  # lint, zero tolerance
-go test ./... -update                              # regenerate golden files (review the diff!)
+go test ./compose/... -update                      # regenerate golden files (review the diff!)
 ```
 
 ## Layout

@@ -17,8 +17,8 @@ golangci-lint run
 ```
 
 Golden-file tests compare event streams against `testdata/*.golden.jsonl`;
-regenerate deliberately with `go test ./... -update` and review the diff like
-code.
+regenerate deliberately with `go test ./compose/... -update` and review the
+diff like code.
 
 ## Hard rules
 

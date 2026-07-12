@@ -1,0 +1,4 @@
+name: demo
+model: faux-1
+provider:
+  type: faux
