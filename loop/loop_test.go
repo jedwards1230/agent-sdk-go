@@ -433,6 +433,49 @@ func TestMissingFinishedFailsClosed(t *testing.T) {
 	}
 }
 
+func TestBlockMetaCarriedThroughStream(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+
+	// A reasoning block arrives with an opaque provider signature; the loop must
+	// carry it onto the assembled ContentBlock so it round-trips + replays.
+	turn := []provider.StreamEvent{
+		{Type: provider.StreamReasoningDelta, Text: "thinking..."},
+		{Type: provider.StreamReasoningDelta, Meta: map[string]string{"anthropic.signature": "sig-abc"}},
+		{Type: provider.StreamTextDelta, Text: "answer"},
+		{Type: provider.StreamFinished, StopReason: provider.StopEndTurn},
+	}
+	res, err := loop.Run(context.Background(), baseConfig(b, scripted(turn)), []provider.Message{provider.UserText("hi")})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	assistant := res.Messages[1]
+	if len(assistant.Content) != 2 {
+		t.Fatalf("assistant content = %+v", assistant.Content)
+	}
+	reasoning := assistant.Content[0]
+	if reasoning.Type != provider.BlockReasoning || reasoning.Meta["anthropic.signature"] != "sig-abc" {
+		t.Errorf("reasoning block did not carry the signature meta: %+v", reasoning)
+	}
+	// The text block carries no meta.
+	if assistant.Content[1].Meta != nil {
+		t.Errorf("text block unexpectedly carries meta: %+v", assistant.Content[1])
+	}
+
+	// Meta must survive a JSON journal round-trip.
+	raw, err := json.Marshal(reasoning)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back provider.ContentBlock
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back.Meta["anthropic.signature"] != "sig-abc" {
+		t.Errorf("meta lost in JSON round-trip: %s", raw)
+	}
+}
+
 func TestRequiresBrokerAndStream(t *testing.T) {
 	if _, err := loop.Run(context.Background(), loop.Config{SessionID: sid}, nil); err == nil {
 		t.Error("missing broker should error")

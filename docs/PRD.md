@@ -54,7 +54,7 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
 provider/    LLM iface · normalized stream · model registry · CredentialSource
 auth/        OAuth flows · token store (~/.gofer/auth.json) (M1)
 loop/        runAgentLoop · hooks · StreamFn          (M1)
-session/     event-sourced JSONL tree                 (M0: identity + turn)
+session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
 permission/  rules · grants · escalation cap          (M3)
 tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
 skill/       SKILL.md, two-tier disclosure            (M4)

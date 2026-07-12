@@ -22,6 +22,12 @@ const (
 type Credential struct {
 	Kind  CredKind
 	Token string
+	// Account is an optional account identifier sent alongside the token. The
+	// OpenAI ChatGPT-subscription OAuth path requires it as the
+	// `ChatGPT-Account-ID` header; it is empty for API-key kinds and for
+	// Anthropic OAuth. auth.Store populates it from the id_token's
+	// `chatgpt_account_id` claim.
+	Account string
 }
 
 // CredentialSource resolves auth material for a provider without the provider

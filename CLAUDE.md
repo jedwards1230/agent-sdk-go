@@ -48,6 +48,7 @@ go test ./compose/... -update                      # regenerate golden files (re
 - `event/` — Event/Op tagged unions + two-tier broker. The public contract.
 - `provider/` — provider interface, normalized stream; `provider/faux` is the
   deterministic scripted provider used by tests and demos.
-- `session/` — session identity + turn execution, emits through the broker.
+- `session/` — event-sourced JSONL session tree: identity, journal, resume, and
+  usage/cost accounting; emits through the broker.
 - `compose/` — YAML manifest → wired `*session.Session` (`compose.Load()`).
 - `testdata/` golden JSONL streams live next to the package they exercise.

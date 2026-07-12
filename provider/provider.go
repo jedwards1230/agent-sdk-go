@@ -122,6 +122,15 @@ type ContentBlock struct {
 	IsError bool `json:"is_error,omitempty"`
 	// ImageRef is an opaque image reference (BlockImage); M1 placeholder only.
 	ImageRef string `json:"image_ref,omitempty"`
+	// Meta carries opaque, provider-namespaced per-block metadata that must
+	// round-trip verbatim through the session journal and be replayed on the
+	// outgoing projection. It exists so a provider can preserve state it needs
+	// on a later turn — e.g. Anthropic's reasoning-block cryptographic
+	// `signature` (required when extended thinking and tool use combine) or
+	// OpenAI's reasoning item id. Keys are provider-namespaced
+	// (e.g. "anthropic.signature", "openai.item_id"); the loop and session
+	// never interpret them.
+	Meta map[string]string `json:"meta,omitempty"`
 }
 
 // TextBlock builds a text content block.
@@ -197,8 +206,9 @@ type Usage struct {
 	OutputTokens     int `json:"output_tokens"`
 	CacheReadTokens  int `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
-	// Raw holds provider-reported token fields that do not map onto the
-	// normalized counters above, retained for audit. Nil when unused.
+	// Raw holds the provider-reported token fields verbatim, retained for audit
+	// (adapters may mirror all raw counters here, including ones that also map
+	// onto the normalized fields above). Nil when unused.
 	Raw map[string]int `json:"raw,omitempty"`
 }
 
@@ -267,6 +277,12 @@ type StreamEvent struct {
 	// StopReason and Usage are set for StreamFinished.
 	StopReason StopReason
 	Usage      Usage
+	// Meta carries opaque, provider-namespaced metadata for the block the event
+	// belongs to (a reasoning/text message or a tool call). The loop merges it
+	// onto the assembled [ContentBlock.Meta], so a provider can surface e.g. a
+	// reasoning signature to be replayed on a later turn. It is dropped on
+	// StreamFinished.
+	Meta map[string]string
 }
 
 // ToolCall is the tool-related payload of a stream event. A single struct serves
