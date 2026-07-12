@@ -51,4 +51,8 @@ go test ./compose/... -update                      # regenerate golden files (re
 - `session/` — event-sourced JSONL session tree: identity, journal, resume, and
   usage/cost accounting; emits through the broker.
 - `compose/` — YAML manifest → wired `*session.Session` (`compose.Load()`).
+- `runner/` — batteries-included drivable session: assembles provider
+  (`providers.Build`) + tools + broker + loop + journal into a `*Runner`
+  (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`Close`), event-sourcing each
+  settled turn. The composable alternative to hand-wiring loop+session.
 - `testdata/` golden JSONL streams live next to the package they exercise.
