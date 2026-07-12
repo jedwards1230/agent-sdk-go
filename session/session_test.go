@@ -114,7 +114,7 @@ func TestFinishedReconcilesDeltas(t *testing.T) {
 		finished[1].Content != "Hello! How can I help you today?" {
 		t.Errorf("text finished = %+v", finished[1])
 	}
-	if turn.StopReason != "end_turn" || turn.Usage != (provider.Usage{InputTokens: 9, OutputTokens: 7}) {
+	if turn.StopReason != "end_turn" || !turn.Usage.Equal(provider.Usage{InputTokens: 9, OutputTokens: 7}) {
 		t.Errorf("turn.finished = %+v", turn)
 	}
 }

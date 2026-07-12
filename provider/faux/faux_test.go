@@ -11,7 +11,7 @@ import (
 )
 
 // collect drains a stream into a slice of events.
-func collect(t *testing.T, s provider.Stream) []provider.StreamEvent {
+func collect(t *testing.T, s provider.StreamHandle) []provider.StreamEvent {
 	t.Helper()
 	var out []provider.StreamEvent
 	for {
@@ -27,7 +27,7 @@ func collect(t *testing.T, s provider.Stream) []provider.StreamEvent {
 }
 
 // TestDefaultScriptOrder asserts the default script streams reasoning, then
-// text, then usage, then stop.
+// text, then a terminal finished event carrying the stop reason and usage.
 func TestDefaultScriptOrder(t *testing.T) {
 	p := faux.New(faux.Default())
 	s, err := p.Stream(context.Background(), provider.Request{})
@@ -38,10 +38,9 @@ func TestDefaultScriptOrder(t *testing.T) {
 
 	got := collect(t, s)
 	wantTypes := []provider.StreamEventType{
-		provider.StreamReasoning, provider.StreamReasoning,
-		provider.StreamText, provider.StreamText, provider.StreamText,
-		provider.StreamUsage,
-		provider.StreamStop,
+		provider.StreamReasoningDelta, provider.StreamReasoningDelta,
+		provider.StreamTextDelta, provider.StreamTextDelta, provider.StreamTextDelta,
+		provider.StreamFinished,
 	}
 	if len(got) != len(wantTypes) {
 		t.Fatalf("got %d events, want %d", len(got), len(wantTypes))
@@ -51,14 +50,25 @@ func TestDefaultScriptOrder(t *testing.T) {
 			t.Errorf("event %d type = %d, want %d", i, e.Type, wantTypes[i])
 		}
 	}
-	if last := got[len(got)-1]; last.StopReason != "end_turn" {
-		t.Errorf("stop reason = %q, want end_turn", last.StopReason)
+	last := got[len(got)-1]
+	if last.StopReason != provider.StopEndTurn {
+		t.Errorf("stop reason = %q, want %q", last.StopReason, provider.StopEndTurn)
+	}
+	if !last.Usage.Equal(provider.Usage{InputTokens: 9, OutputTokens: 7}) {
+		t.Errorf("usage = %+v, want {9, 7}", last.Usage)
+	}
+}
+
+// TestInfo asserts the faux provider reports synthetic model metadata.
+func TestInfo(t *testing.T) {
+	if got := faux.New(faux.Default()).Info().Provider; got != "faux" {
+		t.Errorf("Info().Provider = %q, want faux", got)
 	}
 }
 
 // TestScriptExhausted asserts a second turn against a one-turn script errors.
 func TestScriptExhausted(t *testing.T) {
-	p := faux.New(faux.Script{Turns: []faux.Turn{{Text: []string{"hi"}, StopReason: "end_turn"}}})
+	p := faux.New(faux.Script{Turns: []faux.Turn{{Text: []string{"hi"}, StopReason: provider.StopEndTurn}}})
 	if _, err := p.Stream(context.Background(), provider.Request{}); err != nil {
 		t.Fatalf("first Stream: %v", err)
 	}

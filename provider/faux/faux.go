@@ -24,7 +24,7 @@ type Turn struct {
 	Reasoning  []string
 	Text       []string
 	Usage      provider.Usage
-	StopReason string
+	StopReason provider.StopReason
 }
 
 // Default returns the canonical script used by the demo and the golden-file
@@ -34,8 +34,18 @@ func Default() Script {
 		Reasoning:  []string{"The user said hello. ", "I'll greet them back."},
 		Text:       []string{"Hello", "! How can ", "I help you today?"},
 		Usage:      provider.Usage{InputTokens: 9, OutputTokens: 7},
-		StopReason: "end_turn",
+		StopReason: provider.StopEndTurn,
 	}}}
+}
+
+// info is the synthetic model metadata reported by the faux provider. It is
+// unpriced — faux is not a real model.
+var info = provider.ModelInfo{
+	ID:            "faux",
+	Provider:      "faux",
+	ContextWindow: 200_000,
+	MaxOutput:     8192,
+	Reasoning:     true,
 }
 
 // Provider is a scripted provider. Each call to Stream consumes the next turn
@@ -49,9 +59,12 @@ type Provider struct {
 // New returns a provider that replays s.
 func New(s Script) *Provider { return &Provider{script: s} }
 
+// Info returns the faux provider's synthetic model metadata.
+func (p *Provider) Info() provider.ModelInfo { return info }
+
 // Stream returns the next scripted turn as a normalized stream. It errors once
 // the script is exhausted. The request is ignored — output is fully scripted.
-func (p *Provider) Stream(_ context.Context, _ provider.Request) (provider.Stream, error) {
+func (p *Provider) Stream(_ context.Context, _ provider.Request) (provider.StreamHandle, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.turn >= len(p.script.Turns) {
@@ -69,17 +82,18 @@ type stream struct {
 }
 
 func newStream(t Turn) *stream {
-	events := make([]provider.StreamEvent, 0, len(t.Reasoning)+len(t.Text)+2)
+	events := make([]provider.StreamEvent, 0, len(t.Reasoning)+len(t.Text)+1)
 	for _, r := range t.Reasoning {
-		events = append(events, provider.StreamEvent{Type: provider.StreamReasoning, Text: r})
+		events = append(events, provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: r})
 	}
 	for _, x := range t.Text {
-		events = append(events, provider.StreamEvent{Type: provider.StreamText, Text: x})
+		events = append(events, provider.StreamEvent{Type: provider.StreamTextDelta, Text: x})
 	}
-	events = append(events,
-		provider.StreamEvent{Type: provider.StreamUsage, Usage: t.Usage},
-		provider.StreamEvent{Type: provider.StreamStop, StopReason: t.StopReason},
-	)
+	events = append(events, provider.StreamEvent{
+		Type:       provider.StreamFinished,
+		StopReason: t.StopReason,
+		Usage:      t.Usage,
+	})
 	return &stream{events: events}
 }
 
