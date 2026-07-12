@@ -81,6 +81,21 @@ func TestGlobNoMatch(t *testing.T) {
 	}
 }
 
+func TestGlobBadPattern(t *testing.T) {
+	dir := setupGlobTree(t)
+	g := NewGlob(dir)
+	res, err := g.Run(context.Background(), json.RawMessage(`{"pattern":"[bad"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true for bad pattern")
+	}
+	if !strings.Contains(res.Content, "invalid pattern") {
+		t.Fatalf("Content = %q, want invalid-pattern message", res.Content)
+	}
+}
+
 func TestGlobSkipsGitDir(t *testing.T) {
 	dir := setupGlobTree(t)
 	g := NewGlob(dir)

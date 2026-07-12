@@ -76,6 +76,9 @@ func (t *Glob) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if in.Pattern == "" {
 		return Result{}, fmt.Errorf("tool: glob: pattern is required")
 	}
+	if err := validateGlob(in.Pattern); err != nil {
+		return errorResult("glob: invalid pattern: %v", err), nil
+	}
 
 	searchRoot := t.root
 	if in.Path != "" {

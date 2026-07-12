@@ -89,6 +89,22 @@ func matchSegments(p, n []string) (bool, error) {
 	return matchSegments(p[1:], n[1:])
 }
 
+// validateGlob reports a malformed glob pattern (e.g. an unterminated
+// character class) without needing a name to match against. Each "/"-separated
+// segment other than "**" is checked with [filepath.Match]; the first bad
+// segment's error is returned.
+func validateGlob(pattern string) error {
+	for _, seg := range strings.Split(pattern, "/") {
+		if seg == "**" {
+			continue
+		}
+		if _, err := filepath.Match(seg, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ctxErr returns ctx.Err(), which is nil for a live context. Builtins call it
 // at entry, and grep/glob call it inside their directory-walk loop, so a
 // cancelled ctx aborts promptly rather than after the whole tree is walked.

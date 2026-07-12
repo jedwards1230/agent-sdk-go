@@ -97,6 +97,11 @@ func (t *Grep) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if err != nil {
 		return errorResult("grep: invalid pattern: %v", err), nil
 	}
+	if in.Glob != "" {
+		if err := validateGlob(in.Glob); err != nil {
+			return errorResult("grep: invalid glob: %v", err), nil
+		}
+	}
 
 	searchRoot := t.root
 	if in.Path != "" {

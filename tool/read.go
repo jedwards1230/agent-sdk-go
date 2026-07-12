@@ -109,9 +109,9 @@ func (t *Read) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	}
 
 	start := offset - 1
-	end := start + limit
-	if end > total {
-		end = total
+	end := total
+	if limit < total-start {
+		end = start + limit
 	}
 
 	var b strings.Builder

@@ -92,6 +92,7 @@ func (b *Bash) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 
 	cmd := exec.CommandContext(runCtx, b.shell, "-c", in.Command) // #nosec G204 -- bash is the tool's job, not a vulnerability here
 	cmd.Dir = b.root
+	configureProcessGroup(cmd)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
