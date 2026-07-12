@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -62,10 +61,13 @@ type Store struct {
 	httpClient httpDoer
 	flows      map[string]loginFlow
 
-	// writeMu serializes every read-modify-write of auth.json in this process;
-	// paired with the cross-process advisory file lock it makes each mutation
-	// atomic against all others (this process and others sharing the file).
-	writeMu sync.Mutex
+	// writeCh is a size-1 semaphore serializing every read-modify-write of
+	// auth.json in this process; paired with the cross-process advisory file
+	// lock it makes each mutation atomic against all others (this process and
+	// others sharing the file). A channel (not a sync.Mutex) so acquisition can
+	// honor a caller's context — a refresh holds this across a network call, so
+	// a cancelled caller must not have to wait it out.
+	writeCh chan struct{}
 }
 
 // Option configures a [Store].
@@ -94,6 +96,7 @@ func New(opts ...Option) (*Store, error) {
 	s := &Store{
 		now:        time.Now,
 		httpClient: defaultHTTPClient(),
+		writeCh:    make(chan struct{}, 1),
 	}
 	for _, o := range opts {
 		o(s)
@@ -191,26 +194,40 @@ func (s *Store) Get(providerID string) (Entry, bool, error) {
 	return e, ok, nil
 }
 
-// withWriteLock runs fn while holding the in-process write mutex and the
-// cross-process advisory file lock, so any load-modify-save inside fn is
-// atomic against every other store mutation.
-func (s *Store) withWriteLock(fn func() error) error {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+// withWriteLock runs fn while holding the in-process write semaphore and the
+// cross-process advisory file lock, so any load-modify-save inside fn is atomic
+// against every other store mutation. Semaphore acquisition honors ctx: because
+// refreshEntry holds this lock across a token-endpoint call, a cancelled caller
+// must return promptly rather than wait out an unrelated refresh.
+func (s *Store) withWriteLock(ctx context.Context, fn func() error) error {
+	select {
+	case s.writeCh <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.writeCh }()
+
 	unlock, err := s.lockFile()
 	if err != nil {
 		return err
 	}
 	defer unlock()
+
+	// Bail before doing work if ctx was cancelled while taking the file lock.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	return fn()
 }
 
 // mutate atomically loads auth.json, applies fn, and saves the result. All
 // mutations route through here (or through refreshEntry, which needs the same
 // lock held across a network call), so no two read-modify-write cycles can
-// interleave and lose an update.
-func (s *Store) mutate(fn func(*authFile) error) error {
-	return s.withWriteLock(func() error {
+// interleave and lose an update. Local mutations (Set/Logout) are not
+// cancellable — they take context.Background; ctx-awareness matters for the
+// refresh path, which is the one that can block on I/O.
+func (s *Store) mutate(ctx context.Context, fn func(*authFile) error) error {
+	return s.withWriteLock(ctx, func() error {
 		af, err := s.load()
 		if err != nil {
 			return err
@@ -224,7 +241,7 @@ func (s *Store) mutate(fn func(*authFile) error) error {
 
 // Set persists an entry for a provider id, replacing any existing one.
 func (s *Store) Set(providerID string, e Entry) error {
-	return s.mutate(func(af *authFile) error {
+	return s.mutate(context.Background(), func(af *authFile) error {
 		af.Providers[providerID] = e
 		return nil
 	})
@@ -238,7 +255,7 @@ func (s *Store) SetAPIKey(providerID, key string) error {
 // Logout removes a provider's credential. It is not an error to log out a
 // provider that has no entry.
 func (s *Store) Logout(providerID string) error {
-	return s.mutate(func(af *authFile) error {
+	return s.mutate(context.Background(), func(af *authFile) error {
 		delete(af.Providers, providerID)
 		return nil
 	})
@@ -330,7 +347,7 @@ func (s *Store) refreshEntry(ctx context.Context, providerID string, e Entry) (E
 	}
 
 	var refreshed Entry
-	err := s.withWriteLock(func() error {
+	err := s.withWriteLock(ctx, func() error {
 		af, err := s.load()
 		if err != nil {
 			return err

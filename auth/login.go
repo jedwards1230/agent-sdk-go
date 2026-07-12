@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -67,6 +68,13 @@ type Login struct {
 	// Redeem completes a manual-code login with the user-pasted code and
 	// persists the credential. Nil in callback mode.
 	Redeem func(code string) error
+	// Close releases resources held by an in-progress login — for callback
+	// mode, the local callback listener and its port. It is idempotent and
+	// safe to call after Wait. Manual-code logins hold nothing, so Close is a
+	// no-op. Prefer passing a cancellable ctx to Login (the listener is tied to
+	// it); Close is the explicit escape hatch for a caller that abandons the
+	// login without cancelling.
+	Close func()
 }
 
 // Login begins an OAuth login for a provider id. For a callback provider it
@@ -99,6 +107,7 @@ func (s *Store) loginManual(ctx context.Context, flow loginFlow) (*Login, error)
 			}
 			return s.Set(flow.provider(), e)
 		},
+		Close: func() {}, // no listener to release
 	}, nil
 }
 
@@ -107,7 +116,7 @@ func (s *Store) loginCallback(ctx context.Context, flow loginFlow) (*Login, erro
 	listenAddr := flow.callbackListenAddr()
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("auth: bind callback listener %s: %w", listenAddr, err)
+		return nil, fmt.Errorf("auth: bind callback listener %s: %w (an earlier login may still hold the port — cancel its context or call Login.Close)", listenAddr, err)
 	}
 
 	redirectURI := flow.callbackRedirectURI()
@@ -161,16 +170,36 @@ func (s *Store) loginCallback(ctx context.Context, flow loginFlow) (*Login, erro
 	srv := &http.Server{Handler: mux}
 	go func() { _ = srv.Serve(ln) }()
 
-	wait := func() error {
-		// Shutdown (not Close) so the in-flight callback response flushes to
-		// the browser before the listener tears down; Close would abort it.
-		defer func() {
+	// shutdown tears the listener down exactly once, from whichever path fires
+	// first — Wait completing, Login.Close, or ctx cancellation. Shutdown (not
+	// Close) lets the in-flight callback response flush to the browser before
+	// the listener goes away.
+	var once sync.Once
+	closed := make(chan struct{})
+	shutdown := func() {
+		once.Do(func() {
 			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := srv.Shutdown(sctx); err != nil {
 				_ = srv.Close()
 			}
-		}()
+			close(closed)
+		})
+	}
+
+	// Tie the listener to ctx so an abandoned login (Wait never called) still
+	// frees the port when the caller cancels. This goroutine also exits when
+	// shutdown happens by any other path, so it never leaks.
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdown()
+		case <-closed:
+		}
+	}()
+
+	wait := func() error {
+		defer shutdown()
 		select {
 		case err := <-done:
 			return err
@@ -178,7 +207,7 @@ func (s *Store) loginCallback(ctx context.Context, flow loginFlow) (*Login, erro
 			return ctx.Err()
 		}
 	}
-	return &Login{AuthorizeURL: authURL, Mode: LoginModeCallback, Wait: wait}, nil
+	return &Login{AuthorizeURL: authURL, Mode: LoginModeCallback, Wait: wait, Close: shutdown}, nil
 }
 
 // trySend delivers on a buffered result channel without blocking a second
