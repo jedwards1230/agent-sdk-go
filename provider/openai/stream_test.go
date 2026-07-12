@@ -32,12 +32,11 @@ func TestRouteAPIKey(t *testing.T) {
 	}
 }
 
-// TestRouteOAuthSwitchesBaseURL uses the transitional packed-token seam to
-// exercise the account-present path: oauth must switch off the api host and set
-// the ChatGPT-Account-ID header.
+// TestRouteOAuthSwitchesBaseURL asserts the account-present path: oauth switches
+// off the api host and sets the ChatGPT-Account-ID header from cred.Account.
 func TestRouteOAuthSwitchesBaseURL(t *testing.T) {
 	p := New("gpt-5", nil)
-	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "acct-42\x00tok-xyz"})
+	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "tok-xyz", Account: "acct-42"})
 	if err != nil {
 		t.Fatalf("route: %v", err)
 	}
@@ -52,11 +51,10 @@ func TestRouteOAuthSwitchesBaseURL(t *testing.T) {
 	}
 }
 
-// TestRouteOAuthUnpackedToken asserts a plain (unpacked) oauth token — the form
-// auth.Store actually emits before Credential.Account exists — routes correctly:
-// oauth host, the bearer passed through untouched, and NO account-id header (an
-// omitted header, not a corrupted bearer or an error).
-func TestRouteOAuthUnpackedToken(t *testing.T) {
+// TestRouteOAuthNoAccount asserts an oauth credential with no account routes
+// correctly: oauth host, bearer intact, and NO account-id header (omitted, not
+// blank, not an error).
+func TestRouteOAuthNoAccount(t *testing.T) {
 	p := New("gpt-5", nil)
 	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "sk-oauth-plain"})
 	if err != nil {
@@ -89,7 +87,7 @@ func TestRouteEmptyAPIKeyErrors(t *testing.T) {
 
 func TestBaseURLOverridePreservesHeaders(t *testing.T) {
 	p := New("gpt-5", nil, WithBaseURL("http://127.0.0.1:1/v"))
-	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "acct\x00tok"})
+	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "tok", Account: "acct"})
 	if err != nil {
 		t.Fatalf("route: %v", err)
 	}
@@ -243,6 +241,34 @@ func TestStreamReasoning(t *testing.T) {
 	}
 	if fin.Usage.Raw["reasoning_tokens"] != 8 {
 		t.Errorf("reasoning_tokens raw = %d, want 8", fin.Usage.Raw["reasoning_tokens"])
+	}
+}
+
+// TestStreamReasoningItemIDMeta asserts reasoning deltas are tagged with their
+// item id under Meta["openai.item_id"] — both when the id rides on the delta and
+// when it must be tracked from the reasoning item's output_item.added.
+func TestStreamReasoningItemIDMeta(t *testing.T) {
+	payload := event("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_42","summary":[]}}`) +
+		// This delta omits item_id — the id must come from the added event.
+		event("response.reasoning_summary_text.delta", `{"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"a"}`) +
+		// This one carries item_id explicitly.
+		event("response.reasoning_summary_text.delta", `{"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_42","delta":"b"}`) +
+		event("response.completed", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`)
+
+	evs, _ := streamOnce(t, payload, provider.Credential{Kind: provider.CredAPIKey, Token: "sk"}, provider.Request{})
+
+	var seen int
+	for _, e := range evs {
+		if e.Type != provider.StreamReasoningDelta {
+			continue
+		}
+		seen++
+		if e.Meta[metaItemID] != "rs_42" {
+			t.Errorf("reasoning delta %q Meta[%s] = %q, want rs_42", e.Text, metaItemID, e.Meta[metaItemID])
+		}
+	}
+	if seen != 2 {
+		t.Fatalf("saw %d reasoning deltas, want 2", seen)
 	}
 }
 
@@ -427,7 +453,7 @@ func TestStreamToleratesMalformedFrames(t *testing.T) {
 func TestOAuthRoutingHeaders(t *testing.T) {
 	payload := event("response.completed", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`)
 	_, rec := streamOnce(t, payload,
-		provider.Credential{Kind: provider.CredOAuth, Token: "acct-99\x00tok-secret"},
+		provider.Credential{Kind: provider.CredOAuth, Token: "tok-secret", Account: "acct-99"},
 		provider.Request{Messages: []provider.Message{provider.UserText("hi")}})
 
 	if rec.req == nil {

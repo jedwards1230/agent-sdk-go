@@ -10,6 +10,10 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
+// metaItemID is the provider-namespaced StreamEvent.Meta key under which a
+// reasoning block's Responses-API item id is journaled.
+const metaItemID = "openai.item_id"
+
 // stream adapts a Responses-API SSE body to a [provider.StreamHandle]. One SSE
 // frame yields zero or one normalized events; produced events are returned one
 // per Next call.
@@ -26,6 +30,10 @@ type stream struct {
 	toolByItem  map[string]*toolCallState
 	sawTool     bool
 	sawRefusal  bool
+
+	// reasoningByIndex maps a reasoning item's output_index to its item id, so
+	// summary deltas that omit item_id can still be tagged with it.
+	reasoningByIndex map[int]string
 
 	pending  provider.StreamEvent // one buffered event when a frame yields output
 	hasNext  bool
@@ -50,11 +58,12 @@ func (s *stream) lookupTool(itemID string, outputIndex int) *toolCallState {
 
 func newStream(ctx context.Context, body io.ReadCloser) *stream {
 	return &stream{
-		ctx:         ctx,
-		body:        body,
-		dec:         newSSEDecoder(body),
-		toolByIndex: map[int]*toolCallState{},
-		toolByItem:  map[string]*toolCallState{},
+		ctx:              ctx,
+		body:             body,
+		dec:              newSSEDecoder(body),
+		toolByIndex:      map[int]*toolCallState{},
+		toolByItem:       map[string]*toolCallState{},
+		reasoningByIndex: map[int]string{},
 	}
 }
 
@@ -156,7 +165,18 @@ func (s *stream) handle(frame sseFrame) (provider.StreamEvent, bool, error) {
 		return provider.StreamEvent{Type: provider.StreamTextDelta, Text: e.Delta}, true, nil
 
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-		return provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: e.Delta}, true, nil
+		ev := provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: e.Delta}
+		// Tag the reasoning delta with its item id so the loop journals it onto
+		// the assembled reasoning block. Full reasoning replay (which also needs
+		// reasoning.encrypted_content) is deferred to M2; journaling the id now
+		// is free and shrinks that change. The id is on the event, or tracked
+		// from the reasoning item's output_item.added by output_index.
+		if id := e.ItemID; id != "" {
+			ev.Meta = map[string]string{metaItemID: id}
+		} else if id := s.reasoningByIndex[e.OutputIndex]; id != "" {
+			ev.Meta = map[string]string{metaItemID: id}
+		}
+		return ev, true, nil
 
 	case "response.refusal.delta":
 		// Surface refusal text to the caller and remember it for the stop reason.
@@ -175,6 +195,9 @@ func (s *stream) handle(frame sseFrame) (provider.StreamEvent, bool, error) {
 				Type: provider.StreamToolCallStart,
 				Tool: &provider.ToolCall{ID: st.callID, Name: st.name, Input: initialArgs(e.Item.Arguments)},
 			}, true, nil
+		}
+		if e.Item != nil && e.Item.Type == "reasoning" && e.Item.ID != "" {
+			s.reasoningByIndex[e.OutputIndex] = e.Item.ID
 		}
 		return provider.StreamEvent{}, false, nil
 

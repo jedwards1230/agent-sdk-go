@@ -132,18 +132,17 @@ func (p *Provider) route(cred provider.Credential) (string, map[string]string, e
 	var base string
 	switch cred.Kind {
 	case provider.CredOAuth:
-		token, account := splitOAuth(cred)
-		if token == "" {
+		if cred.Token == "" {
 			return "", nil, errors.New("openai: empty oauth token")
 		}
 		base = oauthBaseURL
-		headers["Authorization"] = "Bearer " + token
-		// The account id populates the ChatGPT-Account-ID header. When it is
-		// empty the header is omitted rather than sent blank — and crucially the
-		// bearer is never corrupted (see splitOAuth). It becomes reliably present
-		// once provider.Credential.Account lands.
-		if account != "" {
-			headers[headerAccountID] = account
+		headers["Authorization"] = "Bearer " + cred.Token
+		// The ChatGPT-Account-ID header carries the subscription account id.
+		// auth.Store populates cred.Account from the id_token's
+		// chatgpt_account_id claim; when it is empty the header is omitted rather
+		// than sent blank.
+		if cred.Account != "" {
+			headers[headerAccountID] = cred.Account
 		}
 	case provider.CredAPIKey, provider.CredKind(""):
 		if cred.Token == "" {
@@ -165,21 +164,4 @@ func (p *Provider) route(cred provider.Credential) (string, map[string]string, e
 func (p *Provider) reasoningSupported(model string) bool {
 	m, ok := provider.Lookup(model)
 	return ok && m.Reasoning
-}
-
-// splitOAuth extracts the bearer token and ChatGPT account id from an oauth
-// credential.
-//
-// End state: return (cred.Token, cred.Account) once provider.Credential gains an
-// Account field (landing via sdk-core's loop PR). Until then this is a
-// transitional seam. auth.Store carries chatgpt_account_id out of band and does
-// NOT pack it into the token, so in practice the token is unpacked and the
-// account is empty — it must pass through untouched (never corrupt the bearer).
-// A "<account_id>\x00<access_token>" packed form is additionally tolerated so
-// tests can exercise the account-present path; nothing emits it in production.
-func splitOAuth(cred provider.Credential) (token, account string) {
-	if i := strings.IndexByte(cred.Token, 0); i >= 0 {
-		return cred.Token[i+1:], cred.Token[:i]
-	}
-	return cred.Token, ""
 }

@@ -58,6 +58,10 @@ func TestCassetteToolTurn(t *testing.T) {
 		switch ev.Type {
 		case provider.StreamReasoningDelta:
 			reasoning += ev.Text
+			// The reasoning item's id is journaled on every reasoning delta.
+			if ev.Meta[metaItemID] != "rs_1" {
+				t.Errorf("reasoning delta Meta[%s] = %q, want rs_1", metaItemID, ev.Meta[metaItemID])
+			}
 		case provider.StreamTextDelta:
 			text += ev.Text
 		case provider.StreamToolCallStart:
