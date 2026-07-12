@@ -4,6 +4,9 @@
 > supervisor, TUI) is [`jedwards1230/gofer`](https://github.com/jedwards1230/gofer).
 > This document is the repo-scoped cut of the platform design doc; decisions
 > recorded here are settled unless a dated entry supersedes them.
+> Companions: [`DESIGN.md`](DESIGN.md) (normative interfaces: loop seam,
+> permission grammar, manifest schema, sourcing decisions) and
+> [`TESTING.md`](TESTING.md) (test strategy + CI gates).
 
 ## Problem
 
@@ -97,7 +100,7 @@ converges to the correct state regardless of drops.
 
 | Stage | Ships | Proof |
 |---|---|---|
-| **M0 · scaffold** | Two repos, Event/Op types, compose skeleton, CI + golden-file harness | `compose.Load()` returns a session that streams a faux provider |
+| **M0 · scaffold** ✅ shipped 2026-07-12 | Two repos, Event/Op types, compose skeleton, CI + golden-file harness | `compose.Load()` returns a session that streams a faux provider |
 | M1 · one good session | Loop + real provider + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
 | M2 · the daemon | (gofer) supervisor + roster + native ACP; SDK ships `adapters/acp` | an ACP client on a phone drives a session on a laptop |
 | M3 · guardrails | Permission engine + approval messages + grants + sandbox + headless exec + LSP | Claude Code `settings.json` imported and honored |

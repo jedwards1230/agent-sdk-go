@@ -15,7 +15,9 @@ client uses.
 
 Full product requirements + design: [`docs/PRD.md`](docs/PRD.md). Read it
 before structural changes — the contract, tenets, and milestone sequencing are
-all there.
+all there. [`docs/DESIGN.md`](docs/DESIGN.md) holds the normative interfaces
+(loop seam, permission grammar, manifest schema); [`docs/TESTING.md`](docs/TESTING.md)
+the test strategy.
 
 ## Architecture invariants (violations are bugs)
 
