@@ -114,7 +114,7 @@ func TestFinishedReconcilesDeltas(t *testing.T) {
 		finished[1].Content != "Hello! How can I help you today?" {
 		t.Errorf("text finished = %+v", finished[1])
 	}
-	if turn.StopReason != "end_turn" || turn.Usage != (provider.Usage{InputTokens: 9, OutputTokens: 7}) {
+	if turn.StopReason != "end_turn" || !turn.Usage.Equal(provider.Usage{InputTokens: 9, OutputTokens: 7}) {
 		t.Errorf("turn.finished = %+v", turn)
 	}
 }
@@ -127,6 +127,60 @@ func TestPromptContextCanceled(t *testing.T) {
 	cancel()
 	if err := sess.Prompt(ctx, "hello"); err == nil {
 		t.Fatal("Prompt with canceled context returned nil error")
+	}
+}
+
+// noFinishProvider is a minimal [provider.Provider] whose stream yields a
+// couple of reasoning/text deltas and then ends (io.EOF) WITHOUT ever
+// emitting provider.StreamFinished — modeling a dropped connection, where an
+// adapter surfaces a truncated body as a bare io.EOF.
+type noFinishProvider struct{}
+
+func (noFinishProvider) Info() provider.ModelInfo { return provider.ModelInfo{ID: "no-finish"} }
+
+func (noFinishProvider) Stream(_ context.Context, _ provider.Request) (provider.StreamHandle, error) {
+	return provider.SliceStream(
+		provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: "thinking"},
+		provider.StreamEvent{Type: provider.StreamTextDelta, Text: "partial answer"},
+	), nil
+}
+
+// TestPromptFailsClosedOnMissingFinished asserts a provider stream that ends
+// (io.EOF) without ever emitting provider.StreamFinished is NOT treated as a
+// clean turn: Prompt must emit a non-fatal session.error and close the turn
+// with StopReason == provider.StopError, rather than silently reporting an
+// empty stop reason and zero usage as if the turn ended cleanly (finding 3's
+// regression). Mirrors loop.go's TestMissingFinishedFailsClosed.
+func TestPromptFailsClosedOnMissingFinished(t *testing.T) {
+	sess := session.New(noFinishProvider{},
+		session.WithIDGen(func() string { return "sess-test" }),
+		session.WithClock(fixedClock),
+	)
+	sub := sess.Subscribe(event.FilterAll)
+	defer sub.Close()
+
+	if err := sess.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var sawSessionError bool
+	var turn event.TurnFinished
+	for _, ev := range drain(t, sub) {
+		switch e := ev.(type) {
+		case event.SessionError:
+			sawSessionError = true
+			if e.Fatal {
+				t.Errorf("session.error Fatal = true, want non-fatal (matches loop.go)")
+			}
+		case event.TurnFinished:
+			turn = e
+		}
+	}
+	if !sawSessionError {
+		t.Error("want a non-fatal session.error for the missing finished event")
+	}
+	if turn.StopReason != string(provider.StopError) {
+		t.Errorf("turn.finished StopReason = %q, want %q", turn.StopReason, provider.StopError)
 	}
 }
 

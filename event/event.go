@@ -267,17 +267,27 @@ func (e TurnStarted) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// TurnFinished marks the end of a turn, carrying the stop reason and the
-// turn's normalized token usage.
+// TurnFinished marks the end of a turn, carrying the stop reason, the turn's
+// normalized token usage, and (when the model is priced) its cost.
 type TurnFinished struct {
 	meta
 	StopReason string
 	Usage      provider.Usage
+	// Cost is the turn's priced cost, or nil when the model is not in the
+	// pricing registry (e.g. the faux provider).
+	Cost *provider.Cost
 }
 
-// NewTurnFinished builds a turn.finished event.
+// NewTurnFinished builds a turn.finished event without a cost. Use
+// [NewTurnFinishedCost] to attach a priced cost.
 func NewTurnFinished(session, stopReason string, usage provider.Usage) TurnFinished {
 	return TurnFinished{meta: meta{session: session}, StopReason: stopReason, Usage: usage}
+}
+
+// NewTurnFinishedCost builds a turn.finished event carrying a priced cost. A nil
+// cost is equivalent to [NewTurnFinished].
+func NewTurnFinishedCost(session, stopReason string, usage provider.Usage, cost *provider.Cost) TurnFinished {
+	return TurnFinished{meta: meta{session: session}, StopReason: stopReason, Usage: usage, Cost: cost}
 }
 
 // Kind returns KindTurnFinished.
@@ -286,13 +296,14 @@ func (TurnFinished) Kind() string { return KindTurnFinished }
 // Tier returns TierMustDeliver.
 func (TurnFinished) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {stop_reason, usage}.
+// MarshalJSON encodes the envelope plus {stop_reason, usage, cost?}.
 func (e TurnFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
 		StopReason string         `json:"stop_reason"`
 		Usage      provider.Usage `json:"usage"`
-	}{baseEnvelope(e), e.StopReason, e.Usage})
+		Cost       *provider.Cost `json:"cost,omitempty"`
+	}{baseEnvelope(e), e.StopReason, e.Usage, e.Cost})
 }
 
 func (e TurnFinished) withMeta(seq uint64, ts time.Time) Event {

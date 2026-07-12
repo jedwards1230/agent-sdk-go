@@ -19,6 +19,82 @@ implementer should need no other context.
   message than any provider speaks; project down at the call boundary
   (`convertToLLM`), never up.
 
+**Implementation (M1, `loop/`).** `loop.Run(ctx, Config, messages) (Result,
+error)` drives the loop: each iteration is one model call (a `turn.*` pair
+carrying that call's usage + priced cost), the provider stream is converted to
+contract events (`message.*`, `tool.call.*`), and on a `tool_use` stop the loop
+executes the requested tools and appends `tool_result` blocks before the next
+call. Hooks are never-throw — a hook's error emits a non-fatal `session.error`
+and the loop proceeds with the pre-hook value. The loop consumes a `ToolRegistry`
+interface declared consumer-side in `loop/`; `loop.FromRegistry(*tool.Registry)`
+adapts the builtin `tool.Registry` to it (building `provider.ToolSpec`s from each
+tool's schema). `compose.LoopConfig(m, LoopDeps)` wires a
+provider + model + tools + broker from a manifest; `compose.CredentialSource(m)`
+resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
+
+## Provider parity & credentials (M1)
+
+- **No flagship provider.** `provider.Provider` (`Stream(ctx, Request)
+  (StreamHandle, error)` + `Info() ModelInfo`) is vendor-neutral; Anthropic and
+  OpenAI are peers. `Request` carries the internal message model (`[]Message`,
+  each `Content []ContentBlock`: text / reasoning / tool_use / tool_result /
+  image), `[]ToolSpec`, `System`, and `Params` (max tokens, thinking
+  budget/effort). The provider projects this down to its wire format; never up.
+- **Normalized stream.** `StreamHandle.Next()` yields `StreamEvent`s
+  (`TextDelta`, `ReasoningDelta`, `ToolCallStart/Delta/End`, and a terminal
+  `Finished` carrying `StopReason` + normalized `Usage`). `Usage` has
+  input/output/cache-read/cache-write counters plus a `Raw` map for audit.
+  `provider.Iter` adapts a handle to `iter.Seq2`; `provider.SliceStream` builds
+  a fake handle for tests.
+- **Model registry.** An embedded `id → ModelInfo` table (context window, max
+  output, per-Mtok pricing, reasoning support) backs `Info()` and cost
+  accounting; `CostOf(model, usage)` prices a turn. It is plain data — extend by
+  adding rows.
+- **Credentials.** `provider.CredentialSource.Credential(ctx, providerID)
+  (Credential, error)` decouples providers from the auth package. Kinds are
+  `api_key` and `oauth`; `EnvCredentialSource` (API keys from env vars) ships in
+  provider core, and `auth.Store` (M1) implements the same interface over
+  `~/.gofer/auth.json` (mode `0600`, per-provider entries, refresh handling).
+
+## Auth & credentials (M1)
+
+`auth/` owns `~/.gofer/auth.json` (mode `0600`, atomic temp-file+rename) and
+implements `provider.CredentialSource`, so provider adapters resolve auth
+without importing `auth`. It reuses the provider-core contract directly:
+`auth.CredKind`/`Credential`/`CredentialSource` are aliases of the `provider.*`
+types, and `KindAPIKey`/`KindOAuth` alias `provider.CredAPIKey`/`CredOAuth`. The
+adapter maps `Kind` to the header convention (Anthropic: `x-api-key` vs
+`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`; OpenAI: platform
+key vs the ChatGPT backend with a `ChatGPT-Account-ID` header — both exported
+from `auth`).
+
+Expired OAuth tokens refresh transparently inside `Credential`, single-flighted
+by a ctx-aware in-process write semaphore plus a cross-process advisory flock on
+`~/.gofer/auth.lock`, with a double-check re-read — because refresh tokens rotate
+and a concurrent double-refresh would invalidate the winner. The refresh holds
+that lock across the token-endpoint call, so acquisition honors the caller's
+context: a cancelled `Credential(ctx)` returns promptly rather than waiting out
+an unrelated refresh.
+
+**Login flows** (clean-roomed from MIT/Apache-2.0 references — opencode + pi for
+Anthropic, openai/codex for OpenAI; PKCE S256 throughout). `Login(ctx,
+providerID)` returns the authorize URL and a completion handle — the **SDK
+never opens a browser**. Two shapes:
+
+- **Anthropic** (subscription, code-paste): authorize at `claude.ai/oauth/
+  authorize`, user pastes a `code#state` string, JSON token exchange at
+  `platform.claude.com/v1/oauth/token`. `Login` returns `Redeem(code)`.
+- **OpenAI** (ChatGPT subscription, loopback): authorize at `auth.openai.com`,
+  browser redirects to `http://localhost:1455/auth/callback`, form-encoded
+  exchange; the `chatgpt_account_id` is read from the `id_token`. `Login`
+  returns `Wait()`, which blocks on the local listener. The listener's lifetime
+  is tied to the login ctx (cancellation frees the port) and `Login.Close`
+  releases it explicitly, so an abandoned login never leaks the fixed port.
+
+Tests drive both flows against an `httptest` fake OAuth server (authorize →
+callback/redeem → exchange → refresh → expiry); no live endpoint is ever
+contacted in tests or at build time.
+
 ## Permission rule grammar (M3)
 
 ```

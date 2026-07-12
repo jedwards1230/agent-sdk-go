@@ -43,15 +43,20 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
    git-hosted index file.
 8. **Contain before you classify** — sandboxed execution auto-allows by
    containment; a reviewer judges only what escapes. Fail closed.
+9. **No flagship provider** — Anthropic and OpenAI are peers with full parity
+   (streaming, tool calls, reasoning, usage, OAuth + API key). Nothing is
+   vendor-only unless the other API genuinely lacks the concept (then degrade
+   gracefully, documented). Personal preference is config, never architecture.
 
 ## Package architecture
 
 ```
-provider/    LLM iface + normalized stream
+provider/    LLM iface · normalized stream · model registry · CredentialSource
+auth/        OAuth flows · token store (~/.gofer/auth.json) (M1)
 loop/        runAgentLoop · hooks · StreamFn          (M1)
-session/     event-sourced JSONL tree                 (M0: identity + turn)
+session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
 permission/  rules · grants · escalation cap          (M3)
-tool/        registry + bash/read/edit/grep builtins  (M1)
+tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
 skill/       SKILL.md, two-tier disclosure            (M4)
 plugin/      subprocess JSON-RPC host                 (M4)
 lsp/         server registry · diagnostics            (M3)
@@ -101,7 +106,7 @@ converges to the correct state regardless of drops.
 | Stage | Ships | Proof |
 |---|---|---|
 | **M0 · scaffold** ✅ shipped 2026-07-12 | Two repos, Event/Op types, compose skeleton, CI + golden-file harness | `compose.Load()` returns a session that streams a faux provider |
-| M1 · one good session | Loop + real provider + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
+| M1 · one good session | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
 | M2 · the daemon | (gofer) supervisor + roster + native ACP; SDK ships `adapters/acp` | an ACP client on a phone drives a session on a laptop |
 | M3 · guardrails | Permission engine + approval messages + grants + sandbox + headless exec + LSP | Claude Code `settings.json` imported and honored |
 | M4 · ecosystem | MCP client + skills + plugin-sdk + subprocess host | a plugin from a separate repo adds a tool |
@@ -118,6 +123,14 @@ converges to the correct state regardless of drops.
   compaction-as-entry, context = fold(root→head).
 - **Usage/cost accounting is P0** (lands M1): normalized per-turn usage
   aggregated per session and per model, priced from a model metadata registry.
+- **Subscription OAuth lands M1** (moved up from M3), both vendors: Anthropic
+  (`claude setup-token`-style PKCE) and OpenAI (codex/ChatGPT-subscription
+  login). API-key auth works day one for both. The ToS gray zone is accepted.
+- **Token store**: `~/.gofer/auth.json`, mode `0600`, per-provider entries with
+  refresh-token handling. Providers reach credentials through the
+  `provider.CredentialSource` interface (a static env-var implementation ships
+  in provider core); a keychain backend can layer behind the same interface
+  later.
 - **Fleet/multi-machine is an application concern.** The SDK's only
   accommodations are already tenets: serializable transport-agnostic contract,
   globally-unique session IDs.
