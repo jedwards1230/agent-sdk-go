@@ -7,6 +7,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
 // ErrEntryNotFound is returned by [Journal.Fork] when the requested fork
@@ -58,6 +60,16 @@ func newJournal(id, projectSlug, path string, entries []Entry, w *os.File, idGen
 		idGen:       idGen,
 		clock:       clock,
 	}
+}
+
+// isOpen reports whether the journal still has a live append handle (i.e. has
+// not been [Journal.Close]d). Used by [journalCache] to decide whether a
+// cached journal is still usable — see the cache's type doc for why a live
+// journal is never TTL-evicted.
+func (j *Journal) isOpen() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.w != nil
 }
 
 // ID returns the journal's session id.
@@ -157,25 +169,18 @@ func (j *Journal) Entries() []Entry {
 	return out
 }
 
-// ContextMessage is one rendered item in a session's folded context. It is
-// provider-neutral and decoupled from any provider wire type; a caller
-// projects ToolCalls into that provider's tool_use/tool_result blocks.
-type ContextMessage struct {
-	Role      string
-	Content   string
-	Reasoning string
-	ToolCalls []ToolCallRecord
-}
-
-// Fold returns the session's context: fold(root→HEAD). It walks parent links
-// from HEAD back toward the root, then renders in root-to-head order. An
-// [EntryCompaction] entry encountered while walking backward is the
-// boundary: it is included — rendered as its summary, first in the result —
-// and no further ancestors are walked. [EntryForkPoint] entries are markers
-// and contribute nothing. A malformed payload (which should not occur for
-// entries built through the typed constructors) is skipped rather than
-// causing Fold to fail.
-func (j *Journal) Fold() []ContextMessage {
+// Fold returns the session's context as a [] provider.Message ready to hand a
+// provider directly: fold(root→HEAD). It walks parent links from HEAD back
+// toward the root, then renders in root-to-head order. An [EntryCompaction]
+// entry encountered while walking backward is the boundary: it is included —
+// rendered as a user-role message carrying its summary text, first in the
+// result — and no further ancestors are walked. [EntryForkPoint] entries are
+// markers and contribute nothing. A malformed payload (which should not occur
+// for entries built through the typed constructors) is skipped rather than
+// causing Fold to fail. Every content block's Meta (e.g. a reasoning
+// signature) is preserved verbatim, since it is stored verbatim in the
+// journal.
+func (j *Journal) Fold() []provider.Message {
 	j.mu.Lock()
 	entries := make([]Entry, len(j.entries))
 	copy(entries, j.entries)
@@ -214,7 +219,7 @@ func (j *Journal) Close() error {
 
 // fold implements the pure, lock-free half of [Journal.Fold] over a snapshot
 // of entries in append order.
-func fold(entries []Entry) []ContextMessage {
+func fold(entries []Entry) []provider.Message {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -240,41 +245,41 @@ func fold(entries []Entry) []ContextMessage {
 		cur = entries[idx]
 	}
 
-	out := make([]ContextMessage, 0, len(chain))
+	out := make([]provider.Message, 0, len(chain))
 	for i := len(chain) - 1; i >= 0; i-- {
-		if cm, ok := renderContext(chain[i]); ok {
-			out = append(out, cm)
+		if m, ok := renderContext(chain[i]); ok {
+			out = append(out, m)
 		}
 	}
 	return out
 }
 
-// renderContext renders one entry into a [ContextMessage] per the Fold
+// renderContext renders one entry into a [provider.Message] per the Fold
 // rendering rules. ok is false for fork_point entries (skipped) and for
 // entries whose payload fails to unmarshal.
-func renderContext(e Entry) (ContextMessage, bool) {
+func renderContext(e Entry) (provider.Message, bool) {
 	switch e.Type {
 	case EntryMessage:
-		p, err := e.Message()
+		msg, err := e.Message()
 		if err != nil {
-			return ContextMessage{}, false
+			return provider.Message{}, false
 		}
-		return ContextMessage{Role: p.Role, Content: p.Content, Reasoning: p.Reasoning}, true
+		return msg, true
 	case EntryToolRound:
 		p, err := e.ToolRound()
 		if err != nil {
-			return ContextMessage{}, false
+			return provider.Message{}, false
 		}
-		return ContextMessage{Role: "assistant", ToolCalls: p.Calls}, true
+		return provider.Message{Role: provider.RoleUser, Content: p.Blocks}, true
 	case EntryCompaction:
 		p, err := e.Compaction()
 		if err != nil {
-			return ContextMessage{}, false
+			return provider.Message{}, false
 		}
-		return ContextMessage{Role: "system", Content: p.Summary}, true
+		return provider.Message{Role: provider.RoleUser, Content: []provider.ContentBlock{provider.TextBlock(p.Summary)}}, true
 	case EntryForkPoint:
-		return ContextMessage{}, false
+		return provider.Message{}, false
 	default:
-		return ContextMessage{}, false
+		return provider.Message{}, false
 	}
 }

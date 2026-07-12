@@ -3,6 +3,7 @@ package session_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"reflect"
 	"sync"
 	"testing"
@@ -60,9 +61,9 @@ func TestJournalAppendReplayRoundTrip(t *testing.T) {
 
 	var appended []session.Entry
 	for _, e := range []session.Entry{
-		session.NewMessageEntry("user", "hello", session.WithEntryUsage(provider.Usage{InputTokens: 3})),
-		session.NewMessageEntry("assistant", "hi there", session.WithEntryModel("m1"), session.WithEntryUsage(provider.Usage{OutputTokens: 5})),
-		session.NewToolRoundEntry([]session.ToolCallRecord{{ID: "c1", Name: "read", Result: "ok"}}, session.WithEntryModel("m1")),
+		session.NewMessageEntry(provider.UserText("hello"), session.WithEntryUsage(provider.Usage{InputTokens: 3})),
+		session.NewMessageEntry(provider.AssistantText("hi there"), session.WithEntryModel("m1"), session.WithEntryUsage(provider.Usage{OutputTokens: 5})),
+		session.NewToolRoundEntry([]provider.ContentBlock{provider.ToolResultBlock("c1", "ok", false)}, session.WithEntryModel("m1")),
 		session.NewCompactionEntry("everything so far", ""),
 	} {
 		got, err := j.Append(e)
@@ -120,7 +121,7 @@ func TestJournalFoldLinearChain(t *testing.T) {
 	}
 
 	for _, content := range []string{"one", "two", "three"} {
-		if _, err := j.Append(session.NewMessageEntry("user", content)); err != nil {
+		if _, err := j.Append(session.NewMessageEntry(provider.UserText(content))); err != nil {
 			t.Fatalf("Append: %v", err)
 		}
 	}
@@ -130,15 +131,16 @@ func TestJournalFoldLinearChain(t *testing.T) {
 		t.Fatalf("Fold() len = %d, want 3: %+v", len(got), got)
 	}
 	for i, want := range []string{"one", "two", "three"} {
-		if got[i].Content != want {
-			t.Errorf("Fold()[%d].Content = %q, want %q", i, got[i].Content, want)
+		if got[i].Text() != want {
+			t.Errorf("Fold()[%d].Text() = %q, want %q", i, got[i].Text(), want)
 		}
 	}
 }
 
 // TestJournalFoldCompactionBoundary asserts a compaction entry truncates the
-// fold, rendering its summary as the first (oldest) message and dropping
-// everything before it.
+// fold, rendering its summary as the first (oldest) message — a user-role
+// message re-entering context, per Fold's compaction rendering rule — and
+// dropping everything before it.
 func TestJournalFoldCompactionBoundary(t *testing.T) {
 	ctx := context.Background()
 	store, err := session.NewFileStore(
@@ -154,17 +156,17 @@ func TestJournalFoldCompactionBoundary(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if _, err := j.Append(session.NewMessageEntry("user", "old-1")); err != nil {
+	if _, err := j.Append(session.NewMessageEntry(provider.UserText("old-1"))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	old2, err := j.Append(session.NewMessageEntry("assistant", "old-2"))
+	old2, err := j.Append(session.NewMessageEntry(provider.AssistantText("old-2")))
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if _, err := j.Append(session.NewCompactionEntry("everything before this", old2.ID)); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("user", "new-1")); err != nil {
+	if _, err := j.Append(session.NewMessageEntry(provider.UserText("new-1"))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
@@ -172,10 +174,10 @@ func TestJournalFoldCompactionBoundary(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("Fold() len = %d, want 2: %+v", len(got), got)
 	}
-	if got[0].Role != "system" || got[0].Content != "everything before this" {
-		t.Errorf("Fold()[0] = %+v, want compaction summary first", got[0])
+	if got[0].Role != provider.RoleUser || got[0].Text() != "everything before this" {
+		t.Errorf("Fold()[0] = %+v, want compaction summary first as a user-role message", got[0])
 	}
-	if got[1].Content != "new-1" {
+	if got[1].Text() != "new-1" {
 		t.Errorf("Fold()[1] = %+v, want new-1", got[1])
 	}
 }
@@ -198,14 +200,14 @@ func TestJournalForkBranch(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	a, err := j.Append(session.NewMessageEntry("user", "a"))
+	a, err := j.Append(session.NewMessageEntry(provider.UserText("a")))
 	if err != nil {
 		t.Fatalf("Append a: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("assistant", "b")); err != nil {
+	if _, err := j.Append(session.NewMessageEntry(provider.AssistantText("b"))); err != nil {
 		t.Fatalf("Append b: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("user", "c")); err != nil {
+	if _, err := j.Append(session.NewMessageEntry(provider.UserText("c"))); err != nil {
 		t.Fatalf("Append c: %v", err)
 	}
 
@@ -220,7 +222,7 @@ func TestJournalForkBranch(t *testing.T) {
 		t.Errorf("forkPoint.Parent = %q, want %q (a)", forkPoint.Parent, a.ID)
 	}
 
-	d, err := j.Append(session.NewMessageEntry("assistant", "d"))
+	d, err := j.Append(session.NewMessageEntry(provider.AssistantText("d")))
 	if err != nil {
 		t.Fatalf("Append d: %v", err)
 	}
@@ -232,7 +234,7 @@ func TestJournalForkBranch(t *testing.T) {
 	}
 
 	fold := j.Fold()
-	if len(fold) != 2 || fold[0].Content != "a" || fold[1].Content != "d" {
+	if len(fold) != 2 || fold[0].Text() != "a" || fold[1].Text() != "d" {
 		t.Fatalf("Fold() = %+v, want [a d] content", fold)
 	}
 
@@ -263,7 +265,7 @@ func TestJournalCostAggregation(t *testing.T) {
 	}
 
 	const registered, unregistered = "claude-sonnet-5", "unregistered-model"
-	a, err := j.Append(session.NewMessageEntry("user", "a",
+	a, err := j.Append(session.NewMessageEntry(provider.UserText("a"),
 		session.WithEntryModel(registered), session.WithEntryUsage(provider.Usage{
 			InputTokens: 1_000_000, OutputTokens: 500_000,
 			CacheReadTokens: 2_000_000, CacheWriteTokens: 400_000,
@@ -271,7 +273,7 @@ func TestJournalCostAggregation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("assistant", "b",
+	if _, err := j.Append(session.NewMessageEntry(provider.AssistantText("b"),
 		session.WithEntryModel(unregistered), session.WithEntryUsage(provider.Usage{InputTokens: 200, OutputTokens: 100}))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -281,7 +283,7 @@ func TestJournalCostAggregation(t *testing.T) {
 	if _, err := j.Fork(a.ID); err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("assistant", "c",
+	if _, err := j.Append(session.NewMessageEntry(provider.AssistantText("c"),
 		session.WithEntryModel(registered), session.WithEntryUsage(provider.Usage{InputTokens: 10, OutputTokens: 20}))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -359,7 +361,7 @@ func TestJournalConcurrentAppendRace(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < perWriter; i++ {
-				if _, err := j.Append(session.NewMessageEntry("user", "x")); err != nil {
+				if _, err := j.Append(session.NewMessageEntry(provider.UserText("x"))); err != nil {
 					t.Errorf("writer %d Append %d: %v", w, i, err)
 				}
 			}
@@ -407,5 +409,76 @@ func TestJournalConcurrentAppendRace(t *testing.T) {
 		if entries[i].Parent != entries[i-1].ID {
 			t.Fatalf("entries[%d].Parent = %q, want %q (entries[%d].ID)", i, entries[i].Parent, entries[i-1].ID, i-1)
 		}
+	}
+}
+
+// TestJournalMetaRoundTrip asserts every content block's Meta (e.g. an
+// Anthropic reasoning signature attached to a reasoning or tool_use block)
+// survives verbatim through the journal: marshal to disk, a fresh
+// FileStore.Open reading it back, and Fold projecting the stored entries
+// back to []provider.Message. This is finding 4's regression: the old
+// string-flattened MessagePayload/ToolRoundPayload structurally dropped
+// Meta.
+func TestJournalMetaRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	store1, err := session.NewFileStore(
+		session.WithRoot(root),
+		session.WithStoreIDGen(newCounterIDGen("e")),
+		session.WithStoreClock(newStepClock(time.Now(), time.Second)),
+	)
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+
+	j, err := store1.Create(ctx, "proj")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	reasoning := provider.ReasoningBlock("thinking it through")
+	reasoning.Meta = map[string]string{"anthropic.signature": "sig-abc123"}
+	toolUse := provider.ToolUseBlock("call-1", "read_file", json.RawMessage(`{"path":"a.go"}`))
+	toolUse.Meta = map[string]string{"anthropic.signature": "sig-tooluse"}
+	assistantMsg := provider.Message{
+		Role:    provider.RoleAssistant,
+		Content: []provider.ContentBlock{reasoning, toolUse},
+	}
+	if _, err := j.Append(session.NewMessageEntry(assistantMsg)); err != nil {
+		t.Fatalf("Append message: %v", err)
+	}
+
+	toolResult := provider.ToolResultBlock("call-1", "file contents", false)
+	toolResult.Meta = map[string]string{"openai.item_id": "item-42"}
+	if _, err := j.Append(session.NewToolRoundEntry([]provider.ContentBlock{toolResult})); err != nil {
+		t.Fatalf("Append tool round: %v", err)
+	}
+
+	if err := j.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := store1.Close(); err != nil {
+		t.Fatalf("store1.Close: %v", err)
+	}
+
+	store2, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("NewFileStore (reopen): %v", err)
+	}
+	defer func() { _ = store2.Close() }()
+
+	reopened, err := store2.Open(ctx, j.ID())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	got := reopened.Fold()
+	want := []provider.Message{
+		assistantMsg,
+		{Role: provider.RoleUser, Content: []provider.ContentBlock{toolResult}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Fold() after reopen = %+v, want %+v (Meta must round-trip verbatim)", got, want)
 	}
 }
