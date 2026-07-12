@@ -154,11 +154,12 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	defer func() { _ = stream.Close() }()
 
 	var (
-		open  bool
-		kind  event.MessageKind
-		buf   strings.Builder
-		usage provider.Usage
-		stop  string
+		open     bool
+		kind     event.MessageKind
+		buf      strings.Builder
+		usage    provider.Usage
+		stop     string
+		finished bool
 	)
 	finish := func() {
 		if open {
@@ -210,6 +211,7 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 		case provider.StreamFinished:
 			usage = se.Usage
 			stop = string(se.StopReason)
+			finished = true
 		case provider.StreamToolCallStart, provider.StreamToolCallDelta, provider.StreamToolCallEnd:
 			// Tool calls are typed but not exercised by the M0 session path;
 			// the M1 loop package drives tool execution.
@@ -217,6 +219,15 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 	}
 
 	finish()
+	// Fail closed if the provider ended the stream without a terminal
+	// StreamFinished event (e.g. a dropped connection surfacing as a bare
+	// io.EOF): surface a non-fatal session.error and mark the turn as errored
+	// rather than silently reporting a clean turn with an empty stop reason
+	// and zero usage. Mirrors loop.go's callModel guard.
+	if !finished {
+		s.broker.Publish(event.NewSessionError(s.id, "provider stream ended without a finished event", false))
+		stop = string(provider.StopError)
+	}
 	s.broker.Publish(event.NewTurnFinished(s.id, stop, usage))
 	return nil
 }

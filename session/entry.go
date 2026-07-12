@@ -49,29 +49,23 @@ type Entry struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// MessagePayload is the [Entry.Payload] shape for [EntryMessage] entries.
+// MessagePayload is the [Entry.Payload] shape for [EntryMessage] entries. It
+// stores a [provider.Message]'s content blocks verbatim — including each
+// block's Meta (e.g. an Anthropic reasoning signature) — so the round trip
+// through the journal is lossless.
 type MessagePayload struct {
-	// Role is the speaker: "user", "assistant", or "system".
-	Role string `json:"role"`
-	// Content is the settled message text.
-	Content string `json:"content"`
-	// Reasoning is the settled reasoning text, if any.
-	Reasoning string `json:"reasoning,omitempty"`
+	// Role is the speaker: [provider.RoleUser], [provider.RoleAssistant], or
+	// [provider.RoleSystem].
+	Role provider.Role `json:"role"`
+	// Blocks is the message's content blocks, verbatim.
+	Blocks []provider.ContentBlock `json:"blocks"`
 }
 
-// ToolRoundPayload is the [Entry.Payload] shape for [EntryToolRound] entries.
+// ToolRoundPayload is the [Entry.Payload] shape for [EntryToolRound] entries:
+// the content blocks (typically tool_use/tool_result blocks) assembled for
+// one round of tool use, stored verbatim — including each block's Meta.
 type ToolRoundPayload struct {
-	Calls []ToolCallRecord `json:"calls"`
-}
-
-// ToolCallRecord is one tool invocation and its settled result within a
-// [ToolRoundPayload].
-type ToolCallRecord struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Input   json.RawMessage `json:"input,omitempty"`
-	Result  string          `json:"result,omitempty"`
-	IsError bool            `json:"is_error,omitempty"`
+	Blocks []provider.ContentBlock `json:"blocks"`
 }
 
 // CompactionPayload is the [Entry.Payload] shape for [EntryCompaction]
@@ -98,9 +92,8 @@ var ErrEntryType = errors.New("session: entry type mismatch")
 
 // entryConfig collects [EntryOpt] settings before an entry is constructed.
 type entryConfig struct {
-	model     string
-	usage     *provider.Usage
-	reasoning string
+	model string
+	usage *provider.Usage
 }
 
 // EntryOpt configures an entry at construction; see [NewMessageEntry] and
@@ -115,12 +108,6 @@ func WithEntryModel(model string) EntryOpt {
 // WithEntryUsage sets the token usage a turn-bearing entry consumed.
 func WithEntryUsage(u provider.Usage) EntryOpt {
 	return func(c *entryConfig) { c.usage = &u }
-}
-
-// WithReasoning sets a message entry's reasoning text. It has no effect on
-// entry types other than [EntryMessage].
-func WithReasoning(reasoning string) EntryOpt {
-	return func(c *entryConfig) { c.reasoning = reasoning }
 }
 
 func newEntryConfig(opts []EntryOpt) entryConfig {
@@ -143,12 +130,13 @@ func marshalPayload(v any) json.RawMessage {
 	return b
 }
 
-// NewMessageEntry constructs a message entry. ID, Parent, and Time are left
-// zero; [Journal.Append] fills them in so ids stay monotonic and parents
-// chain correctly.
-func NewMessageEntry(role, content string, opts ...EntryOpt) Entry {
+// NewMessageEntry constructs a message entry from msg, storing its content
+// blocks verbatim — including each block's Meta — so a whole turn's blocks
+// persist losslessly. ID, Parent, and Time are left zero; [Journal.Append]
+// fills them in so ids stay monotonic and parents chain correctly.
+func NewMessageEntry(msg provider.Message, opts ...EntryOpt) Entry {
 	cfg := newEntryConfig(opts)
-	payload := MessagePayload{Role: role, Content: content, Reasoning: cfg.reasoning}
+	payload := MessagePayload{Role: msg.Role, Blocks: msg.Content}
 	return Entry{
 		Type:    EntryMessage,
 		Model:   cfg.model,
@@ -157,10 +145,12 @@ func NewMessageEntry(role, content string, opts ...EntryOpt) Entry {
 	}
 }
 
-// NewToolRoundEntry constructs a tool-round entry from calls.
-func NewToolRoundEntry(calls []ToolCallRecord, opts ...EntryOpt) Entry {
+// NewToolRoundEntry constructs a tool-round entry from blocks (typically the
+// tool_use/tool_result content blocks assembled for one round of tool use),
+// storing them verbatim — including each block's Meta.
+func NewToolRoundEntry(blocks []provider.ContentBlock, opts ...EntryOpt) Entry {
 	cfg := newEntryConfig(opts)
-	payload := ToolRoundPayload{Calls: calls}
+	payload := ToolRoundPayload{Blocks: blocks}
 	return Entry{
 		Type:    EntryToolRound,
 		Model:   cfg.model,
@@ -189,17 +179,18 @@ func newForkPointEntry(at string) Entry {
 	}
 }
 
-// Message unmarshals e's payload as a [MessagePayload]. It returns
-// [ErrEntryType] if e is not an [EntryMessage].
-func (e Entry) Message() (MessagePayload, error) {
-	var p MessagePayload
+// Message unmarshals e's payload as a [MessagePayload] and returns it
+// projected back to a [provider.Message], with every content block (and its
+// Meta) intact. It returns [ErrEntryType] if e is not an [EntryMessage].
+func (e Entry) Message() (provider.Message, error) {
 	if e.Type != EntryMessage {
-		return p, fmt.Errorf("session: entry %s is %s, not %s: %w", e.ID, e.Type, EntryMessage, ErrEntryType)
+		return provider.Message{}, fmt.Errorf("session: entry %s is %s, not %s: %w", e.ID, e.Type, EntryMessage, ErrEntryType)
 	}
+	var p MessagePayload
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
-		return MessagePayload{}, fmt.Errorf("session: unmarshal message payload of entry %s: %w", e.ID, err)
+		return provider.Message{}, fmt.Errorf("session: unmarshal message payload of entry %s: %w", e.ID, err)
 	}
-	return p, nil
+	return provider.Message{Role: p.Role, Content: p.Blocks}, nil
 }
 
 // ToolRound unmarshals e's payload as a [ToolRoundPayload]. It returns

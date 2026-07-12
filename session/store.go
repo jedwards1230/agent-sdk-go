@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -51,6 +52,15 @@ type FileStore struct {
 	clock  func() time.Time
 	logger func(string, ...any)
 	cache  *journalCache
+
+	// openMu serializes the check-then-act sequence in Open (cache miss →
+	// read from disk → open an append fd → cache.put) so two concurrent
+	// Opens of the same uncached id single-flight onto one *Journal instead
+	// of racing to build independent journals/fds for it (see Open's doc).
+	// Open is infrequent (interactive resume/status checks) and Append never
+	// goes through the store, so a store-wide lock here does not contend
+	// with the hot Append path.
+	openMu sync.Mutex
 }
 
 // storeConfig holds [NewFileStore] options.
@@ -103,15 +113,20 @@ func WithStoreIDGen(f func() string) StoreOption {
 	}
 }
 
-// WithTTL sets how long a hot journal stays cached before Open reloads it
-// from disk. Default 5 minutes. A non-positive duration disables caching.
+// WithTTL sets how long an already-closed journal's now-unusable cache entry
+// lingers before it is reaped for memory. Default 5 minutes. It has no
+// effect on a journal that is still open for writing: a live journal is
+// pinned in the cache and never evicted while open, however long it sits
+// idle past ttl — evicting (and closing) it would pull its append handle out
+// from under whoever holds it, and closing is a correctness concern, not a
+// caching one (see cache.go). So a non-positive duration does not "disable"
+// caching; it just reaps closed entries immediately instead of waiting.
 func WithTTL(d time.Duration) StoreOption {
 	return func(c *storeConfig) { c.ttl = d }
 }
 
 // WithLogger overrides the store's warning logger (used for torn-write
-// repair and cache-eviction diagnostics). Default [log.Printf]. A nil logger
-// is ignored.
+// repair diagnostics). Default [log.Printf]. A nil logger is ignored.
 func WithLogger(f func(string, ...any)) StoreOption {
 	return func(c *storeConfig) {
 		if f != nil {
@@ -151,7 +166,7 @@ func NewFileStore(opts ...StoreOption) (*FileStore, error) {
 		idGen:  cfg.idGen,
 		clock:  cfg.clock,
 		logger: cfg.logger,
-		cache:  newJournalCache(cfg.ttl, cfg.clock, cfg.logger),
+		cache:  newJournalCache(cfg.ttl, cfg.clock),
 	}, nil
 }
 
@@ -212,11 +227,24 @@ func (s *FileStore) Create(ctx context.Context, projectSlug string) (*Journal, e
 	return j, nil
 }
 
-// Open resumes an existing session by id.
+// Open resumes an existing session by id. Concurrent Opens of the same
+// uncached id are single-flighted via openMu (double-checked locking against
+// the cache) so they return the identical *Journal rather than racing to
+// build independent journals/fds for the same file: without that, the loser
+// of the race could have its live journal closed out from under it by the
+// cache (see cache.go), or two live journals could silently fork the tree.
 func (s *FileStore) Open(ctx context.Context, id string) (*Journal, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if j, ok := s.cache.get(id); ok {
+		return j, nil
+	}
+
+	s.openMu.Lock()
+	defer s.openMu.Unlock()
+	// Re-check under the lock: another goroutine may have finished opening
+	// (or creating) this id while we were waiting for openMu.
 	if j, ok := s.cache.get(id); ok {
 		return j, nil
 	}

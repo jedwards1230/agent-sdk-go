@@ -6,9 +6,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/session"
 )
 
@@ -105,10 +107,14 @@ func TestFileStorePathSafety(t *testing.T) {
 	}
 }
 
-// TestFileStoreOpenCachesWithinTTL asserts repeated Opens of the same id
-// return the identical *Journal while hot, and a fresh *Journal once the
-// injected clock advances past TTL — with equal contents across the reload.
-func TestFileStoreOpenCachesWithinTTL(t *testing.T) {
+// TestFileStoreLiveJournalPinnedPastTTL asserts a journal with an open write
+// handle stays pinned in the cache — and remains Appendable through the
+// *Journal Open returns — even once the injected clock advances past TTL
+// (finding 2's regression: TTL eviction must never close a live writer's
+// journal out from under it). Only after the journal is explicitly Closed
+// does a subsequent Open reload a fresh *Journal from disk, with equal
+// contents.
+func TestFileStoreLiveJournalPinnedPastTTL(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -130,28 +136,100 @@ func TestFileStoreOpenCachesWithinTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := j1.Append(session.NewMessageEntry("user", "hi")); err != nil {
+	if _, err := j1.Append(session.NewMessageEntry(provider.UserText("hi"))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
-	again, err := store.Open(ctx, j1.ID())
+	// Advance the clock well past TTL WITHOUT closing the journal: it must
+	// stay pinned live in the cache.
+	now = now.Add(ttl + time.Second)
+
+	pinned, err := store.Open(ctx, j1.ID())
 	if err != nil {
-		t.Fatalf("Open (within TTL): %v", err)
+		t.Fatalf("Open (past TTL, still open): %v", err)
 	}
-	if again != j1 {
-		t.Errorf("Open within TTL returned a different *Journal (cache miss unexpected)")
+	if pinned != j1 {
+		t.Fatalf("Open past TTL on a still-open journal returned a different *Journal (expected pinned)")
+	}
+	// The journal returned by the past-TTL Open must still be a live,
+	// Appendable handle — the finding-2 regression is a closed fd here.
+	if _, err := pinned.Append(session.NewMessageEntry(provider.UserText("still alive"))); err != nil {
+		t.Fatalf("Append through pinned journal after past-TTL Open: %v", err)
 	}
 
-	now = now.Add(ttl + time.Second)
+	if err := j1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 
 	reloaded, err := store.Open(ctx, j1.ID())
 	if err != nil {
-		t.Fatalf("Open (past TTL): %v", err)
+		t.Fatalf("Open (after Close): %v", err)
 	}
 	if reloaded == j1 {
-		t.Errorf("Open past TTL returned the same *Journal (expected reload)")
+		t.Errorf("Open after Close returned the same *Journal (expected a fresh reload)")
 	}
 	entriesEqual(t, reloaded.Entries(), j1.Entries())
+}
+
+// TestFileStoreConcurrentOpenSameID asserts N concurrent Opens of the same
+// uncached, on-disk session id single-flight onto one *Journal (finding 1):
+// without mutual exclusion, two Opens racing a cache miss could each build
+// an independent journal/fd for the same file, and the loser's live journal
+// could be closed by the cache after Open already returned it.
+func TestFileStoreConcurrentOpenSameID(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	// Seed an on-disk session via one store, then close it so the id is not
+	// pre-cached anywhere: every goroutine below races a genuine cache miss.
+	seed, err := session.NewFileStore(session.WithRoot(root), session.WithStoreIDGen(newCounterIDGen("s")))
+	if err != nil {
+		t.Fatalf("NewFileStore (seed): %v", err)
+	}
+	j, err := seed.Create(ctx, "proj")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	id := j.ID()
+	if err := seed.Close(); err != nil {
+		t.Fatalf("seed.Close: %v", err)
+	}
+
+	store, err := session.NewFileStore(session.WithRoot(root))
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const n = 16
+	journals := make([]*session.Journal, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			journals[i], errs[i] = store.Open(ctx, id)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("Open goroutine %d: %v", i, err)
+		}
+	}
+	for i := 1; i < n; i++ {
+		if journals[i] != journals[0] {
+			t.Fatalf("Open goroutine %d returned a different *Journal than goroutine 0 (single-flight broken)", i)
+		}
+	}
+
+	// The single shared *Journal every Open returned must still be a live,
+	// Appendable handle (no ErrJournalClosed from a raced-and-lost close).
+	if _, err := journals[0].Append(session.NewMessageEntry(provider.UserText("after concurrent open"))); err != nil {
+		t.Fatalf("Append through the shared journal: %v", err)
+	}
 }
 
 // TestFileStoreTornWriteResume builds a journal file with a valid entry
@@ -171,7 +249,7 @@ func TestFileStoreTornWriteResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	good, err := j.Append(session.NewMessageEntry("user", "good line"))
+	good, err := j.Append(session.NewMessageEntry(provider.UserText("good line")))
 	if err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -216,7 +294,7 @@ func TestFileStoreTornWriteResume(t *testing.T) {
 
 	// The file must be physically repaired: the next Append produces a
 	// parseable last line.
-	next, err := reopened.Append(session.NewMessageEntry("assistant", "after repair"))
+	next, err := reopened.Append(session.NewMessageEntry(provider.AssistantText("after repair")))
 	if err != nil {
 		t.Fatalf("Append after repair: %v", err)
 	}
@@ -253,7 +331,7 @@ func TestFileStoreTornWriteInteriorCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := j.Append(session.NewMessageEntry("user", "one")); err != nil {
+	if _, err := j.Append(session.NewMessageEntry(provider.UserText("one"))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	path := j.Path()
@@ -263,7 +341,7 @@ func TestFileStoreTornWriteInteriorCorruption(t *testing.T) {
 
 	// Append a corrupt interior line, then a valid trailing line, directly to
 	// the file — so the corruption is interior, not the torn final line.
-	trailer := session.NewMessageEntry("user", "trailing valid line")
+	trailer := session.NewMessageEntry(provider.UserText("trailing valid line"))
 	trailer.ID = "e-000099"
 	trailerJSON, err := json.Marshal(trailer)
 	if err != nil {

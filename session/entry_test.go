@@ -3,6 +3,7 @@ package session_test
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
@@ -11,12 +12,18 @@ import (
 
 // TestEntryConstructorsAndAccessorsRoundTrip asserts each typed constructor
 // produces an entry whose typed accessor recovers the payload, and that
-// Model/Usage/Reasoning options land where expected.
+// Model/Usage options land where expected.
 func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 	usage := provider.Usage{InputTokens: 12, OutputTokens: 34}
 
-	msg := session.NewMessageEntry("assistant", "hello there",
-		session.WithReasoning("thinking..."),
+	want := provider.Message{
+		Role: provider.RoleAssistant,
+		Content: []provider.ContentBlock{
+			provider.ReasoningBlock("thinking..."),
+			provider.TextBlock("hello there"),
+		},
+	}
+	msg := session.NewMessageEntry(want,
 		session.WithEntryModel("model-a"),
 		session.WithEntryUsage(usage),
 	)
@@ -29,22 +36,22 @@ func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 	if msg.Usage == nil || !msg.Usage.Equal(usage) {
 		t.Errorf("msg.Usage = %+v, want %+v", msg.Usage, usage)
 	}
-	mp, err := msg.Message()
+	got, err := msg.Message()
 	if err != nil {
 		t.Fatalf("Message(): %v", err)
 	}
-	if mp.Role != "assistant" || mp.Content != "hello there" || mp.Reasoning != "thinking..." {
-		t.Errorf("Message() = %+v, unexpected", mp)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Message() = %+v, want %+v", got, want)
 	}
 
-	calls := []session.ToolCallRecord{{ID: "c1", Name: "read", Result: "ok"}}
-	tr := session.NewToolRoundEntry(calls, session.WithEntryModel("model-b"))
+	blocks := []provider.ContentBlock{provider.ToolResultBlock("c1", "ok", false)}
+	tr := session.NewToolRoundEntry(blocks, session.WithEntryModel("model-b"))
 	trp, err := tr.ToolRound()
 	if err != nil {
 		t.Fatalf("ToolRound(): %v", err)
 	}
-	if len(trp.Calls) != 1 || trp.Calls[0].ID != "c1" {
-		t.Errorf("ToolRound() = %+v, unexpected", trp)
+	if !reflect.DeepEqual(trp.Blocks, blocks) {
+		t.Errorf("ToolRound() = %+v, want %+v", trp.Blocks, blocks)
 	}
 	if tr.Model != "model-b" {
 		t.Errorf("tr.Model = %q, want model-b", tr.Model)
@@ -63,7 +70,7 @@ func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 // TestEntryAccessorWrongTypeErrors asserts calling a typed accessor on a
 // mismatched entry type returns a wrapped ErrEntryType.
 func TestEntryAccessorWrongTypeErrors(t *testing.T) {
-	msg := session.NewMessageEntry("user", "hi")
+	msg := session.NewMessageEntry(provider.UserText("hi"))
 
 	if _, err := msg.ToolRound(); !errors.Is(err, session.ErrEntryType) {
 		t.Errorf("ToolRound() on message entry: err = %v, want ErrEntryType", err)
@@ -84,7 +91,7 @@ func TestEntryAccessorWrongTypeErrors(t *testing.T) {
 // TestEntryJSONShape asserts Entry marshals with the documented field names
 // and omits empty optional fields.
 func TestEntryJSONShape(t *testing.T) {
-	e := session.NewMessageEntry("user", "hi")
+	e := session.NewMessageEntry(provider.UserText("hi"))
 	e.ID = "id-1"
 
 	b, err := json.Marshal(e)
