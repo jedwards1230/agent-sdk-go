@@ -163,7 +163,7 @@ hooks:
 | Need | Verdict | Source |
 |---|---|---|
 | MCP client | **adopt** | `modelcontextprotocol/go-sdk` (official) |
-| ACP protocol | **adopt** | `coder/acp-go-sdk` (Apache-2.0; protocol layer only — the loop is ours) |
+| ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in gofer, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
 | WASM plugin tier | **adopt** | `knqyf263/go-plugin` (wazero, typed interfaces) |
 | Provider + streaming | build | thin, with a cross-vendor content-block message model |
 | Loop + hooks | build | clean-room the proven seams; **FSL-licensed prior art is read-only, never a dependency** |
