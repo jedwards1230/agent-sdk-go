@@ -294,7 +294,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 		// (every tool_use gets a matching tool_result).
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
-			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, nil))
+			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, true, nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
@@ -313,7 +313,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 
 		res = r.afterTool(ctx, call, res)
 
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.Diagnostics))
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
 		blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, res.IsError))
 	}
 	return blocks
@@ -462,7 +462,7 @@ func (c *converter) closeMessage() {
 		return
 	}
 	content := c.buf.String()
-	c.broker.Publish(event.NewMessageFinished(c.sid, c.kind, content))
+	c.broker.Publish(event.NewMessageFinishedMeta(c.sid, c.kind, content, c.curMeta))
 	var block provider.ContentBlock
 	switch c.kind {
 	case event.MessageReasoning:

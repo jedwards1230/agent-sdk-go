@@ -135,3 +135,26 @@ done:
 		t.Error("expected a turn.finished event through the broker")
 	}
 }
+
+// TestLoopConfigResolvesRealProvider asserts a non-faux manifest resolves
+// through providers.Build to the matching adapter, using the manifest's
+// env-based credential source (no CredentialSource override, no network).
+func TestLoopConfigResolvesRealProvider(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+
+	b := event.NewBroker()
+	defer b.Close()
+
+	m := &compose.Manifest{
+		Name:     "demo",
+		Model:    "claude-sonnet-5",
+		Provider: compose.ProviderConfig{Type: "anthropic", Auth: "env:ANTHROPIC_API_KEY"},
+	}
+	cfg, err := compose.LoopConfig(context.Background(), m, compose.LoopDeps{Broker: b, SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("LoopConfig: %v", err)
+	}
+	if got := cfg.Provider.Info().Provider; got != "anthropic" {
+		t.Errorf("Provider.Info().Provider = %q, want anthropic", got)
+	}
+}

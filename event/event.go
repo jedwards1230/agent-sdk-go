@@ -377,16 +377,29 @@ func (e MessageDelta) withMeta(seq uint64, ts time.Time) Event {
 }
 
 // MessageFinished closes a message and carries its full settled content, which
-// reconciles any dropped deltas.
+// reconciles any dropped deltas. Meta carries opaque, provider-namespaced
+// per-block metadata accumulated over the message's deltas (e.g.
+// "anthropic.signature", "openai.item_id") that a client journaling from the
+// event stream must round-trip verbatim on a later turn; the event layer never
+// interprets it.
 type MessageFinished struct {
 	meta
 	MessageKind MessageKind
 	Content     string
+	Meta        map[string]string
 }
 
-// NewMessageFinished builds a message.finished event.
+// NewMessageFinished builds a message.finished event with no per-block
+// metadata. Use [NewMessageFinishedMeta] to attach it.
 func NewMessageFinished(session string, kind MessageKind, content string) MessageFinished {
-	return MessageFinished{meta: meta{session: session}, MessageKind: kind, Content: content}
+	return NewMessageFinishedMeta(session, kind, content, nil)
+}
+
+// NewMessageFinishedMeta builds a message.finished event carrying opaque
+// provider-namespaced per-block metadata (e.g. "anthropic.signature",
+// "openai.item_id") for a client to round-trip verbatim.
+func NewMessageFinishedMeta(session string, kind MessageKind, content string, blockMeta map[string]string) MessageFinished {
+	return MessageFinished{meta: meta{session: session}, MessageKind: kind, Content: content, Meta: blockMeta}
 }
 
 // Kind returns KindMessageFinished.
@@ -395,13 +408,14 @@ func (MessageFinished) Kind() string { return KindMessageFinished }
 // Tier returns TierMustDeliver.
 func (MessageFinished) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {kind, content}.
+// MarshalJSON encodes the envelope plus {kind, content, meta?}.
 func (e MessageFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
-		MessageKind MessageKind `json:"kind"`
-		Content     string      `json:"content"`
-	}{baseEnvelope(e), e.MessageKind, e.Content})
+		MessageKind MessageKind       `json:"kind"`
+		Content     string            `json:"content"`
+		Meta        map[string]string `json:"meta,omitempty"`
+	}{baseEnvelope(e), e.MessageKind, e.Content, e.Meta})
 }
 
 func (e MessageFinished) withMeta(seq uint64, ts time.Time) Event {
@@ -478,17 +492,19 @@ func (e ToolCallDelta) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// ToolCallFinished closes a tool call with its result and optional diagnostics.
+// ToolCallFinished closes a tool call with its result, whether it errored, and
+// optional diagnostics.
 type ToolCallFinished struct {
 	meta
 	ID          string
 	Result      string
+	IsError     bool
 	Diagnostics []string
 }
 
 // NewToolCallFinished builds a tool.call.finished event.
-func NewToolCallFinished(session, id, result string, diagnostics []string) ToolCallFinished {
-	return ToolCallFinished{meta: meta{session: session}, ID: id, Result: result, Diagnostics: diagnostics}
+func NewToolCallFinished(session, id, result string, isError bool, diagnostics []string) ToolCallFinished {
+	return ToolCallFinished{meta: meta{session: session}, ID: id, Result: result, IsError: isError, Diagnostics: diagnostics}
 }
 
 // Kind returns KindToolCallFinished.
@@ -497,14 +513,15 @@ func (ToolCallFinished) Kind() string { return KindToolCallFinished }
 // Tier returns TierMustDeliver.
 func (ToolCallFinished) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {id, result, diagnostics?}.
+// MarshalJSON encodes the envelope plus {id, result, is_error?, diagnostics?}.
 func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
 		ID          string   `json:"id"`
 		Result      string   `json:"result"`
+		IsError     bool     `json:"is_error,omitempty"`
 		Diagnostics []string `json:"diagnostics,omitempty"`
-	}{baseEnvelope(e), e.ID, e.Result, e.Diagnostics})
+	}{baseEnvelope(e), e.ID, e.Result, e.IsError, e.Diagnostics})
 }
 
 func (e ToolCallFinished) withMeta(seq uint64, ts time.Time) Event {
