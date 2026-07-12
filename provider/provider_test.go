@@ -99,13 +99,13 @@ func TestStaticEnvDefaults(t *testing.T) {
 }
 
 func TestStaticCredentialSource(t *testing.T) {
-	src := provider.StaticCredentialSource{Cred: provider.Credential{Kind: provider.CredOAuth, Token: "bearer"}}
+	src := provider.StaticCredentialSource{Cred: provider.Credential{Kind: provider.CredOAuth, Token: "bearer", Account: "acct-123"}}
 	cred, err := src.Credential(context.Background(), "anything")
 	if err != nil {
 		t.Fatalf("Credential: %v", err)
 	}
-	if cred.Kind != provider.CredOAuth || cred.Token != "bearer" {
-		t.Errorf("cred = %+v", cred)
+	if cred.Kind != provider.CredOAuth || cred.Token != "bearer" || cred.Account != "acct-123" {
+		t.Errorf("cred = %+v (Account must round-trip for ChatGPT-subscription OAuth)", cred)
 	}
 	if _, err := (provider.StaticCredentialSource{}).Credential(context.Background(), "x"); err == nil {
 		t.Error("empty static credential should error")

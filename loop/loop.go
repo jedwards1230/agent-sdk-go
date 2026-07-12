@@ -376,9 +376,10 @@ type converter struct {
 	sid    string
 
 	// open message (text or reasoning) state.
-	open bool
-	kind event.MessageKind
-	buf  strings.Builder
+	open    bool
+	kind    event.MessageKind
+	buf     strings.Builder
+	curMeta map[string]string // opaque per-block metadata for the open message
 
 	// in-flight tool call assembly, keyed by id in call order.
 	toolIdx map[string]int
@@ -396,6 +397,22 @@ type toolAssembly struct {
 	name string
 	buf  strings.Builder
 	seed json.RawMessage
+	meta map[string]string
+}
+
+// mergeMeta copies src into dst (allocating dst if needed) and returns it. It is
+// used to accumulate opaque per-block metadata across a block's stream events.
+func mergeMeta(dst, src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string]string, len(src))
+	}
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func newConverter(b *event.Broker, sid string) *converter {
@@ -405,15 +422,15 @@ func newConverter(b *event.Broker, sid string) *converter {
 func (c *converter) handle(se provider.StreamEvent) {
 	switch se.Type {
 	case provider.StreamTextDelta:
-		c.delta(event.MessageText, se.Text)
+		c.delta(event.MessageText, se.Text, se.Meta)
 	case provider.StreamReasoningDelta:
-		c.delta(event.MessageReasoning, se.Text)
+		c.delta(event.MessageReasoning, se.Text, se.Meta)
 	case provider.StreamToolCallStart:
-		c.toolStart(se.Tool)
+		c.toolStart(se.Tool, se.Meta)
 	case provider.StreamToolCallDelta:
-		c.toolDelta(se.Tool)
+		c.toolDelta(se.Tool, se.Meta)
 	case provider.StreamToolCallEnd:
-		c.toolEnd(se.Tool)
+		c.toolEnd(se.Tool, se.Meta)
 	case provider.StreamFinished:
 		c.usage = se.Usage
 		c.stop = se.StopReason
@@ -421,9 +438,10 @@ func (c *converter) handle(se provider.StreamEvent) {
 	}
 }
 
-// delta opens a message of the given kind (closing a different open message)
-// and emits a message.delta while accumulating the settled content.
-func (c *converter) delta(kind event.MessageKind, chunk string) {
+// delta opens a message of the given kind (closing a different open message),
+// emits a message.delta while accumulating the settled content, and merges any
+// opaque per-block metadata for the block.
+func (c *converter) delta(kind event.MessageKind, chunk string, meta map[string]string) {
 	if c.open && c.kind != kind {
 		c.closeMessage()
 	}
@@ -432,49 +450,55 @@ func (c *converter) delta(kind event.MessageKind, chunk string) {
 		c.open = true
 		c.broker.Publish(event.NewMessageStarted(c.sid, kind))
 	}
+	c.curMeta = mergeMeta(c.curMeta, meta)
 	c.buf.WriteString(chunk)
 	c.broker.Publish(event.NewMessageDelta(c.sid, kind, chunk))
 }
 
 // closeMessage emits message.finished for the open message and records the
-// settled content block.
+// settled content block, carrying any accumulated per-block metadata.
 func (c *converter) closeMessage() {
 	if !c.open {
 		return
 	}
 	content := c.buf.String()
 	c.broker.Publish(event.NewMessageFinished(c.sid, c.kind, content))
+	var block provider.ContentBlock
 	switch c.kind {
 	case event.MessageReasoning:
-		c.blocks = append(c.blocks, provider.ReasoningBlock(content))
+		block = provider.ReasoningBlock(content)
 	default:
-		c.blocks = append(c.blocks, provider.TextBlock(content))
+		block = provider.TextBlock(content)
 	}
+	block.Meta = c.curMeta
+	c.blocks = append(c.blocks, block)
 	c.buf.Reset()
+	c.curMeta = nil
 	c.open = false
 }
 
-func (c *converter) toolStart(t *provider.ToolCall) {
+func (c *converter) toolStart(t *provider.ToolCall, meta map[string]string) {
 	if t == nil {
 		return
 	}
 	c.closeMessage()
 	c.toolIdx[t.ID] = len(c.partial)
-	c.partial = append(c.partial, toolAssembly{id: t.ID, name: t.Name, seed: t.Input})
+	c.partial = append(c.partial, toolAssembly{id: t.ID, name: t.Name, seed: t.Input, meta: mergeMeta(nil, meta)})
 	c.broker.Publish(event.NewToolCallStarted(c.sid, t.ID, t.Name, t.Input))
 }
 
-func (c *converter) toolDelta(t *provider.ToolCall) {
+func (c *converter) toolDelta(t *provider.ToolCall, meta map[string]string) {
 	if t == nil {
 		return
 	}
 	if i, ok := c.toolIdx[t.ID]; ok {
 		c.partial[i].buf.WriteString(t.Delta)
+		c.partial[i].meta = mergeMeta(c.partial[i].meta, meta)
 	}
 	c.broker.Publish(event.NewToolCallDelta(c.sid, t.ID, t.Delta))
 }
 
-func (c *converter) toolEnd(t *provider.ToolCall) {
+func (c *converter) toolEnd(t *provider.ToolCall, meta map[string]string) {
 	if t == nil {
 		return
 	}
@@ -494,8 +518,11 @@ func (c *converter) toolEnd(t *provider.ToolCall) {
 	if t.Name != "" {
 		a.name = t.Name
 	}
+	a.meta = mergeMeta(a.meta, meta)
 	input := assembledInput(a, t.Input)
-	c.blocks = append(c.blocks, provider.ToolUseBlock(a.id, a.name, input))
+	block := provider.ToolUseBlock(a.id, a.name, input)
+	block.Meta = a.meta
+	c.blocks = append(c.blocks, block)
 	c.calls = append(c.calls, ToolCall{ID: a.id, Name: a.name, Input: input})
 }
 
@@ -521,7 +548,9 @@ func (c *converter) flush() {
 			continue
 		}
 		input := assembledInput(a, nil)
-		c.blocks = append(c.blocks, provider.ToolUseBlock(a.id, a.name, input))
+		block := provider.ToolUseBlock(a.id, a.name, input)
+		block.Meta = a.meta
+		c.blocks = append(c.blocks, block)
 		c.calls = append(c.calls, ToolCall{ID: a.id, Name: a.name, Input: input})
 	}
 }
