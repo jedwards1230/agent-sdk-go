@@ -76,6 +76,7 @@ type fakeTool struct {
 	result loop.ToolResult
 	err    error
 	gotIn  json.RawMessage
+	runs   int
 }
 
 func (f *fakeTool) Get(name string) (loop.Tool, bool) {
@@ -88,6 +89,7 @@ func (f *fakeTool) Specs() []provider.ToolSpec {
 	return []provider.ToolSpec{{Name: f.name}}
 }
 func (f *fakeTool) Run(_ context.Context, input json.RawMessage) (loop.ToolResult, error) {
+	f.runs++
 	f.gotIn = input
 	return f.result, f.err
 }
@@ -333,6 +335,101 @@ func TestIterationCap(t *testing.T) {
 	// non-fatal session.error announcing the cap.
 	if countKind(collectKinds(sub), event.KindSessionError) != 1 {
 		t.Error("want a session.error announcing the iteration cap")
+	}
+}
+
+func TestDuplicateToolEndExecutesOnce(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+
+	// A malformed stream emits StreamToolCallEnd twice for the same id.
+	dupTurn := []provider.StreamEvent{
+		{Type: provider.StreamToolCallStart, Tool: &provider.ToolCall{ID: "t1", Name: "echo"}},
+		{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: "t1", Name: "echo", Input: json.RawMessage(`{"a":1}`)}},
+		{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: "t1", Name: "echo", Input: json.RawMessage(`{"a":1}`)}},
+		{Type: provider.StreamFinished, StopReason: provider.StopToolUse},
+	}
+	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
+	cfg := baseConfig(b, scripted(dupTurn, textTurn("done", provider.StopEndTurn)))
+	cfg.Tools = tool
+
+	res, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tool.runs != 1 {
+		t.Errorf("tool executed %d times, want exactly 1 (duplicate End must not double-execute)", tool.runs)
+	}
+	// The assistant turn must contain exactly one tool_use block.
+	var toolUses int
+	for _, blk := range res.Messages[1].Content {
+		if blk.Type == provider.BlockToolUse {
+			toolUses++
+		}
+	}
+	if toolUses != 1 {
+		t.Errorf("assistant turn has %d tool_use blocks, want 1", toolUses)
+	}
+}
+
+func TestMidStreamCancellation(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterAll, 256)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// The stream yields one text delta and cancels the context as a side effect,
+	// so the loop hits its in-call ctx check on the next iteration.
+	stream := func(_ context.Context, _ provider.Request) (provider.StreamHandle, error) {
+		return &cancelStream{cancel: cancel, ev: provider.StreamEvent{Type: provider.StreamTextDelta, Text: "partial"}}, nil
+	}
+	res, err := loop.Run(ctx, baseConfig(b, stream), []provider.Message{provider.UserText("hi")})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if res.StopReason != provider.StopCancelled {
+		t.Errorf("stop = %q, want cancelled", res.StopReason)
+	}
+	// Mid-call cancellation emits a BALANCED turn.started + turn.finished pair.
+	kinds := collectKinds(sub)
+	if countKind(kinds, event.KindTurnStarted) != 1 || countKind(kinds, event.KindTurnFinished) != 1 {
+		t.Errorf("want balanced turn.started/turn.finished, got %v", kinds)
+	}
+}
+
+// cancelStream yields ev once (cancelling ctx as a side effect), then io.EOF.
+type cancelStream struct {
+	cancel context.CancelFunc
+	ev     provider.StreamEvent
+	done   bool
+}
+
+func (c *cancelStream) Next() (provider.StreamEvent, error) {
+	if c.done {
+		return provider.StreamEvent{}, errors.New("unreachable: ctx should be cancelled")
+	}
+	c.done = true
+	c.cancel()
+	return c.ev, nil
+}
+func (c *cancelStream) Close() error { return nil }
+
+func TestMissingFinishedFailsClosed(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterAll, 256)
+
+	// Stream ends (io.EOF) without ever emitting StreamFinished.
+	noFinish := []provider.StreamEvent{{Type: provider.StreamTextDelta, Text: "hi"}}
+	res, err := loop.Run(context.Background(), baseConfig(b, scripted(noFinish)), []provider.Message{provider.UserText("hi")})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != provider.StopError {
+		t.Errorf("stop = %q, want error (missing finished must fail closed)", res.StopReason)
+	}
+	if countKind(collectKinds(sub), event.KindSessionError) != 1 {
+		t.Error("want a session.error for the missing finished event")
 	}
 }
 

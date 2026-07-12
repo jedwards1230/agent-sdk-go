@@ -164,7 +164,7 @@ func Build(_ context.Context, m *Manifest, opts ...session.Option) (*session.Ses
 	if err != nil {
 		return nil, err
 	}
-	full := append([]session.Option{session.WithModel(m.Model)}, opts...)
+	full := append([]session.Option{session.WithModel(m.ModelID())}, opts...)
 	return session.New(p, full...), nil
 }
 
