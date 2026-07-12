@@ -1,0 +1,13 @@
+# binaries / build
+/bin/
+*.test
+*.out
+dist/
+
+# tooling
+.idea/
+.vscode/
+.DS_Store
+
+# local worktrees convention
+worktrees/
