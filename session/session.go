@@ -143,7 +143,7 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 
 	req := provider.Request{
 		Model:    s.model,
-		Messages: []provider.Message{{Role: "user", Content: text}},
+		Messages: []provider.Message{provider.UserText(text)},
 	}
 	stream, err := s.provider.Stream(ctx, req)
 	if err != nil {
@@ -203,16 +203,16 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 		}
 
 		switch se.Type {
-		case provider.StreamReasoning:
+		case provider.StreamReasoningDelta:
 			delta(event.MessageReasoning, se.Text)
-		case provider.StreamText:
+		case provider.StreamTextDelta:
 			delta(event.MessageText, se.Text)
-		case provider.StreamUsage:
+		case provider.StreamFinished:
 			usage = se.Usage
-		case provider.StreamStop:
-			stop = se.StopReason
-		case provider.StreamToolCall:
-			// Tool calls are typed but not exercised at M0.
+			stop = string(se.StopReason)
+		case provider.StreamToolCallStart, provider.StreamToolCallDelta, provider.StreamToolCallEnd:
+			// Tool calls are typed but not exercised by the M0 session path;
+			// the M1 loop package drives tool execution.
 		}
 	}
 

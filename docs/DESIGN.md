@@ -19,6 +19,30 @@ implementer should need no other context.
   message than any provider speaks; project down at the call boundary
   (`convertToLLM`), never up.
 
+## Provider parity & credentials (M1)
+
+- **No flagship provider.** `provider.Provider` (`Stream(ctx, Request)
+  (StreamHandle, error)` + `Info() ModelInfo`) is vendor-neutral; Anthropic and
+  OpenAI are peers. `Request` carries the internal message model (`[]Message`,
+  each `Content []ContentBlock`: text / reasoning / tool_use / tool_result /
+  image), `[]ToolSpec`, `System`, and `Params` (max tokens, thinking
+  budget/effort). The provider projects this down to its wire format; never up.
+- **Normalized stream.** `StreamHandle.Next()` yields `StreamEvent`s
+  (`TextDelta`, `ReasoningDelta`, `ToolCallStart/Delta/End`, and a terminal
+  `Finished` carrying `StopReason` + normalized `Usage`). `Usage` has
+  input/output/cache-read/cache-write counters plus a `Raw` map for audit.
+  `provider.Iter` adapts a handle to `iter.Seq2`; `provider.SliceStream` builds
+  a fake handle for tests.
+- **Model registry.** An embedded `id → ModelInfo` table (context window, max
+  output, per-Mtok pricing, reasoning support) backs `Info()` and cost
+  accounting; `CostOf(model, usage)` prices a turn. It is plain data — extend by
+  adding rows.
+- **Credentials.** `provider.CredentialSource.Credential(ctx, providerID)
+  (Credential, error)` decouples providers from the auth package. Kinds are
+  `api_key` and `oauth`; `EnvCredentialSource` (API keys from env vars) ships in
+  provider core, and `auth.Store` (M1) implements the same interface over
+  `~/.gofer/auth.json` (mode `0600`, per-provider entries, refresh handling).
+
 ## Permission rule grammar (M3)
 
 ```
