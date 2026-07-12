@@ -188,6 +188,77 @@ func TestBuildRequestDropsReasoningAndImageBlocks(t *testing.T) {
 	}
 }
 
+// TestReasoningIncludesEncryptedContent asserts the request opts into
+// reasoning.encrypted_content whenever reasoning is enabled, and omits it
+// otherwise.
+func TestReasoningIncludesEncryptedContent(t *testing.T) {
+	req := provider.Request{Params: provider.Params{Thinking: provider.Thinking{Enabled: true}}}
+	m := decodeReq(t, "gpt-5", req, true)
+	include, ok := m["include"].([]any)
+	if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+		t.Errorf("include = %v, want [reasoning.encrypted_content]", m["include"])
+	}
+
+	noReasoning := decodeReq(t, "gpt-5", provider.Request{}, true)
+	if _, present := noReasoning["include"]; present {
+		t.Errorf("include should be omitted when reasoning is disabled, got %v", noReasoning["include"])
+	}
+}
+
+// TestBuildRequestReplaysReasoningBlock asserts a reasoning block carrying both
+// its item id and encrypted content is replayed as a reasoning input item in
+// position.
+func TestBuildRequestReplaysReasoningBlock(t *testing.T) {
+	reasoning := provider.ReasoningBlock("thinking...")
+	reasoning.Meta = map[string]string{metaItemID: "rs_1", metaEncrypted: "enc-blob"}
+	req := provider.Request{Messages: []provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			reasoning,
+			provider.TextBlock("the answer"),
+		}},
+	}}
+	m := decodeReq(t, "gpt-5", req, true)
+	input := m["input"].([]any)
+	if len(input) != 2 {
+		t.Fatalf("input len = %d, want 2 (reasoning, message)", len(input))
+	}
+	r := input[0].(map[string]any)
+	if r["type"] != "reasoning" || r["id"] != "rs_1" || r["encrypted_content"] != "enc-blob" {
+		t.Errorf("reasoning item = %v", r)
+	}
+	summary, ok := r["summary"].([]any)
+	if !ok || len(summary) != 0 {
+		t.Errorf("reasoning summary = %v, want empty array", r["summary"])
+	}
+
+	msg := input[1].(map[string]any)
+	if msg["type"] != "message" {
+		t.Errorf("input[1] = %v, want the trailing message", msg)
+	}
+}
+
+// TestBuildRequestDropsReasoningWithoutEncryptedContent asserts a reasoning
+// block missing encrypted_content (even with an item id) is dropped, not sent
+// malformed.
+func TestBuildRequestDropsReasoningWithoutEncryptedContent(t *testing.T) {
+	reasoning := provider.ReasoningBlock("thinking...")
+	reasoning.Meta = map[string]string{metaItemID: "rs_1"}
+	req := provider.Request{Messages: []provider.Message{
+		{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			reasoning,
+			provider.TextBlock("the answer"),
+		}},
+	}}
+	m := decodeReq(t, "gpt-5", req, true)
+	input := m["input"].([]any)
+	if len(input) != 1 {
+		t.Fatalf("input len = %d, want 1 (reasoning block dropped)", len(input))
+	}
+	if input[0].(map[string]any)["type"] != "message" {
+		t.Errorf("input[0] = %v, want the message", input[0])
+	}
+}
+
 func TestWireRole(t *testing.T) {
 	cases := map[provider.Role]string{
 		provider.RoleUser:      "user",
