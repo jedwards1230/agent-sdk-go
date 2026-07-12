@@ -199,6 +199,8 @@ func convertTools(tools []provider.ToolSpec) []wireTool {
 func apiError(resp *http.Response) error {
 	defer func() { _ = resp.Body.Close() }()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	// Drain any remainder past the cap so the connection can return to the pool.
+	_, _ = io.Copy(io.Discard, resp.Body)
 
 	e := &Error{StatusCode: resp.StatusCode}
 	var parsed struct {

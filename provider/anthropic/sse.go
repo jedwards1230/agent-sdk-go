@@ -46,6 +46,12 @@ func (s *sseScanner) next() ([]byte, error) {
 			continue
 		}
 		if rest, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			// Per the SSE spec, multiple data: lines in one event join with a
+			// newline. Anthropic sends one line per frame, but a proxy could
+			// re-wrap a long payload, and gluing fragments would corrupt JSON.
+			if s.data.Len() > 0 {
+				s.data.WriteByte('\n')
+			}
 			s.data.Write(bytes.TrimPrefix(rest, []byte(" ")))
 		}
 		// event:, id:, retry: and any other field lines are ignored.

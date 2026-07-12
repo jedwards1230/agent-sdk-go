@@ -70,19 +70,20 @@ func (h *streamHandle) Next() (provider.StreamEvent, error) {
 	}
 }
 
-// handleReadError maps a read/scan error onto a terminal event. A cancelled
-// context yields a clean finished event with StopReason "cancelled" so partial
-// usage is still accounted; a clean EOF flushes a finished event if the stream
-// ended without an explicit message_stop.
+// handleReadError maps a read/scan error onto a terminal event. A clean EOF
+// (the full response arrived) flushes a finished event with the settled stop
+// reason, even if the context was cancelled in the same instant; a cancelled
+// context on a non-EOF error yields a finished event with StopReason
+// "cancelled" so partial usage is still accounted.
 func (h *streamHandle) handleReadError(err error) (provider.StreamEvent, error) {
+	if errors.Is(err, io.EOF) {
+		return h.finish()
+	}
 	if ctxErr := h.ctx.Err(); ctxErr != nil {
 		h.finishedEmitted = true
 		return provider.StreamEvent{
 			Type: provider.StreamFinished, StopReason: provider.StopCancelled, Usage: h.usage,
 		}, nil
-	}
-	if errors.Is(err, io.EOF) {
-		return h.finish()
 	}
 	return provider.StreamEvent{}, err
 }
