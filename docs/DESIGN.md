@@ -55,6 +55,40 @@ resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
   provider core, and `auth.Store` (M1) implements the same interface over
   `~/.gofer/auth.json` (mode `0600`, per-provider entries, refresh handling).
 
+## Auth & credentials (M1)
+
+`auth/` owns `~/.gofer/auth.json` (mode `0600`, atomic temp-file+rename) and
+implements `provider.CredentialSource`, so provider adapters resolve auth
+without importing `auth`. It reuses the provider-core contract directly:
+`auth.CredKind`/`Credential`/`CredentialSource` are aliases of the `provider.*`
+types, and `KindAPIKey`/`KindOAuth` alias `provider.CredAPIKey`/`CredOAuth`. The
+adapter maps `Kind` to the header convention (Anthropic: `x-api-key` vs
+`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`; OpenAI: platform
+key vs the ChatGPT backend with a `ChatGPT-Account-ID` header — both exported
+from `auth`).
+
+Expired OAuth tokens refresh transparently inside `Credential`, single-flighted
+per provider (an in-process keyed mutex plus a cross-process advisory flock on
+`~/.gofer/auth.lock`, with a double-check re-read) because refresh tokens rotate
+and a concurrent double-refresh would invalidate the winner.
+
+**Login flows** (clean-roomed from MIT/Apache-2.0 references — opencode + pi for
+Anthropic, openai/codex for OpenAI; PKCE S256 throughout). `Login(ctx,
+providerID)` returns the authorize URL and a completion handle — the **SDK
+never opens a browser**. Two shapes:
+
+- **Anthropic** (subscription, code-paste): authorize at `claude.ai/oauth/
+  authorize`, user pastes a `code#state` string, JSON token exchange at
+  `platform.claude.com/v1/oauth/token`. `Login` returns `Redeem(code)`.
+- **OpenAI** (ChatGPT subscription, loopback): authorize at `auth.openai.com`,
+  browser redirects to `http://localhost:1455/auth/callback`, form-encoded
+  exchange; the `chatgpt_account_id` is read from the `id_token`. `Login`
+  returns `Wait()`, which blocks on the local listener.
+
+Tests drive both flows against an `httptest` fake OAuth server (authorize →
+callback/redeem → exchange → refresh → expiry); no live endpoint is ever
+contacted in tests or at build time.
+
 ## Permission rule grammar (M3)
 
 ```
