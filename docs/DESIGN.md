@@ -69,9 +69,12 @@ key vs the ChatGPT backend with a `ChatGPT-Account-ID` header — both exported
 from `auth`).
 
 Expired OAuth tokens refresh transparently inside `Credential`, single-flighted
-per provider (an in-process keyed mutex plus a cross-process advisory flock on
-`~/.gofer/auth.lock`, with a double-check re-read) because refresh tokens rotate
-and a concurrent double-refresh would invalidate the winner.
+by a ctx-aware in-process write semaphore plus a cross-process advisory flock on
+`~/.gofer/auth.lock`, with a double-check re-read — because refresh tokens rotate
+and a concurrent double-refresh would invalidate the winner. The refresh holds
+that lock across the token-endpoint call, so acquisition honors the caller's
+context: a cancelled `Credential(ctx)` returns promptly rather than waiting out
+an unrelated refresh.
 
 **Login flows** (clean-roomed from MIT/Apache-2.0 references — opencode + pi for
 Anthropic, openai/codex for OpenAI; PKCE S256 throughout). `Login(ctx,
@@ -84,7 +87,9 @@ never opens a browser**. Two shapes:
 - **OpenAI** (ChatGPT subscription, loopback): authorize at `auth.openai.com`,
   browser redirects to `http://localhost:1455/auth/callback`, form-encoded
   exchange; the `chatgpt_account_id` is read from the `id_token`. `Login`
-  returns `Wait()`, which blocks on the local listener.
+  returns `Wait()`, which blocks on the local listener. The listener's lifetime
+  is tied to the login ctx (cancellation frees the port) and `Login.Close`
+  releases it explicitly, so an abandoned login never leaks the fixed port.
 
 Tests drive both flows against an `httptest` fake OAuth server (authorize →
 callback/redeem → exchange → refresh → expiry); no live endpoint is ever

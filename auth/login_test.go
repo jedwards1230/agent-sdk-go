@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +368,83 @@ func TestPKCEChallengeIsS256(t *testing.T) {
 	}
 	if p.state == "" || p.verifier == p.state {
 		t.Fatalf("state/verifier must be distinct non-empty values")
+	}
+}
+
+// freePort returns a currently-free TCP port on the loopback interface.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("freePort: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+	return port
+}
+
+// fixedPortOpenAIFlow builds an openai callback flow bound to a concrete port so
+// a second Login on the same port collides unless the first released it.
+func fixedPortOpenAIFlow(addr string) *openaiFlow {
+	return &openaiFlow{
+		authorizeURL: "https://example.test/authorize",
+		tokenURL:     "https://example.test/token",
+		clientID:     "cid",
+		scopes:       "s",
+		listenAddr:   addr,
+		cbPath:       "/auth/callback",
+		redirectURI:  "http://" + addr + "/auth/callback",
+	}
+}
+
+func TestCallbackLoginCloseReleasesPort(t *testing.T) {
+	addr := "127.0.0.1:" + strconv.Itoa(freePort(t))
+	s := newTestStore(t, map[string]loginFlow{"openai": fixedPortOpenAIFlow(addr)}, nil)
+
+	l1, err := s.Login(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	// While l1 holds the fixed port, a second bind must fail.
+	if _, err := s.Login(context.Background(), "openai"); err == nil {
+		t.Fatalf("expected bind conflict while first login holds the port")
+	}
+
+	l1.Close() // release the listener
+	l1.Close() // idempotent
+
+	l2 := mustLoginWithin(t, s, 2*time.Second)
+	l2.Close()
+}
+
+func TestCallbackLoginCtxCancelReleasesPort(t *testing.T) {
+	addr := "127.0.0.1:" + strconv.Itoa(freePort(t))
+	s := newTestStore(t, map[string]loginFlow{"openai": fixedPortOpenAIFlow(addr)}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := s.Login(ctx, "openai"); err != nil {
+		t.Fatalf("first login: %v", err)
+	}
+	// Abandon the login without ever calling Wait; cancelling ctx must free the
+	// port so a later login can bind it.
+	cancel()
+
+	l2 := mustLoginWithin(t, s, 2*time.Second)
+	l2.Close()
+}
+
+// mustLoginWithin retries Login until it binds the port or the deadline passes.
+func mustLoginWithin(t *testing.T, s *Store, d time.Duration) *Login {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for {
+		l, err := s.Login(context.Background(), "openai")
+		if err == nil {
+			return l
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("port not released within %v: %v", d, err)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

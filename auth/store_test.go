@@ -20,6 +20,10 @@ type fakeFlow struct {
 	refreshN atomic.Int64
 	// delay lets a test widen the refresh window to exercise single-flight.
 	delay time.Duration
+	// started, if non-nil, is closed the first time refresh begins (so a test
+	// can wait until the write lock is held).
+	started   chan struct{}
+	startOnce sync.Once
 }
 
 func (f *fakeFlow) provider() string            { return f.id }
@@ -39,6 +43,9 @@ func (f *fakeFlow) exchange(_ context.Context, _ httpDoer, code string, _ pkce) 
 }
 
 func (f *fakeFlow) refresh(_ context.Context, _ httpDoer, e Entry) (Entry, error) {
+	if f.started != nil {
+		f.startOnce.Do(func() { close(f.started) })
+	}
 	if f.delay > 0 {
 		time.Sleep(f.delay)
 	}
@@ -316,6 +323,43 @@ func TestConcurrentSetDuringRefreshNoClobber(t *testing.T) {
 	}
 	if !okb || eb.Access != "key-b" {
 		t.Fatalf("b write lost/clobbered by refresh: %+v ok=%v", eb, okb)
+	}
+}
+
+func TestRefreshRespectsContextCancellation(t *testing.T) {
+	// While one goroutine holds the write lock across a slow refresh, a caller
+	// with an already-cancelled context must return promptly instead of
+	// blocking for the refresh duration.
+	started := make(chan struct{})
+	slow := &fakeFlow{id: "a", delay: 500 * time.Millisecond, started: started}
+	other := &fakeFlow{id: "b"}
+	s := newTestStore(t, map[string]loginFlow{"a": slow, "b": other}, nil)
+	past := time.Now().Add(-time.Hour).Unix()
+	if err := s.Set("a", Entry{Kind: KindOAuth, Access: "stale", Refresh: "r", Expires: past}); err != nil {
+		t.Fatalf("seed a: %v", err)
+	}
+	if err := s.Set("b", Entry{Kind: KindOAuth, Access: "stale", Refresh: "r", Expires: past}); err != nil {
+		t.Fatalf("seed b: %v", err)
+	}
+
+	// Grab the write lock via a slow refresh of "a".
+	go func() { _, _ = s.Credential(context.Background(), "a") }()
+	<-started // "a" now holds the write lock, mid-refresh
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	t0 := time.Now()
+	_, err := s.Credential(ctx, "b")
+	elapsed := time.Since(t0)
+
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("cancelled caller blocked %v on an unrelated refresh (want prompt return)", elapsed)
+	}
+	if other.refreshN.Load() != 0 {
+		t.Fatalf("cancelled caller should not have refreshed")
 	}
 }
 
