@@ -34,6 +34,10 @@ const (
 
 // oauthBetas are the anthropic-beta feature flags the Claude Code CLI sends with
 // OAuth credentials. Any caller-configured betas are appended after these.
+//
+// These literals intentionally duplicate the auth package's OAuth header
+// material rather than importing it: the adapter stays decoupled from auth/ and
+// depends only on the provider.CredentialSource contract.
 var oauthBetas = []string{"claude-code-20250219", "oauth-2025-04-20"}
 
 // Provider is an Anthropic Messages API backend for a single model. It is safe
