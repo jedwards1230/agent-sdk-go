@@ -295,14 +295,16 @@ func (s *Store) Credential(ctx context.Context, providerID string) (Credential, 
 	case KindAPIKey:
 		return Credential{Kind: KindAPIKey, Token: e.Access}, nil
 	case KindOAuth:
-		if !s.expired(e) {
-			return Credential{Kind: KindOAuth, Token: e.Access}, nil
+		if s.expired(e) {
+			e, err = s.refreshEntry(ctx, providerID, e)
+			if err != nil {
+				return Credential{}, err
+			}
 		}
-		e, err = s.refreshEntry(ctx, providerID, e)
-		if err != nil {
-			return Credential{}, err
-		}
-		return Credential{Kind: KindOAuth, Token: e.Access}, nil
+		// Account carries the ChatGPT account id for the OpenAI subscription
+		// path (provider/openai sends it as the ChatGPT-Account-ID header). It
+		// is empty for Anthropic OAuth, which persists no such claim.
+		return Credential{Kind: KindOAuth, Token: e.Access, Account: e.Extra[openaiAccountIDKey]}, nil
 	default:
 		return Credential{}, fmt.Errorf("auth: unknown credential kind %q for %s", e.Kind, providerID)
 	}

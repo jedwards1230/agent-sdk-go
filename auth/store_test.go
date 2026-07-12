@@ -125,6 +125,47 @@ func TestCredentialAPIKey(t *testing.T) {
 	}
 }
 
+func TestCredentialAccount(t *testing.T) {
+	s := newTestStore(t, map[string]loginFlow{}, nil)
+	future := time.Now().Add(time.Hour).Unix()
+
+	// OpenAI OAuth surfaces the persisted chatgpt account id as Credential.Account.
+	if err := s.Set("openai", Entry{Kind: KindOAuth, Access: "tok", Refresh: "r", Expires: future, Extra: map[string]string{openaiAccountIDKey: "acct_z"}}); err != nil {
+		t.Fatalf("Set openai: %v", err)
+	}
+	c, err := s.Credential(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("Credential openai: %v", err)
+	}
+	if c.Kind != KindOAuth || c.Token != "tok" || c.Account != "acct_z" {
+		t.Fatalf("openai credential = %+v, want oauth/tok/acct_z", c)
+	}
+
+	// Anthropic OAuth persists no account claim → Account stays empty.
+	if err := s.Set("anthropic", Entry{Kind: KindOAuth, Access: "atok", Refresh: "r", Expires: future}); err != nil {
+		t.Fatalf("Set anthropic: %v", err)
+	}
+	c, err = s.Credential(context.Background(), "anthropic")
+	if err != nil {
+		t.Fatalf("Credential anthropic: %v", err)
+	}
+	if c.Account != "" {
+		t.Fatalf("anthropic oauth Account = %q, want empty", c.Account)
+	}
+
+	// API keys never carry an account.
+	if err := s.SetAPIKey("k", "sk-x"); err != nil {
+		t.Fatalf("SetAPIKey: %v", err)
+	}
+	c, err = s.Credential(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("Credential k: %v", err)
+	}
+	if c.Account != "" {
+		t.Fatalf("api-key Account = %q, want empty", c.Account)
+	}
+}
+
 func TestCredentialMissing(t *testing.T) {
 	s := newTestStore(t, map[string]loginFlow{}, nil)
 	_, err := s.Credential(context.Background(), "nope")
