@@ -32,6 +32,9 @@ func TestRouteAPIKey(t *testing.T) {
 	}
 }
 
+// TestRouteOAuthSwitchesBaseURL uses the transitional packed-token seam to
+// exercise the account-present path: oauth must switch off the api host and set
+// the ChatGPT-Account-ID header.
 func TestRouteOAuthSwitchesBaseURL(t *testing.T) {
 	p := New("gpt-5", nil)
 	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "acct-42\x00tok-xyz"})
@@ -49,10 +52,31 @@ func TestRouteOAuthSwitchesBaseURL(t *testing.T) {
 	}
 }
 
-func TestRouteOAuthMissingAccountErrors(t *testing.T) {
+// TestRouteOAuthUnpackedToken asserts a plain (unpacked) oauth token — the form
+// auth.Store actually emits before Credential.Account exists — routes correctly:
+// oauth host, the bearer passed through untouched, and NO account-id header (an
+// omitted header, not a corrupted bearer or an error).
+func TestRouteOAuthUnpackedToken(t *testing.T) {
 	p := New("gpt-5", nil)
-	if _, _, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "tok-no-account"}); err == nil {
-		t.Error("oauth credential without an account id should error")
+	base, h, err := p.route(provider.Credential{Kind: provider.CredOAuth, Token: "sk-oauth-plain"})
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if base != oauthBaseURL {
+		t.Errorf("oauth base = %q, want %q", base, oauthBaseURL)
+	}
+	if h["Authorization"] != "Bearer sk-oauth-plain" {
+		t.Errorf("authorization = %q, want the token untouched", h["Authorization"])
+	}
+	if _, present := h[headerAccountID]; present {
+		t.Errorf("account-id header should be omitted when account is empty, got %q", h[headerAccountID])
+	}
+}
+
+func TestRouteOAuthEmptyTokenErrors(t *testing.T) {
+	p := New("gpt-5", nil)
+	if _, _, err := p.route(provider.Credential{Kind: provider.CredOAuth}); err == nil {
+		t.Error("empty oauth token should error")
 	}
 }
 

@@ -17,6 +17,10 @@ const providerID = "openai"
 
 // Endpoint routing. The credential kind chooses the base URL; both post to
 // responsesPath and speak the same SSE shape.
+//
+// oauthBaseURL and headerAccountID intentionally duplicate auth's exported
+// auth.OpenAIChatGPTBaseURL / auth.OpenAIAccountIDHeader as literals: the
+// provider must stay importable without depending on the auth package.
 const (
 	apiBaseURL    = "https://api.openai.com/v1"
 	oauthBaseURL  = "https://chatgpt.com/backend-api/codex"
@@ -129,12 +133,18 @@ func (p *Provider) route(cred provider.Credential) (string, map[string]string, e
 	switch cred.Kind {
 	case provider.CredOAuth:
 		token, account := splitOAuth(cred)
-		if account == "" {
-			return "", nil, errors.New("openai: oauth credential missing ChatGPT account id")
+		if token == "" {
+			return "", nil, errors.New("openai: empty oauth token")
 		}
 		base = oauthBaseURL
 		headers["Authorization"] = "Bearer " + token
-		headers[headerAccountID] = account
+		// The account id populates the ChatGPT-Account-ID header. When it is
+		// empty the header is omitted rather than sent blank — and crucially the
+		// bearer is never corrupted (see splitOAuth). It becomes reliably present
+		// once provider.Credential.Account lands.
+		if account != "" {
+			headers[headerAccountID] = account
+		}
 	case provider.CredAPIKey, provider.CredKind(""):
 		if cred.Token == "" {
 			return "", nil, errors.New("openai: empty api key")
@@ -160,11 +170,13 @@ func (p *Provider) reasoningSupported(model string) bool {
 // splitOAuth extracts the bearer token and ChatGPT account id from an oauth
 // credential.
 //
-// The account id is required for the ChatGPT-Account-ID header but
-// provider.Credential is Token-only at M1, so auth.Store packs it into the
-// token as "<account_id>\x00<access_token>" (a documented composite). When
-// provider.Credential gains a dedicated Account field this collapses to
-// returning (cred.Token, cred.Account).
+// End state: return (cred.Token, cred.Account) once provider.Credential gains an
+// Account field (landing via sdk-core's loop PR). Until then this is a
+// transitional seam. auth.Store carries chatgpt_account_id out of band and does
+// NOT pack it into the token, so in practice the token is unpacked and the
+// account is empty — it must pass through untouched (never corrupt the bearer).
+// A "<account_id>\x00<access_token>" packed form is additionally tolerated so
+// tests can exercise the account-present path; nothing emits it in production.
 func splitOAuth(cred provider.Credential) (token, account string) {
 	if i := strings.IndexByte(cred.Token, 0); i >= 0 {
 		return cred.Token[i+1:], cred.Token[:i]
