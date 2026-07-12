@@ -51,7 +51,7 @@ provider/    LLM iface + normalized stream
 loop/        runAgentLoop · hooks · StreamFn          (M1)
 session/     event-sourced JSONL tree                 (M0: identity + turn)
 permission/  rules · grants · escalation cap          (M3)
-tool/        registry + bash/read/edit/grep builtins  (M1)
+tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
 skill/       SKILL.md, two-tier disclosure            (M4)
 plugin/      subprocess JSON-RPC host                 (M4)
 lsp/         server registry · diagnostics            (M3)
