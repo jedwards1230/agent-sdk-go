@@ -91,6 +91,96 @@ func loadCassette(t *testing.T, path string) cassette {
 	return c
 }
 
+// TestCassetteThinkingToolsSignatureReplay drives the extended-thinking +
+// tool-use flow end-to-end: turn 1 streams a signed thinking block and a tool
+// call; the test captures the signature from the reasoning event's Meta (as the
+// loop would), assembles the assistant turn, and sends turn 2. The cassette's
+// turn-2 request matcher asserts the thinking block AND its signature reach the
+// wire — the correctness requirement for thinking+tools multi-turn.
+func TestCassetteThinkingToolsSignatureReplay(t *testing.T) {
+	c := loadCassette(t, "testdata/thinking_tools_conversation.json")
+	player := &cassettePlayer{t: t, c: c}
+	srv := httptest.NewServer(player)
+	defer srv.Close()
+
+	cred := provider.StaticCredentialSource{Cred: provider.Credential{Kind: provider.CredAPIKey, Token: "sk-ant-api-test"}}
+	p := New("claude-sonnet-5", cred, WithBaseURL(srv.URL))
+	tools := []provider.ToolSpec{{Name: "bash", InputSchema: json.RawMessage(`{"type":"object"}`)}}
+
+	// --- Turn 1: prompt (thinking on) → signed reasoning + tool_use ---
+	history := []provider.Message{provider.UserText("Refactor the parser entrypoint.")}
+	h1, err := p.Stream(context.Background(), provider.Request{
+		Messages: history, Tools: tools,
+		Params: provider.Params{Thinking: provider.Thinking{Enabled: true, BudgetTokens: 2048}},
+	})
+	if err != nil {
+		t.Fatalf("turn 1 Stream: %v", err)
+	}
+
+	// Reconstruct the assembled reasoning block the loop would build: accumulate
+	// reasoning text and merge Meta across the reasoning deltas.
+	var reasoningText, signature, toolID, toolInput string
+	for _, e := range drain(t, h1) {
+		switch e.Type {
+		case provider.StreamReasoningDelta:
+			reasoningText += e.Text
+			if s, ok := e.Meta[metaSignatureKey]; ok {
+				signature = s
+			}
+		case provider.StreamToolCallStart:
+			toolID = e.Tool.ID
+		case provider.StreamToolCallEnd:
+			toolInput = string(e.Tool.Input)
+		}
+	}
+	_ = h1.Close()
+
+	if signature != "sig_synthetic_thinking_001" {
+		t.Fatalf("captured signature = %q, want the streamed signature", signature)
+	}
+	if reasoningText != "I should inspect the parser first. Let me grep for the entrypoint." {
+		t.Errorf("reasoning text = %q", reasoningText)
+	}
+
+	// --- Turn 2: replay signed thinking + tool_use, add tool_result ---
+	history = append(history,
+		provider.Message{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			{Type: provider.BlockReasoning, Text: reasoningText, Meta: map[string]string{metaSignatureKey: signature}},
+			provider.ToolUseBlock(toolID, "bash", json.RawMessage(toolInput)),
+		}},
+		provider.Message{Role: provider.RoleUser, Content: []provider.ContentBlock{
+			provider.ToolResultBlock(toolID, "src/parser.go:42: func Parse(", false),
+		}},
+	)
+	h2, err := p.Stream(context.Background(), provider.Request{Messages: history, Tools: tools})
+	if err != nil {
+		t.Fatalf("turn 2 Stream: %v", err)
+	}
+	// The cassette matcher (body_contains signature + type:thinking + tool_result)
+	// fails the test via player.t if the signature did not reach the wire.
+	var summary string
+	var fin provider.StreamEvent
+	for _, e := range drain(t, h2) {
+		switch e.Type {
+		case provider.StreamTextDelta:
+			summary += e.Text
+		case provider.StreamFinished:
+			fin = e
+		}
+	}
+	_ = h2.Close()
+
+	if !strings.Contains(summary, "src/parser.go:42") {
+		t.Errorf("turn2 summary = %q", summary)
+	}
+	if fin.StopReason != provider.StopEndTurn {
+		t.Errorf("turn2 stop = %q, want end_turn", fin.StopReason)
+	}
+	if player.idx != 2 {
+		t.Errorf("played %d interactions, want 2", player.idx)
+	}
+}
+
 // TestCassetteToolUseConversation replays a realistic two-turn tool-use
 // conversation end-to-end through the provider: the model reasons and calls a
 // tool (turn 1), then the tool result is fed back and the model summarizes

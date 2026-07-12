@@ -142,6 +142,56 @@ func TestBuildBodyToolUseAndResultRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBuildBodyReplaysSignedReasoning(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	msgs := []provider.Message{
+		provider.UserText("solve it"),
+		{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			{Type: provider.BlockReasoning, Text: "step by step", Meta: map[string]string{metaSignatureKey: "sig-xyz"}},
+			provider.ToolUseBlock("toolu_9", "bash", json.RawMessage(`{"cmd":"ls"}`)),
+		}},
+	}
+	r, err := p.buildBody(provider.Request{Messages: msgs}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	asst := body.Messages[1]
+	if len(asst.Content) != 2 {
+		t.Fatalf("assistant content = %+v, want thinking + tool_use", asst.Content)
+	}
+	// Thinking block must come first, carrying its signature verbatim.
+	th := asst.Content[0]
+	if th.Type != "thinking" || th.Thinking != "step by step" || th.Signature != "sig-xyz" {
+		t.Errorf("thinking block = %+v", th)
+	}
+	if asst.Content[1].Type != "tool_use" {
+		t.Errorf("second block = %+v, want tool_use", asst.Content[1])
+	}
+}
+
+func TestBuildBodyDropsUnsignedReasoning(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	msgs := []provider.Message{
+		provider.UserText("hi"),
+		{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			provider.ReasoningBlock("no signature here"), // Meta nil
+			provider.AssistantText("the answer").Content[0],
+		}},
+	}
+	r, err := p.buildBody(provider.Request{Messages: msgs}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	asst := body.Messages[1]
+	if len(asst.Content) != 1 || asst.Content[0].Type != "text" {
+		t.Fatalf("assistant content = %+v, want only the text block (unsigned reasoning dropped)", asst.Content)
+	}
+}
+
 func TestBuildBodyDropsEmptyMessages(t *testing.T) {
 	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
 	msgs := []provider.Message{
