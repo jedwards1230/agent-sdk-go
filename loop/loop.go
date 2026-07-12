@@ -157,7 +157,9 @@ func Run(ctx context.Context, cfg Config, messages []provider.Message) (Result, 
 	}
 
 	r := &runner{cfg: cfg, stream: streamFn}
-	msgs := messages
+	// Copy the caller's slice: Run appends the assistant turn and tool results,
+	// and must not mutate the caller's backing array.
+	msgs := append([]provider.Message(nil), messages...)
 	var (
 		cum  provider.Usage
 		stop provider.StopReason
@@ -259,9 +261,18 @@ func (r *runner) callModel(ctx context.Context, msgs []provider.Message) (provid
 	}
 	conv.flush()
 
+	// Fail closed if the provider ended the stream without a terminal Finished
+	// event: surface a non-fatal error and mark the turn as errored rather than
+	// silently returning an empty stop reason.
+	stop := conv.stop
+	if !conv.finished {
+		r.emitError("provider stream ended without a finished event", false)
+		stop = provider.StopError
+	}
+
 	assistant := provider.Message{Role: provider.RoleAssistant, Content: conv.blocks}
-	r.broker().Publish(r.turnFinished(conv.stop, conv.usage))
-	return assistant, conv.calls, conv.usage, conv.stop, nil
+	r.broker().Publish(r.turnFinished(stop, conv.usage))
+	return assistant, conv.calls, conv.usage, stop, nil
 }
 
 // turnFinished builds a turn.finished event, pricing the usage when the model is
@@ -278,6 +289,15 @@ func (r *runner) turnFinished(stop provider.StopReason, usage provider.Usage) ev
 func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.ContentBlock {
 	blocks := make([]provider.ContentBlock, 0, len(calls))
 	for _, call := range calls {
+		// Honor cancellation between tool calls: emit a cancelled result for each
+		// remaining call rather than invoking it, keeping the message well-formed
+		// (every tool_use gets a matching tool_result).
+		if err := ctx.Err(); err != nil {
+			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
+			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, nil))
+			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
+			continue
+		}
 		call = r.beforeTool(ctx, call)
 
 		var res ToolResult
@@ -364,10 +384,11 @@ type converter struct {
 	toolIdx map[string]int
 	partial []toolAssembly
 
-	blocks []provider.ContentBlock
-	calls  []ToolCall
-	usage  provider.Usage
-	stop   provider.StopReason
+	blocks   []provider.ContentBlock
+	calls    []ToolCall
+	usage    provider.Usage
+	stop     provider.StopReason
+	finished bool // a StreamFinished event was observed
 }
 
 type toolAssembly struct {
@@ -396,6 +417,7 @@ func (c *converter) handle(se provider.StreamEvent) {
 	case provider.StreamFinished:
 		c.usage = se.Usage
 		c.stop = se.StopReason
+		c.finished = true
 	}
 }
 
@@ -454,6 +476,11 @@ func (c *converter) toolDelta(t *provider.ToolCall) {
 
 func (c *converter) toolEnd(t *provider.ToolCall) {
 	if t == nil {
+		return
+	}
+	// Idempotent per id: a duplicate End for an already-finalized call must not
+	// append a second tool_use block (which would execute the tool twice).
+	if c.callSeen(t.ID) {
 		return
 	}
 	i, ok := c.toolIdx[t.ID]

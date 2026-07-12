@@ -86,6 +86,18 @@ func TestParseRejectsBadAuth(t *testing.T) {
 	}
 }
 
+func TestBuildHonorsModelOverride(t *testing.T) {
+	m := &compose.Manifest{Name: "a", Model: "top", Provider: compose.ProviderConfig{Type: "faux", Model: "override"}}
+	sess, err := compose.Build(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	defer sess.Close()
+	if sess.Model() != "override" {
+		t.Errorf("session model = %q, want the provider.model override", sess.Model())
+	}
+}
+
 func TestLoopConfigDrivesFaux(t *testing.T) {
 	b := event.NewBroker()
 	defer b.Close()

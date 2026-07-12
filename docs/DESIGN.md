@@ -26,8 +26,9 @@ contract events (`message.*`, `tool.call.*`), and on a `tool_use` stop the loop
 executes the requested tools and appends `tool_result` blocks before the next
 call. Hooks are never-throw — a hook's error emits a non-fatal `session.error`
 and the loop proceeds with the pre-hook value. The loop consumes a `ToolRegistry`
-interface declared consumer-side in `loop/` (the `tool` package's registry
-satisfies it — no reverse dependency). `compose.LoopConfig(m, LoopDeps)` wires a
+interface declared consumer-side in `loop/`; `loop.FromRegistry(*tool.Registry)`
+adapts the builtin `tool.Registry` to it (building `provider.ToolSpec`s from each
+tool's schema). `compose.LoopConfig(m, LoopDeps)` wires a
 provider + model + tools + broker from a manifest; `compose.CredentialSource(m)`
 resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
 
