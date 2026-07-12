@@ -46,6 +46,18 @@ func TestMatchGlob(t *testing.T) {
 	}
 }
 
+func TestValidateGlob(t *testing.T) {
+	if err := validateGlob("[bad"); err == nil {
+		t.Fatal("validateGlob(\"[bad\") = nil, want error")
+	}
+	if err := validateGlob("**/*.go"); err != nil {
+		t.Fatalf("validateGlob(\"**/*.go\") = %v, want nil", err)
+	}
+	if err := validateGlob("*.md"); err != nil {
+		t.Fatalf("validateGlob(\"*.md\") = %v, want nil", err)
+	}
+}
+
 func TestTruncateBytes(t *testing.T) {
 	t.Run("under cap", func(t *testing.T) {
 		out, truncated := truncateBytes("hello", 10)

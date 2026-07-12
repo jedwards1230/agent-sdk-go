@@ -112,6 +112,21 @@ func TestGrepBadPattern(t *testing.T) {
 	}
 }
 
+func TestGrepBadGlob(t *testing.T) {
+	dir := setupGrepTree(t)
+	g := NewGrep(dir)
+	res, err := g.Run(context.Background(), json.RawMessage(`{"pattern":"needle","glob":"[bad"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true for bad glob")
+	}
+	if !strings.Contains(res.Content, "invalid glob") {
+		t.Fatalf("Content = %q, want invalid-glob message", res.Content)
+	}
+}
+
 func TestGrepSkipsGitDir(t *testing.T) {
 	dir := setupGrepTree(t)
 	g := NewGrep(dir)

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +45,36 @@ func TestReadOffsetLimit(t *testing.T) {
 	want := "     2\tb\n     3\tc\n"
 	if res.Content != want {
 		t.Fatalf("Content = %q, want %q", res.Content, want)
+	}
+}
+
+func TestReadHugeLimitNoOverflow(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	lines := []string{"a", "b", "c", "d", "e"}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRead(dir)
+	input, err := json.Marshal(map[string]any{"path": "f.txt", "offset": 2, "limit": int64(math.MaxInt64)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := r.Run(context.Background(), input)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true, content: %q", res.Content)
+	}
+	if res.Content == "" {
+		t.Fatal("Content is empty, want remainder of file (overflowed window)")
+	}
+	if !strings.Contains(res.Content, "e") {
+		t.Fatalf("Content = %q, want last line's text", res.Content)
+	}
+	if !strings.HasPrefix(res.Content, "     2\t") {
+		t.Fatalf("Content = %q, want first emitted line number 2", res.Content)
 	}
 }
 
