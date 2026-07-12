@@ -35,7 +35,11 @@
 //     round-tripped into request history.
 //   - Temperature is only sent to non-reasoning models; reasoning models reject
 //     it, so it is dropped for them.
-//   - Assistant reasoning blocks in request history are not replayed (the
-//     Responses API requires encrypted reasoning content the SDK does not
-//     persist at M1); image blocks are placeholders and are skipped.
+//   - Reasoning blocks are not replayed on subsequent requests in M1: full
+//     replay requires reasoning.encrypted_content (opted in via the request
+//     `include` field) round-tripped back as reasoning input items — tracked for
+//     M2. Inbound reasoning deltas are already tagged with their Responses-API
+//     item id under StreamEvent.Meta["openai.item_id"] (journaled onto the
+//     assembled block) so the M2 change is small. Image blocks are placeholders
+//     and are skipped.
 package openai
