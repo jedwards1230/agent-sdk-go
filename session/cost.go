@@ -2,75 +2,94 @@ package session
 
 import "github.com/jedwards1230/agent-sdk-go/provider"
 
-// PriceLookup resolves per-model pricing for cost aggregation. This is a
-// minimal LOCAL interface so session/ compiles standalone; the provider-core
-// model registry will implement or adapt to it once it lands.
-//
-// RECONCILIATION POINT: when the model registry ships, wire it in as the
-// [PriceLookup] passed to [Journal.Cost] instead of a bespoke adapter.
+// PriceLookup resolves per-model pricing for cost aggregation. The provider
+// model registry satisfies it via [RegistryPricing]; tests substitute their own
+// rates. Keeping [Journal.Cost] injectable (rather than hard-wired to the
+// global registry) keeps its tests hermetic and lets callers price against
+// negotiated rates.
 type PriceLookup interface {
-	// Price returns the pricing for model, and whether it is known. An
-	// unknown model still has its tokens summed; its USD contribution is 0.
-	Price(model string) (ModelPrice, bool)
+	// Pricing returns the pricing for model, and whether it is known. An
+	// unknown model still has its tokens summed; its cost stays zero.
+	Pricing(model string) (provider.Pricing, bool)
 }
 
-// ModelPrice is USD per 1,000,000 tokens.
-type ModelPrice struct {
-	InputPerMTok      float64
-	OutputPerMTok     float64
-	CacheReadPerMTok  float64
-	CacheWritePerMTok float64
-}
+// RegistryPricing adapts the embedded provider model registry
+// ([provider.Lookup]) to [PriceLookup]. It is the production lookup to pass to
+// [Journal.Cost].
+type RegistryPricing struct{}
 
-// Cost is a token/USD tally.
-type Cost struct {
-	Usage provider.Usage // summed tokens
-	USD   float64        // priced; 0 contribution when the model price is unknown
-}
-
-// CostReport is a full journal's cost, split by model.
-type CostReport struct {
-	Total Cost
-	// ByModel keys on Entry.Model; entries with an empty model bucket under "".
-	ByModel map[string]Cost
-}
-
-// add folds u, priced at price (only if known), into c. The per-turn Raw audit
-// map on u is not summed — it is provider-reported detail, not a normalized
-// counter.
-func (c Cost) add(u provider.Usage, price ModelPrice, known bool) Cost {
-	c.Usage.InputTokens += u.InputTokens
-	c.Usage.OutputTokens += u.OutputTokens
-	c.Usage.CacheReadTokens += u.CacheReadTokens
-	c.Usage.CacheWriteTokens += u.CacheWriteTokens
-	if known {
-		c.USD += float64(u.InputTokens) / 1_000_000 * price.InputPerMTok
-		c.USD += float64(u.OutputTokens) / 1_000_000 * price.OutputPerMTok
-		c.USD += float64(u.CacheReadTokens) / 1_000_000 * price.CacheReadPerMTok
-		c.USD += float64(u.CacheWriteTokens) / 1_000_000 * price.CacheWritePerMTok
+// Pricing resolves model against the provider registry.
+func (RegistryPricing) Pricing(model string) (provider.Pricing, bool) {
+	m, ok := provider.Lookup(model)
+	if !ok {
+		return provider.Pricing{}, false
 	}
-	return c
+	return m.Pricing, true
 }
 
-// cost aggregates usage across entries, pricing via reg. reg may be nil (all
-// USD contributions are 0; tokens are still summed). Cost sums usage over
-// every entry passed in, regardless of branch — callers that want cost over
-// only the folded path must filter first.
+// ModelCost is the token/cost tally for one model within a session.
+type ModelCost struct {
+	Model string
+	Usage provider.Usage // summed tokens for this model
+	Cost  provider.Cost  // priced cost, with per-bucket USD breakdown
+}
+
+// CostReport is a journal's total cost plus a per-model breakdown.
+type CostReport struct {
+	// Usage is the summed token usage across every entry.
+	Usage provider.Usage
+	// Cost is the total priced cost across every model.
+	Cost provider.Cost
+	// ByModel keys on Entry.Model; entries with an empty model bucket under "".
+	ByModel map[string]ModelCost
+}
+
+// cost aggregates usage across entries — every branch, including ones dropped
+// from Fold by a fork — pricing each model's summed usage via reg. reg may be
+// nil (all costs zero; tokens still summed). Because pricing is linear in token
+// counts, summing usage per model and pricing once equals pricing each turn and
+// summing, with less float accumulation.
 func cost(entries []Entry, reg PriceLookup) CostReport {
-	report := CostReport{ByModel: make(map[string]Cost)}
+	usageByModel := make(map[string]provider.Usage)
+	var totalUsage provider.Usage
 	for _, e := range entries {
 		if e.Usage == nil {
 			continue
 		}
-		var (
-			price ModelPrice
-			known bool
-		)
+		usageByModel[e.Model] = addUsage(usageByModel[e.Model], *e.Usage)
+		totalUsage = addUsage(totalUsage, *e.Usage)
+	}
+
+	report := CostReport{Usage: totalUsage, ByModel: make(map[string]ModelCost, len(usageByModel))}
+	for model, u := range usageByModel {
+		var c provider.Cost
 		if reg != nil {
-			price, known = reg.Price(e.Model)
+			if p, ok := reg.Pricing(model); ok {
+				c = p.Cost(u)
+			}
 		}
-		report.Total = report.Total.add(*e.Usage, price, known)
-		report.ByModel[e.Model] = report.ByModel[e.Model].add(*e.Usage, price, known)
+		report.ByModel[model] = ModelCost{Model: model, Usage: u, Cost: c}
+		report.Cost = addCost(report.Cost, c)
 	}
 	return report
+}
+
+// addUsage sums two usages field-wise. The per-turn Raw audit map is not
+// merged — it is provider-reported detail, not a normalized counter.
+func addUsage(a, b provider.Usage) provider.Usage {
+	a.InputTokens += b.InputTokens
+	a.OutputTokens += b.OutputTokens
+	a.CacheReadTokens += b.CacheReadTokens
+	a.CacheWriteTokens += b.CacheWriteTokens
+	return a
+}
+
+// addCost sums two costs field-wise across the total and every USD bucket.
+func addCost(a, b provider.Cost) provider.Cost {
+	a.USD += b.USD
+	a.InputUSD += b.InputUSD
+	a.OutputUSD += b.OutputUSD
+	a.CacheReadUSD += b.CacheReadUSD
+	a.CacheWriteUSD += b.CacheWriteUSD
+	return a
 }

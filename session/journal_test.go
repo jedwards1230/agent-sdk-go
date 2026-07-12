@@ -241,9 +241,12 @@ func TestJournalForkBranch(t *testing.T) {
 	}
 }
 
-// TestJournalCostAggregation covers Total/ByModel across known and unknown
-// model prices, a nil registry, and confirms cost counts usage on branches
-// dropped from Fold by a fork.
+// TestJournalCostAggregation covers total/ByModel across a registered and an
+// unregistered model priced through the real provider registry, a nil registry,
+// and confirms cost counts usage on branches dropped from Fold by a fork. The
+// registered model uses "claude-sonnet-5" so the expected cost can be computed
+// straight from provider.Pricing.Cost, proving the aggregation matches the
+// canonical pricing.
 func TestJournalCostAggregation(t *testing.T) {
 	ctx := context.Background()
 	store, err := session.NewFileStore(
@@ -259,8 +262,9 @@ func TestJournalCostAggregation(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
+	const registered, unregistered = "claude-sonnet-5", "unregistered-model"
 	a, err := j.Append(session.NewMessageEntry("user", "a",
-		session.WithEntryModel("known"), session.WithEntryUsage(provider.Usage{
+		session.WithEntryModel(registered), session.WithEntryUsage(provider.Usage{
 			InputTokens: 1_000_000, OutputTokens: 500_000,
 			CacheReadTokens: 2_000_000, CacheWriteTokens: 400_000,
 		})))
@@ -268,7 +272,7 @@ func TestJournalCostAggregation(t *testing.T) {
 		t.Fatalf("Append: %v", err)
 	}
 	if _, err := j.Append(session.NewMessageEntry("assistant", "b",
-		session.WithEntryModel("unknown"), session.WithEntryUsage(provider.Usage{InputTokens: 200, OutputTokens: 100}))); err != nil {
+		session.WithEntryModel(unregistered), session.WithEntryUsage(provider.Usage{InputTokens: 200, OutputTokens: 100}))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
@@ -278,52 +282,56 @@ func TestJournalCostAggregation(t *testing.T) {
 		t.Fatalf("Fork: %v", err)
 	}
 	if _, err := j.Append(session.NewMessageEntry("assistant", "c",
-		session.WithEntryModel("known"), session.WithEntryUsage(provider.Usage{InputTokens: 10, OutputTokens: 20}))); err != nil {
+		session.WithEntryModel(registered), session.WithEntryUsage(provider.Usage{InputTokens: 10, OutputTokens: 20}))); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 
-	prices := fakePriceLookup{
-		"known": session.ModelPrice{InputPerMTok: 3, OutputPerMTok: 15, CacheReadPerMTok: 0.3, CacheWritePerMTok: 3.75},
+	report := j.Cost(session.RegistryPricing{})
+
+	wantTotalUsage := provider.Usage{
+		InputTokens: 1_000_000 + 200 + 10, OutputTokens: 500_000 + 100 + 20,
+		CacheReadTokens: 2_000_000, CacheWriteTokens: 400_000,
+	}
+	if !report.Usage.Equal(wantTotalUsage) {
+		t.Errorf("report.Usage = %+v, want %+v", report.Usage, wantTotalUsage)
 	}
 
-	report := j.Cost(prices)
-	wantInput := 1_000_000 + 200 + 10
-	wantOutput := 500_000 + 100 + 20
-	if report.Total.Usage.InputTokens != wantInput || report.Total.Usage.OutputTokens != wantOutput {
-		t.Errorf("Total.Usage = %+v, want input=%d output=%d", report.Total.Usage, wantInput, wantOutput)
+	// The registered model's summed usage, priced by the registry itself.
+	sonnetUsage := provider.Usage{InputTokens: 1_000_000 + 10, OutputTokens: 500_000 + 20, CacheReadTokens: 2_000_000, CacheWriteTokens: 400_000}
+	info, ok := provider.Lookup(registered)
+	if !ok {
+		t.Fatalf("provider.Lookup(%q) not registered — test premise broken", registered)
 	}
-	if report.Total.Usage.CacheReadTokens != 2_000_000 || report.Total.Usage.CacheWriteTokens != 400_000 {
-		t.Errorf("Total.Usage cache = read %d write %d, want 2000000/400000",
-			report.Total.Usage.CacheReadTokens, report.Total.Usage.CacheWriteTokens)
+	wantSonnetCost := info.Pricing.Cost(sonnetUsage)
+
+	if got := report.ByModel[registered]; !got.Usage.Equal(sonnetUsage) || got.Cost != wantSonnetCost {
+		t.Errorf("ByModel[%s] = %+v, want usage %+v cost %+v", registered, got, sonnetUsage, wantSonnetCost)
 	}
-	// USD: known model priced across all four token classes (a: 1*3 + 0.5*15 +
-	// 2*0.3 + 0.4*3.75; c: 10/1e6*3 + 20/1e6*15) + unknown model contributes 0.
-	wantKnownUSD := (1_000_000.0/1_000_000)*3 + (500_000.0/1_000_000)*15 +
-		(2_000_000.0/1_000_000)*0.3 + (400_000.0/1_000_000)*3.75 +
-		(10.0/1_000_000)*3 + (20.0/1_000_000)*15
-	if diff := report.Total.USD - wantKnownUSD; diff > 1e-9 || diff < -1e-9 {
-		t.Errorf("Total.USD = %v, want %v", report.Total.USD, wantKnownUSD)
+	// Unregistered model: usage summed, cost zero.
+	if got := report.ByModel[unregistered]; got.Usage.InputTokens != 200 || got.Usage.OutputTokens != 100 || got.Cost != (provider.Cost{}) {
+		t.Errorf("ByModel[%s] = %+v, want usage summed and zero cost", unregistered, got)
+	}
+	// Total cost = only the registered model contributes.
+	if report.Cost != wantSonnetCost {
+		t.Errorf("report.Cost = %+v, want %+v (unregistered contributes 0)", report.Cost, wantSonnetCost)
 	}
 
-	known := report.ByModel["known"]
-	if known.Usage.InputTokens != 1_000_000+10 || known.Usage.OutputTokens != 500_000+20 {
-		t.Errorf("ByModel[known].Usage = %+v", known.Usage)
-	}
-	unknown := report.ByModel["unknown"]
-	if unknown.Usage.InputTokens != 200 || unknown.Usage.OutputTokens != 100 || unknown.USD != 0 {
-		t.Errorf("ByModel[unknown] = %+v, want tokens summed and USD 0", unknown)
+	// A custom PriceLookup is honored (injectability): double the sonnet rates.
+	custom := fakePriceLookup{registered: provider.Pricing{Input: 6, Output: 30, CacheRead: 0.6, CacheWrite: 7.5}}
+	if got := j.Cost(custom).ByModel[registered].Cost.USD; got <= wantSonnetCost.USD {
+		t.Errorf("custom-priced USD = %v, want > registry USD %v", got, wantSonnetCost.USD)
 	}
 
-	// nil registry: tokens summed, USD 0 everywhere.
+	// nil registry: tokens summed, cost zero everywhere.
 	nilReport := j.Cost(nil)
-	if nilReport.Total.Usage.InputTokens != wantInput || nilReport.Total.USD != 0 {
-		t.Errorf("Cost(nil) = %+v, want USD 0 with tokens summed", nilReport.Total)
+	if !nilReport.Usage.Equal(wantTotalUsage) || nilReport.Cost != (provider.Cost{}) {
+		t.Errorf("Cost(nil) = %+v, want usage summed with zero cost", nilReport)
 	}
 }
 
-type fakePriceLookup map[string]session.ModelPrice
+type fakePriceLookup map[string]provider.Pricing
 
-func (f fakePriceLookup) Price(model string) (session.ModelPrice, bool) {
+func (f fakePriceLookup) Pricing(model string) (provider.Pricing, bool) {
 	p, ok := f[model]
 	return p, ok
 }

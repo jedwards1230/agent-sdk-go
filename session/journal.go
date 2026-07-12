@@ -184,7 +184,9 @@ func (j *Journal) Fold() []ContextMessage {
 }
 
 // Cost aggregates token usage over ALL entries — every branch, including
-// ones dropped from Fold by a fork — priced via reg. See cost.go.
+// ones dropped from Fold by a fork — priced via reg (pass
+// [RegistryPricing] for the built-in provider model registry, or nil to sum
+// tokens without pricing). See cost.go.
 func (j *Journal) Cost(reg PriceLookup) CostReport {
 	j.mu.Lock()
 	entries := make([]Entry, len(j.entries))
