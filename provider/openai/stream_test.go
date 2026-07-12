@@ -310,6 +310,47 @@ func TestStreamToolCallByItemID(t *testing.T) {
 	}
 }
 
+// TestStreamUncorrelatedArgumentDeltaDropped asserts an argument delta that
+// matches no known tool (e.g. it arrives before the tool's added event, or with
+// an unknown item_id) is dropped rather than emitted with an empty ID. The
+// authoritative arguments still arrive on the must-deliver ToolCallEnd.
+func TestStreamUncorrelatedArgumentDeltaDropped(t *testing.T) {
+	payload := event("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","item_id":"ghost","output_index":7,"delta":"{\"a\":1}"}`) +
+		event("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_ok","name":"go","arguments":""}}`) +
+		event("response.function_call_arguments.delta", `{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"b\":2}"}`) +
+		event("response.output_item.done", `{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_ok","name":"go","arguments":"{\"b\":2}"}}`) +
+		event("response.completed", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`)
+
+	evs, _ := streamOnce(t, payload, provider.Credential{Kind: provider.CredAPIKey, Token: "sk"}, provider.Request{})
+
+	var deltas []provider.ToolCall
+	var end *provider.ToolCall
+	for i := range evs {
+		switch evs[i].Type {
+		case provider.StreamToolCallDelta:
+			deltas = append(deltas, *evs[i].Tool)
+		case provider.StreamToolCallEnd:
+			end = evs[i].Tool
+		}
+	}
+	// Only the correlated delta survives; the ghost one is dropped.
+	if len(deltas) != 1 {
+		t.Fatalf("got %d tool deltas, want 1 (the uncorrelated one must be dropped): %+v", len(deltas), deltas)
+	}
+	if deltas[0].ID != "call_ok" || deltas[0].Delta != `{"b":2}` {
+		t.Errorf("surviving delta = %+v", deltas[0])
+	}
+	// No delta is ever emitted with an empty ID.
+	for _, d := range deltas {
+		if d.ID == "" {
+			t.Errorf("delta emitted with empty ID: %+v", d)
+		}
+	}
+	if end == nil || string(end.Input) != `{"b":2}` {
+		t.Errorf("tool end (authoritative args) = %+v", end)
+	}
+}
+
 func TestStreamIncompleteMaxTokens(t *testing.T) {
 	payload := event("response.output_text.delta", `{"type":"response.output_text.delta","delta":"partial"}`) +
 		event("response.incomplete", `{"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":1,"output_tokens":128}}}`)

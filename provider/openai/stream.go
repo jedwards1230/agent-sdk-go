@@ -179,13 +179,17 @@ func (s *stream) handle(frame sseFrame) (provider.StreamEvent, bool, error) {
 		return provider.StreamEvent{}, false, nil
 
 	case "response.function_call_arguments.delta":
-		id := ""
-		if st := s.lookupTool(e.ItemID, e.OutputIndex); st != nil {
-			id = st.callID
+		// Drop a delta we can't correlate to a known call rather than emit it
+		// with an empty ID: an unattributable delta would misroute downstream,
+		// and the authoritative arguments arrive on the must-deliver
+		// StreamToolCallEnd regardless — deltas are lossy live-display only.
+		st := s.lookupTool(e.ItemID, e.OutputIndex)
+		if st == nil {
+			return provider.StreamEvent{}, false, nil
 		}
 		return provider.StreamEvent{
 			Type: provider.StreamToolCallDelta,
-			Tool: &provider.ToolCall{ID: id, Delta: e.Delta},
+			Tool: &provider.ToolCall{ID: st.callID, Delta: e.Delta},
 		}, true, nil
 
 	case "response.output_item.done":
