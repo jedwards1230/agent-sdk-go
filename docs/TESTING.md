@@ -19,6 +19,15 @@ being "thin".
 | sandbox exec | integ | OS-gated | real subprocess under the real sandbox, build-tagged per OS (Seatbelt on macOS legs, bwrap on Linux) |
 | ACP · MCP | integ | every push | small dedicated fake protocol server for request/response fixtures, separate from the loop fakes |
 
+## Reasoning-replay matrix
+
+Reasoning/thinking blocks have twice put a malformed request on the wire (two
+separate live 400s in M1/M2). The matrix — not live testing — must catch the
+third: cover **signed × unsigned** thinking blocks × **empty × non-empty**
+thinking text × **single- × multi-turn** replay, asserting the reconstructed
+provider request is well-formed (thinking signatures preserved, empty blocks
+handled correctly) before it could ever reach the wire.
+
 ## Fixtures
 
 - Script turns **in code** (typed builder funcs for SSE events), not files.
