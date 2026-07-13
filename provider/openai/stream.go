@@ -14,6 +14,12 @@ import (
 // reasoning block's Responses-API item id is journaled.
 const metaItemID = "openai.item_id"
 
+// metaEncrypted is the provider-namespaced StreamEvent.Meta key under which a
+// reasoning block's encrypted content is journaled (opted in via the request's
+// `include: ["reasoning.encrypted_content"]`), enabling full reasoning replay
+// on a later turn.
+const metaEncrypted = "openai.encrypted_content"
+
 // stream adapts a Responses-API SSE body to a [provider.StreamHandle]. One SSE
 // frame yields zero or one normalized events; produced events are returned one
 // per Next call.
@@ -129,11 +135,12 @@ type respEvent struct {
 }
 
 type respItem struct {
-	Type      string `json:"type"`
-	ID        string `json:"id"`
-	CallID    string `json:"call_id"`
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
+	Type             string `json:"type"`
+	ID               string `json:"id"`
+	CallID           string `json:"call_id"`
+	Name             string `json:"name"`
+	Arguments        string `json:"arguments"`
+	EncryptedContent string `json:"encrypted_content"`
 }
 
 type respObject struct {
@@ -230,6 +237,16 @@ func (s *stream) handle(frame sseFrame) (provider.StreamEvent, bool, error) {
 			return provider.StreamEvent{
 				Type: provider.StreamToolCallEnd,
 				Tool: &provider.ToolCall{ID: id, Name: name, Input: initialArgs(e.Item.Arguments)},
+			}, true, nil
+		}
+		if e.Item != nil && e.Item.Type == "reasoning" && e.Item.EncryptedContent != "" {
+			id := e.Item.ID
+			if id == "" {
+				id = s.reasoningByIndex[e.OutputIndex]
+			}
+			return provider.StreamEvent{
+				Type: provider.StreamReasoningDelta,
+				Meta: map[string]string{metaEncrypted: e.Item.EncryptedContent, metaItemID: id},
 			}, true, nil
 		}
 		return provider.StreamEvent{}, false, nil

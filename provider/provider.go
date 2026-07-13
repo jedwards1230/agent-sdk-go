@@ -189,9 +189,14 @@ type StopReason string
 
 // The normalized stop reasons.
 const (
-	StopEndTurn      StopReason = "end_turn"
-	StopToolUse      StopReason = "tool_use"
-	StopMaxTokens    StopReason = "max_tokens"
+	StopEndTurn   StopReason = "end_turn"
+	StopToolUse   StopReason = "tool_use"
+	StopMaxTokens StopReason = "max_tokens"
+	// StopMaxTurns is the loop's own terminal reason when it stops a run at the
+	// model-call iteration cap while the model is still requesting tools. No
+	// provider reports it; the loop emits it so a client (e.g. the ACP
+	// projection) sees a settled, non-tool_use turn end instead of hanging.
+	StopMaxTurns     StopReason = "max_turns"
 	StopStopSequence StopReason = "stop_sequence"
 	StopRefusal      StopReason = "refusal"
 	StopError        StopReason = "error"

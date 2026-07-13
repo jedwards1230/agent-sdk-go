@@ -174,12 +174,12 @@ func (j *Journal) Entries() []Entry {
 // toward the root, then renders in root-to-head order. An [EntryCompaction]
 // entry encountered while walking backward is the boundary: it is included —
 // rendered as a user-role message carrying its summary text, first in the
-// result — and no further ancestors are walked. [EntryForkPoint] entries are
-// markers and contribute nothing. A malformed payload (which should not occur
-// for entries built through the typed constructors) is skipped rather than
-// causing Fold to fail. Every content block's Meta (e.g. a reasoning
-// signature) is preserved verbatim, since it is stored verbatim in the
-// journal.
+// result — and no further ancestors are walked. [EntryForkPoint] and
+// [EntryMeta] entries are markers and contribute nothing. A malformed payload
+// (which should not occur for entries built through the typed constructors)
+// is skipped rather than causing Fold to fail. Every content block's Meta
+// (e.g. a reasoning signature) is preserved verbatim, since it is stored
+// verbatim in the journal.
 func (j *Journal) Fold() []provider.Message {
 	j.mu.Lock()
 	entries := make([]Entry, len(j.entries))
@@ -278,6 +278,8 @@ func renderContext(e Entry) (provider.Message, bool) {
 		}
 		return provider.Message{Role: provider.RoleUser, Content: []provider.ContentBlock{provider.TextBlock(p.Summary)}}, true
 	case EntryForkPoint:
+		return provider.Message{}, false
+	case EntryMeta:
 		return provider.Message{}, false
 	default:
 		return provider.Message{}, false

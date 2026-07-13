@@ -136,6 +136,33 @@ func TestBrokerReplay(t *testing.T) {
 	}
 }
 
+// TestBrokerSubscribeLiveSkipsReplay asserts SubscribeLive receives only events
+// published after it subscribes, never the retained must-deliver backlog that
+// Subscribe replays — the guard a new-turn driver needs so a prior turn's
+// retained terminal event is not mistaken for its own turn finishing.
+func TestBrokerSubscribeLiveSkipsReplay(t *testing.T) {
+	b := event.NewBroker(event.WithClock(fixedClock), event.WithReplay(8))
+	defer b.Close()
+
+	b.Publish(event.NewSessionCreated(sid))                             // retained
+	b.Publish(event.NewTurnFinished(sid, "end_turn", provider.Usage{})) // retained (a prior turn's terminal)
+
+	sub := b.SubscribeLive(event.FilterAll, 8)
+
+	// No backlog is replayed: a non-blocking read finds the channel empty.
+	select {
+	case e := <-sub.C:
+		t.Fatalf("SubscribeLive replayed a retained event: %s", e.Kind())
+	default:
+	}
+
+	// Only events published AFTER SubscribeLive are delivered.
+	b.Publish(event.NewTurnStarted(sid))
+	if got := (<-sub.C).Kind(); got != event.KindTurnStarted {
+		t.Fatalf("live event = %s, want %s", got, event.KindTurnStarted)
+	}
+}
+
 // TestEventEnvelope asserts the JSON envelope shape: type/session_id/seq/time
 // plus payload fields, with seq and time assigned at publish.
 func TestEventEnvelope(t *testing.T) {

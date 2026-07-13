@@ -332,9 +332,35 @@ func TestIterationCap(t *testing.T) {
 	if res.Iterations != 3 {
 		t.Errorf("iterations = %d, want 3 (the cap)", res.Iterations)
 	}
-	// non-fatal session.error announcing the cap.
-	if countKind(collectKinds(sub), event.KindSessionError) != 1 {
-		t.Error("want a session.error announcing the iteration cap")
+	if res.StopReason != provider.StopMaxTurns {
+		t.Errorf("StopReason = %q, want %q (cap is a terminal stop, not tool_use)", res.StopReason, provider.StopMaxTurns)
+	}
+
+	// Drain the stream: exactly one non-fatal session.error announcing the cap,
+	// plus a terminal turn.finished carrying StopMaxTurns — the settled,
+	// ACP-mappable run-end signal, so a client does not hang on the last
+	// iteration's tool_use turn.
+	var sessionErrors, capFinished int
+	for drained := false; !drained; {
+		select {
+		case e := <-sub.C:
+			switch ev := e.(type) {
+			case event.SessionError:
+				sessionErrors++
+			case event.TurnFinished:
+				if ev.StopReason == string(provider.StopMaxTurns) {
+					capFinished++
+				}
+			}
+		default:
+			drained = true
+		}
+	}
+	if sessionErrors != 1 {
+		t.Errorf("session.error count = %d, want 1 (cap diagnostic)", sessionErrors)
+	}
+	if capFinished != 1 {
+		t.Errorf("terminal turn.finished(max_turns) count = %d, want 1", capFinished)
 	}
 }
 

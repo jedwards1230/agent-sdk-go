@@ -137,6 +137,51 @@ func TestJournalFoldLinearChain(t *testing.T) {
 	}
 }
 
+// TestJournalFoldSkipsMetaEntry asserts a leading [session.EntryMeta] entry
+// (the root a runner.New-created journal writes first) contributes nothing to
+// Fold: the folded output for a journal seeded with a meta entry is identical
+// to one without it.
+func TestJournalFoldSkipsMetaEntry(t *testing.T) {
+	ctx := context.Background()
+	newJournal := func(t *testing.T, withMeta bool) *session.Journal {
+		t.Helper()
+		store, err := session.NewFileStore(
+			session.WithRoot(t.TempDir()),
+			session.WithStoreIDGen(newCounterIDGen("e")),
+			session.WithStoreClock(newStepClock(time.Now(), time.Second)),
+		)
+		if err != nil {
+			t.Fatalf("NewFileStore: %v", err)
+		}
+		j, err := store.Create(ctx, "proj")
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if withMeta {
+			if _, err := j.Append(session.NewMetaEntry("/work/proj")); err != nil {
+				t.Fatalf("Append meta: %v", err)
+			}
+		}
+		for _, content := range []string{"one", "two", "three"} {
+			if _, err := j.Append(session.NewMessageEntry(provider.UserText(content))); err != nil {
+				t.Fatalf("Append: %v", err)
+			}
+		}
+		return j
+	}
+
+	withMeta := newJournal(t, true)
+	withoutMeta := newJournal(t, false)
+
+	got, want := withMeta.Fold(), withoutMeta.Fold()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Fold() with a leading meta entry = %+v, want identical to without: %+v", got, want)
+	}
+	if len(got) != 3 {
+		t.Fatalf("Fold() len = %d, want 3", len(got))
+	}
+}
+
 // TestJournalFoldCompactionBoundary asserts a compaction entry truncates the
 // fold, rendering its summary as the first (oldest) message — a user-role
 // message re-entering context, per Fold's compaction rendering rule — and

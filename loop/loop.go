@@ -196,9 +196,14 @@ func Run(ctx context.Context, cfg Config, messages []provider.Message) (Result, 
 		msgs = r.prepareNextTurn(ctx, TurnState{Messages: msgs, Iteration: iter, LastStop: stop, Usage: cum})
 	}
 
-	// Iteration cap reached with the model still requesting tools.
+	// Iteration cap reached with the model still requesting tools. Emit a
+	// non-fatal session.error for diagnostics, plus a terminal turn.finished
+	// carrying StopMaxTurns as the settled run-end signal — so a client that
+	// maps turn.finished to a response (the ACP projection) reports "stopped:
+	// max turns" instead of hanging on the last iteration's tool_use.
 	r.emitError(fmt.Sprintf("loop: iteration cap (%d) reached", maxIters), false)
-	return Result{Messages: msgs, Usage: cum, StopReason: stop, Iterations: iter}, nil
+	r.broker().Publish(r.turnFinished(provider.StopMaxTurns, provider.Usage{}))
+	return Result{Messages: msgs, Usage: cum, StopReason: provider.StopMaxTurns, Iterations: iter}, nil
 }
 
 // runner carries per-Run state and helpers.
@@ -294,7 +299,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 		// (every tool_use gets a matching tool_result).
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
-			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, nil))
+			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, true, nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
@@ -313,7 +318,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 
 		res = r.afterTool(ctx, call, res)
 
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.Diagnostics))
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
 		blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, res.IsError))
 	}
 	return blocks
@@ -462,7 +467,7 @@ func (c *converter) closeMessage() {
 		return
 	}
 	content := c.buf.String()
-	c.broker.Publish(event.NewMessageFinished(c.sid, c.kind, content))
+	c.broker.Publish(event.NewMessageFinishedMeta(c.sid, c.kind, content, c.curMeta))
 	var block provider.ContentBlock
 	switch c.kind {
 	case event.MessageReasoning:

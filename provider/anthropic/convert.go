@@ -157,10 +157,21 @@ func convertMessages(msgs []provider.Message) []wireMessage {
 			case provider.BlockText:
 				blocks = append(blocks, wireBlock{Type: "text", Text: b.Text})
 			case provider.BlockReasoning:
-				if sig := b.Meta[metaSignatureKey]; sig != "" {
+				// Replay a reasoning block as a signed thinking block only when it
+				// carries BOTH the Anthropic signature AND its thinking text. The
+				// API requires a thinking block's `thinking` field (and the
+				// signature signs that text), so a signature-only block — Anthropic
+				// streamed a signature_delta with no thinking_delta text, folding to
+				// an empty-text reasoning block — cannot be replayed as a valid
+				// thinking block: emitting one drops the required `thinking` field
+				// (wireBlock.Thinking is omitempty on the shared union) and the API
+				// rejects it with "messages.N.content.M.thinking.thinking: Field
+				// required". Drop it, exactly as unsigned reasoning is dropped.
+				// (OpenAI-style empty-summary reasoning, replayed via
+				// encrypted_content Meta, never reaches this Anthropic encoder.)
+				if sig := b.Meta[metaSignatureKey]; sig != "" && b.Text != "" {
 					blocks = append(blocks, wireBlock{Type: "thinking", Thinking: b.Text, Signature: sig})
 				}
-				// Unsigned reasoning cannot be replayed; drop it.
 			case provider.BlockToolUse:
 				input := b.ToolInput
 				if len(input) == 0 {

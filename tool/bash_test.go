@@ -121,6 +121,28 @@ func TestBashInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestBashNonexistentRootSurfacesOSReason(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir", "xyz")
+	b := NewBash(root)
+	res, err := b.Run(context.Background(), json.RawMessage(`{"command":"echo hi"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (root does not exist)")
+	}
+	if res.Content == "[exit -1]" || strings.TrimSpace(res.Content) == "[exit -1]" {
+		t.Fatalf("Content = %q, want the underlying OS reason, not a bare [exit -1]", res.Content)
+	}
+	if !strings.Contains(res.Content, "no such file or directory") && !strings.Contains(res.Content, "does not exist") {
+		t.Fatalf("Content = %q, want it to contain the OS reason (no such file or directory)", res.Content)
+	}
+	if res.Metadata.ExitCode == nil || *res.Metadata.ExitCode != -1 {
+		t.Fatalf("ExitCode = %v, want -1", res.Metadata.ExitCode)
+	}
+}
+
 func TestBashRunsInRoot(t *testing.T) {
 	dir := t.TempDir()
 	resolvedDir, err := filepath.EvalSymlinks(dir)

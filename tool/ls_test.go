@@ -45,6 +45,22 @@ func TestLSNotFound(t *testing.T) {
 	}
 }
 
+func TestLSNonexistentRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir")
+	ls := NewLS(root)
+	res, err := ls.Run(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (root does not exist)")
+	}
+	if res.Content == "" {
+		t.Fatal("Content is empty, want a clear error message")
+	}
+}
+
 func TestLSNotADirectory(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("x"), 0o644); err != nil {

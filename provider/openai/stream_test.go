@@ -272,6 +272,36 @@ func TestStreamReasoningItemIDMeta(t *testing.T) {
 	}
 }
 
+// TestStreamReasoningEncryptedContent asserts a reasoning item's
+// output_item.done frame carrying encrypted_content emits a
+// StreamReasoningDelta whose Meta carries both the item id and the encrypted
+// content, for the loop to merge onto the assembled block.
+func TestStreamReasoningEncryptedContent(t *testing.T) {
+	payload := event("response.output_item.added", `{"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_42","summary":[]}}`) +
+		event("response.reasoning_summary_text.delta", `{"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"rs_42","delta":"thinking"}`) +
+		event("response.output_item.done", `{"type":"response.output_item.done","output_index":0,"item":{"type":"reasoning","id":"rs_42","encrypted_content":"enc-blob","summary":[]}}`) +
+		event("response.completed", `{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}`)
+
+	evs, _ := streamOnce(t, payload, provider.Credential{Kind: provider.CredAPIKey, Token: "sk"}, provider.Request{})
+
+	var sawEncrypted bool
+	for _, e := range evs {
+		if e.Type != provider.StreamReasoningDelta || e.Meta[metaEncrypted] == "" {
+			continue
+		}
+		sawEncrypted = true
+		if e.Meta[metaEncrypted] != "enc-blob" {
+			t.Errorf("Meta[%s] = %q, want enc-blob", metaEncrypted, e.Meta[metaEncrypted])
+		}
+		if e.Meta[metaItemID] != "rs_42" {
+			t.Errorf("Meta[%s] = %q, want rs_42", metaItemID, e.Meta[metaItemID])
+		}
+	}
+	if !sawEncrypted {
+		t.Fatal("expected a reasoning delta carrying encrypted_content")
+	}
+}
+
 // TestStreamToolCall covers the interleaved tool-call lifecycle: added ->
 // arguments deltas -> item done, and the tool-use stop reason.
 func TestStreamToolCall(t *testing.T) {

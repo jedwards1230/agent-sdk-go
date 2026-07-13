@@ -65,6 +65,18 @@ func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 	if cp.Summary != "summary text" || cp.ReplacesThrough != "entry-9" {
 		t.Errorf("Compaction() = %+v, unexpected", cp)
 	}
+
+	meta := session.NewMetaEntry("/home/user/project")
+	if meta.Type != session.EntryMeta {
+		t.Fatalf("meta.Type = %q, want %q", meta.Type, session.EntryMeta)
+	}
+	mp, err := meta.Meta()
+	if err != nil {
+		t.Fatalf("Meta(): %v", err)
+	}
+	if mp.Cwd != "/home/user/project" {
+		t.Errorf("Meta().Cwd = %q, want %q", mp.Cwd, "/home/user/project")
+	}
 }
 
 // TestEntryAccessorWrongTypeErrors asserts calling a typed accessor on a
@@ -80,6 +92,9 @@ func TestEntryAccessorWrongTypeErrors(t *testing.T) {
 	}
 	if _, err := msg.Fork(); !errors.Is(err, session.ErrEntryType) {
 		t.Errorf("Fork() on message entry: err = %v, want ErrEntryType", err)
+	}
+	if _, err := msg.Meta(); !errors.Is(err, session.ErrEntryType) {
+		t.Errorf("Meta() on message entry: err = %v, want ErrEntryType", err)
 	}
 
 	comp := session.NewCompactionEntry("s", "")

@@ -16,6 +16,7 @@ type responsesRequest struct {
 	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
 	Temperature     *float64         `json:"temperature,omitempty"`
 	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
+	Include         []string         `json:"include,omitempty"`
 	Stream          bool             `json:"stream"`
 	Store           bool             `json:"store"`
 }
@@ -65,6 +66,16 @@ type functionCallOutputItem struct {
 	Output string `json:"output"`
 }
 
+// reasoningItem replays a reasoning block carrying both its item id and
+// encrypted content (see buildInput). Summary must marshal as [] (never
+// null) — the API rejects a missing/null summary field.
+type reasoningItem struct {
+	Type             string `json:"type"`
+	ID               string `json:"id"`
+	EncryptedContent string `json:"encrypted_content"`
+	Summary          []any  `json:"summary"`
+}
+
 // emptySchema is the default parameters for a tool that declares no input
 // schema; the API requires a schema object for function tools.
 var emptySchema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -93,6 +104,9 @@ func buildRequest(model string, req provider.Request, reasoningModel bool) ([]by
 				effort = "medium"
 			}
 			out.Reasoning = &reasoningConfig{Effort: effort, Summary: "auto"}
+			// Opt into encrypted reasoning content so reasoning blocks can be
+			// replayed on a later turn (see buildInput).
+			out.Include = []string{"reasoning.encrypted_content"}
 		}
 	} else if req.Params.Temperature != nil {
 		out.Temperature = req.Params.Temperature
@@ -140,9 +154,20 @@ func buildInput(messages []provider.Message) []any {
 				items = append(items, functionCallOutputItem{
 					Type: "function_call_output", CallID: b.ToolUseID, Output: b.ToolResult,
 				})
-			case provider.BlockReasoning, provider.BlockImage:
-				// Reasoning is not round-tripped (no persisted encrypted content);
-				// images are M1 placeholders. Both are dropped (documented).
+			case provider.BlockReasoning:
+				// Replay requires both the item id and its encrypted content
+				// (opted in via the request's `include` field); a block missing
+				// either is dropped rather than sent malformed.
+				id, enc := b.Meta[metaItemID], b.Meta[metaEncrypted]
+				if id == "" || enc == "" {
+					continue
+				}
+				flush()
+				items = append(items, reasoningItem{
+					Type: "reasoning", ID: id, EncryptedContent: enc, Summary: []any{},
+				})
+			case provider.BlockImage:
+				// Images are M1 placeholders and are dropped (documented).
 			}
 		}
 		flush()

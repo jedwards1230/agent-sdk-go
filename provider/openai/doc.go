@@ -35,11 +35,12 @@
 //     round-tripped into request history.
 //   - Temperature is only sent to non-reasoning models; reasoning models reject
 //     it, so it is dropped for them.
-//   - Reasoning blocks are not replayed on subsequent requests in M1: full
-//     replay requires reasoning.encrypted_content (opted in via the request
-//     `include` field) round-tripped back as reasoning input items — tracked for
-//     M2. Inbound reasoning deltas are already tagged with their Responses-API
-//     item id under StreamEvent.Meta["openai.item_id"] (journaled onto the
-//     assembled block) so the M2 change is small. Image blocks are placeholders
-//     and are skipped.
+//   - Reasoning blocks are replayed on subsequent requests: the request opts in
+//     via `include: ["reasoning.encrypted_content"]` whenever reasoning is
+//     enabled, and the output item's encrypted_content is journaled onto the
+//     assembled block under StreamEvent.Meta["openai.encrypted_content"]
+//     alongside the item id under Meta["openai.item_id"]. A reasoning block
+//     carrying both is replayed as a "reasoning" input item; a block missing
+//     either (e.g. reasoning was disabled, or the block predates this feature)
+//     is still dropped. Image blocks are placeholders and are skipped.
 package openai

@@ -269,6 +269,15 @@ func (s *FileStore) Open(ctx context.Context, id string) (*Journal, error) {
 	return j, nil
 }
 
+// ReadEntries reads the entries of the JSONL journal file at path, without
+// opening a live append handle or touching any store's cache. It is for
+// enumerating a disk session's metadata (see [Entry.Meta]) — e.g. listing
+// sessions after a process restart — without resuming it. If path does not
+// exist, it returns (nil, nil).
+func ReadEntries(path string) ([]Entry, error) {
+	return readJournal(path, nil)
+}
+
 // find scans every project directory under the store root for id + ".jsonl",
 // returning its path and owning project slug.
 func (s *FileStore) find(id string) (path, slug string, err error) {
