@@ -130,6 +130,7 @@ func TestStopReasonFor(t *testing.T) {
 		{"end_turn", acp.StopReasonEndTurn, true},
 		{"stop_sequence", acp.StopReasonEndTurn, true},
 		{"max_tokens", acp.StopReasonMaxTokens, true},
+		{"max_turns", acp.StopReasonMaxTurnRequests, true},
 		{"refusal", acp.StopReasonRefusal, true},
 		{"cancelled", acp.StopReasonCancelled, true},
 		{"tool_use", "", false},

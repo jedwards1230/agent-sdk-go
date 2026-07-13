@@ -196,9 +196,14 @@ func Run(ctx context.Context, cfg Config, messages []provider.Message) (Result, 
 		msgs = r.prepareNextTurn(ctx, TurnState{Messages: msgs, Iteration: iter, LastStop: stop, Usage: cum})
 	}
 
-	// Iteration cap reached with the model still requesting tools.
+	// Iteration cap reached with the model still requesting tools. Emit a
+	// non-fatal session.error for diagnostics, plus a terminal turn.finished
+	// carrying StopMaxTurns as the settled run-end signal — so a client that
+	// maps turn.finished to a response (the ACP projection) reports "stopped:
+	// max turns" instead of hanging on the last iteration's tool_use.
 	r.emitError(fmt.Sprintf("loop: iteration cap (%d) reached", maxIters), false)
-	return Result{Messages: msgs, Usage: cum, StopReason: stop, Iterations: iter}, nil
+	r.broker().Publish(r.turnFinished(provider.StopMaxTurns, provider.Usage{}))
+	return Result{Messages: msgs, Usage: cum, StopReason: provider.StopMaxTurns, Iterations: iter}, nil
 }
 
 // runner carries per-Run state and helpers.
