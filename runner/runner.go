@@ -267,6 +267,14 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 // awaitJournaled blocks until the consume goroutine has journaled every event
 // published so far — the run that just completed. It returns immediately if the
 // Runner has been closed (consume has exited).
+//
+// The ordering guarantee (this run's entries are durable before the next
+// Prompt's user message is appended) holds as long as the journaling
+// subscription is not force-dropped by the broker — i.e. consume never blocks a
+// must-deliver event past the broker's bound. consume only stops receiving to
+// service this barrier, which happens after the run's publishing is done, and
+// the subscription is buffered to defaultSubBuffer (256) must-deliver events, so
+// a force-drop is not reachable on the Prompt path in practice.
 func (r *Runner) awaitJournaled() {
 	ack := make(chan struct{})
 	select {
