@@ -5,10 +5,13 @@ import "github.com/jedwards1230/agent-sdk-go/event"
 // ToSessionUpdate projects one [event.Event] to a session/update notification.
 // ok is false when the event has no ACP projection:
 //
-//   - message.started / message.finished: the client already received the
-//     content via message.delta chunks (agent_message_chunk /
-//     agent_thought_chunk); ACP has no separate "message started/finished"
-//     signal, and re-sending the settled content would duplicate it.
+//   - message.started / message.finished for agent text/reasoning: the client
+//     already received the content via message.delta chunks
+//     (agent_message_chunk / agent_thought_chunk); ACP has no separate
+//     "message started/finished" signal, and re-sending the settled content
+//     would duplicate it. The one exception is a settled
+//     [event.MessageUser] message (below), which streams live — a user
+//     prompt is never sent as deltas, so there is nothing to duplicate.
 //   - tool.call.delta: ACP has no incremental tool-output chunk distinct from
 //     a tool_call_update; a daemon that wants to stream tool output can emit
 //     tool_call_update updates itself, but this projection does not synthesize
@@ -26,6 +29,19 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 			update = AgentMessageChunk{Content: block}
 		}
 		return SessionNotification{SessionID: sessionID, Update: update}, true
+
+	case event.MessageFinished:
+		if ev.MessageKind != event.MessageUser {
+			return SessionNotification{}, false
+		}
+		// The user's own prompt turn has no deltas, so its settled
+		// MessageFinished is the only signal a client gets — project it
+		// directly, mirroring how ReplayNotifications folds a journaled user
+		// message into a UserMessageChunk.
+		return SessionNotification{
+			SessionID: sessionID,
+			Update:    UserMessageChunk{Content: TextBlock(ev.Content)},
+		}, true
 
 	case event.ToolCallStarted:
 		return SessionNotification{
