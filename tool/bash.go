@@ -66,7 +66,10 @@ type bashInput struct {
 // Run executes the command via "<shell> -c <command>" with cmd.Dir set to
 // root. Cancelling ctx SIGKILLs the subprocess and Run returns ctx.Err().
 // Independently, an internal timeout (timeout_ms, default 120s, capped at
-// 600s) fires a [Result] with IsError set rather than an error return.
+// 600s) fires a [Result] with IsError set rather than an error return. If the
+// process never starts at all (e.g. root does not exist, or the shell is
+// missing), the underlying OS error is included in the [Result]'s Content
+// rather than being dropped.
 func (b *Bash) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if err := ctxErr(ctx); err != nil {
 		return Result{}, err
@@ -117,15 +120,27 @@ func (b *Bash) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	}
 
 	exitCode := 0
+	var startErr error
 	switch {
 	case cmd.ProcessState != nil:
 		exitCode = cmd.ProcessState.ExitCode()
 	case runErr != nil:
+		// The process never started (ProcessState is nil) — e.g. cmd.Dir does
+		// not exist or the shell is missing. cmd.Run's error carries the real
+		// reason; surface it instead of a bare "[exit -1]".
 		exitCode = -1
+		startErr = runErr
 	}
 
 	content := output
-	if exitCode != 0 {
+	switch {
+	case startErr != nil:
+		if output == "" {
+			content = fmt.Sprintf("command failed to start: %v", startErr)
+		} else {
+			content = fmt.Sprintf("%s\ncommand failed to start: %v", output, startErr)
+		}
+	case exitCode != 0:
 		content = fmt.Sprintf("%s\n[exit %d]", output, exitCode)
 	}
 

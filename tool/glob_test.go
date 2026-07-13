@@ -126,6 +126,22 @@ func TestGlobSortedOrder(t *testing.T) {
 	}
 }
 
+func TestGlobNonexistentRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir")
+	g := NewGlob(root)
+	res, err := g.Run(context.Background(), json.RawMessage(`{"pattern":"*.go"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (root does not exist)")
+	}
+	if !strings.Contains(res.Content, "no such file or directory") && !strings.Contains(res.Content, "does not exist") {
+		t.Fatalf("Content = %q, want it to contain the OS reason", res.Content)
+	}
+}
+
 func TestGlobMissingPattern(t *testing.T) {
 	dir := t.TempDir()
 	g := NewGlob(dir)

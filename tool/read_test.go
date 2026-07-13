@@ -112,6 +112,22 @@ func TestReadNotFound(t *testing.T) {
 	}
 }
 
+func TestReadNonexistentRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir")
+	r := NewRead(root)
+	res, err := r.Run(context.Background(), json.RawMessage(`{"path":"f.txt"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (root does not exist)")
+	}
+	if !strings.Contains(res.Content, "file not found") {
+		t.Fatalf("Content = %q, want not-found message", res.Content)
+	}
+}
+
 func TestReadDirectory(t *testing.T) {
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "sub")

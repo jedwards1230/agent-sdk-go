@@ -159,6 +159,22 @@ func TestEditMissingFile(t *testing.T) {
 	}
 }
 
+func TestEditNonexistentRoot(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir")
+	e := NewEdit(root)
+	res, err := e.Run(context.Background(), json.RawMessage(`{"path":"f.txt","old_string":"a","new_string":"b"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatalf("IsError = false, want true (root does not exist)")
+	}
+	if !strings.Contains(res.Content, "file not found") {
+		t.Fatalf("Content = %q, want file-not-found message", res.Content)
+	}
+}
+
 func TestEditMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	e := NewEdit(dir)
