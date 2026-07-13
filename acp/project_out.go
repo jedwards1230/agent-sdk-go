@@ -70,6 +70,8 @@ func StopReasonFor(stop string) (StopReason, bool) {
 		return StopReasonEndTurn, true
 	case "max_tokens":
 		return StopReasonMaxTokens, true
+	case "max_turns":
+		return StopReasonMaxTurnRequests, true
 	case "refusal":
 		return StopReasonRefusal, true
 	case "cancelled":
