@@ -171,6 +171,46 @@ func TestBuildBodyReplaysSignedReasoning(t *testing.T) {
 	}
 }
 
+// TestBuildBodyDropsEmptyTextSignedReasoning is the regression for the live
+// Anthropic 400 "messages.N.content.M.thinking.thinking: Field required": a
+// reasoning block that carries a signature but EMPTY text (Anthropic streamed a
+// signature_delta with no thinking_delta text, folding to an empty-text signed
+// reasoning block) must NOT be replayed as a thinking block — a thinking block
+// with an empty `thinking` field serializes without the field (omitempty on the
+// shared wire union) and the API rejects the whole request.
+func TestBuildBodyDropsEmptyTextSignedReasoning(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	msgs := []provider.Message{
+		provider.UserText("run it"),
+		{Role: provider.RoleAssistant, Content: []provider.ContentBlock{
+			{Type: provider.BlockReasoning, Text: "", Meta: map[string]string{metaSignatureKey: "sig-empty"}},
+			provider.ToolUseBlock("toolu_1", "bash", json.RawMessage(`{"cmd":"ls"}`)),
+		}},
+	}
+	r, err := p.buildBody(provider.Request{Messages: msgs}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+
+	// The empty-text thinking block is dropped: only the tool_use survives.
+	body := decodeBody(t, r)
+	asst := body.Messages[1]
+	if len(asst.Content) != 1 || asst.Content[0].Type != "tool_use" {
+		t.Fatalf("assistant content = %+v, want only tool_use (empty-text thinking dropped)", asst.Content)
+	}
+
+	// Belt-and-suspenders: no thinking block anywhere in the wire body may carry
+	// an empty `thinking` field (absent or "" both decode to ""), which is the
+	// exact shape the API 400s on.
+	for mi, m := range body.Messages {
+		for ci, b := range m.Content {
+			if b.Type == "thinking" && b.Thinking == "" {
+				t.Errorf("messages[%d].content[%d] is a thinking block with an empty thinking field", mi, ci)
+			}
+		}
+	}
+}
+
 func TestBuildBodyDropsUnsignedReasoning(t *testing.T) {
 	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
 	msgs := []provider.Message{
