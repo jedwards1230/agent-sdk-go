@@ -186,6 +186,106 @@ func TestRunner_TextTurn(t *testing.T) {
 	}
 }
 
+// TestRunner_PromptEmitsUserMessageBeforeTurnStarted asserts Prompt publishes
+// the user's own turn (MessageStarted{MessageUser} then
+// MessageFinished{MessageUser, text}) onto the event stream BEFORE the loop's
+// TurnStarted, so a live observer (TUI, attached ACP client) renders the
+// user's prompt ahead of the agent's reply. It also asserts the user-message
+// events do NOT get journaled as a separate entry (consume only journals
+// MessageFinished{MessageText/MessageReasoning}) — the journal still holds
+// exactly the user message appended by session.NewMessageEntry, not a
+// duplicate.
+func TestRunner_PromptEmitsUserMessageBeforeTurnStarted(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	prov := &scriptedProvider{events: [][]provider.StreamEvent{
+		{
+			{Type: provider.StreamTextDelta, Text: "hi"},
+			{Type: provider.StreamFinished, StopReason: provider.StopEndTurn, Usage: provider.Usage{}},
+		},
+	}}
+
+	r, err := runner.New(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: testModel, System: "test system",
+		Provider: prov,
+		Tools:    oneToolRegistry{},
+		IDGen:    seqIDGen(),
+		Clock:    seqClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	sub := r.EventsLive()
+	defer sub.Close()
+
+	if err := r.Prompt(context.Background(), "hello there"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Collect events up to and including TurnFinished, so the assertions
+	// below don't hang waiting past the settled turn.
+	var kinds []string
+	var msgStarted event.MessageStarted
+	var msgFinished event.MessageFinished
+collect:
+	for {
+		select {
+		case e := <-sub.C:
+			kinds = append(kinds, e.Kind())
+			switch ev := e.(type) {
+			case event.MessageStarted:
+				if ev.MessageKind == event.MessageUser {
+					msgStarted = ev
+				}
+			case event.MessageFinished:
+				if ev.MessageKind == event.MessageUser {
+					msgFinished = ev
+				}
+			}
+			if e.Kind() == event.KindTurnFinished {
+				break collect
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for turn.finished; collected so far: %v", kinds)
+		}
+	}
+
+	if msgStarted.MessageKind != event.MessageUser {
+		t.Fatalf("no MessageStarted{MessageUser} observed; kinds = %v", kinds)
+	}
+	if msgFinished.MessageKind != event.MessageUser || msgFinished.Content != "hello there" {
+		t.Fatalf("MessageFinished{MessageUser} = %+v, want content %q", msgFinished, "hello there")
+	}
+
+	// Ordering: message.started, message.finished (both MessageUser) precede
+	// turn.started.
+	wantPrefix := []string{event.KindMessageStarted, event.KindMessageFinished, event.KindTurnStarted}
+	if len(kinds) < len(wantPrefix) {
+		t.Fatalf("kinds = %v, want at least %d events", kinds, len(wantPrefix))
+	}
+	for i, want := range wantPrefix {
+		if kinds[i] != want {
+			t.Fatalf("kinds[%d] = %s, want %s (full sequence: %v)", i, kinds[i], want, kinds)
+		}
+	}
+
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// The journal holds exactly the user + assistant message entries — the
+	// user-message events above are NOT separately journaled.
+	fold := r.Fold()
+	if len(fold) != 2 {
+		t.Fatalf("Fold: got %d messages, want 2 (no duplicate user entry): %+v", len(fold), fold)
+	}
+	if fold[0].Role != provider.RoleUser || msgText(fold[0]) != "hello there" {
+		t.Errorf("fold[0] = %+v, want user %q", fold[0], "hello there")
+	}
+}
+
 // TestRunner_EventsLiveSkipsRetainedBacklog asserts EventsLive omits the
 // broker's retained must-deliver backlog that Events replays. It is the
 // SDK-level guard against a new-turn driver mistaking a PRIOR turn's retained

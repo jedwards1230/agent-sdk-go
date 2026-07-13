@@ -72,6 +72,23 @@ func TestToSessionUpdate(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			name:   "message finished reasoning has no projection",
+			event:  event.NewMessageFinished(sid, event.MessageReasoning, "settled"),
+			wantOK: false,
+		},
+		{
+			name:   "message finished user -> user_message_chunk",
+			event:  event.NewMessageFinished(sid, event.MessageUser, "hi"),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"user_message_chunk",` +
+				`"content":{"type":"text","text":"hi"}}}`,
+		},
+		{
+			name:   "message started user has no projection",
+			event:  event.NewMessageStarted(sid, event.MessageUser),
+			wantOK: false,
+		},
+		{
 			name:   "turn started has no projection",
 			event:  event.NewTurnStarted(sid),
 			wantOK: false,

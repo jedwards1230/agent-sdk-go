@@ -260,6 +260,15 @@ func (r *Runner) EventsLive() *event.Subscription {
 // stream into the journal concurrently as each turn settles (see consume);
 // a cancelled ctx interrupts the loop between or during model calls, leaving
 // whatever prefix had already settled durably on disk.
+//
+// Before driving the loop, Prompt publishes the user's own turn onto the
+// event stream as a MessageStarted/MessageFinished{MessageUser} pair (no
+// delta — a prompt isn't streamed token-by-token), so every live observer
+// (an attached TUI, a daemon forwarding to attached clients) can render the
+// user's side of the transcript. Both kinds are must-deliver, so the broker
+// retains and replays them like any other terminal event. This publish
+// happens before loop.Run, so the user message always precedes that run's
+// TurnStarted and agent reply in the stream.
 func (r *Runner) Prompt(ctx context.Context, text string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -267,6 +276,9 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	if _, err := r.journal.Append(session.NewMessageEntry(provider.UserText(text))); err != nil {
 		return fmt.Errorf("runner: append user message: %w", err)
 	}
+	sid := r.journal.ID()
+	r.broker.Publish(event.NewMessageStarted(sid, event.MessageUser))
+	r.broker.Publish(event.NewMessageFinishedMeta(sid, event.MessageUser, text, nil))
 
 	cfg := loop.Config{
 		Provider:  r.provider,
@@ -275,7 +287,7 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 		Params:    r.params,
 		Tools:     r.tools,
 		Broker:    r.broker,
-		SessionID: r.journal.ID(),
+		SessionID: sid,
 		MaxIters:  r.maxIters,
 	}
 	// The journal folds back to provider messages directly (verbatim content

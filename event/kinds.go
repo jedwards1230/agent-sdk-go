@@ -41,13 +41,18 @@ const (
 	KindSessionError = "session.error"
 )
 
-// MessageKind distinguishes the two message channels the loop streams.
+// MessageKind distinguishes the message channels carried by message.* events.
 type MessageKind string
 
 // The message kinds carried by message.* events.
 const (
 	MessageText      MessageKind = "text"
 	MessageReasoning MessageKind = "reasoning"
+	// MessageUser is the user's own prompt turn, published as a
+	// MessageStarted/MessageFinished pair with no deltas (a user prompt isn't
+	// streamed token-by-token) so every stream observer can render the user's
+	// side of the transcript, not just the agent's reply.
+	MessageUser MessageKind = "user"
 )
 
 // Verdict is a permission decision, using the allow/ask/deny grammar shared
