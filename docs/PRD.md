@@ -52,9 +52,11 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
 
 ```
 provider/    LLM iface · normalized stream · model registry · CredentialSource
+providers/   providers.Build — construct a provider from manifest config     (M2)
 auth/        OAuth flows · token store (~/.gofer/auth.json) (M1)
 loop/        runAgentLoop · hooks · StreamFn          (M1)
 session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
+runner/      batteries-included *Runner (provider+tools+broker+loop+journal)  (M2)
 permission/  rules · grants · escalation cap          (M3)
 tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
 skill/       SKILL.md, two-tier disclosure            (M4)
@@ -62,7 +64,7 @@ plugin/      subprocess JSON-RPC host                 (M4)
 lsp/         server registry · diagnostics            (M3)
 mcp/         client (official go-sdk)                 (M4)
 compose/     manifest → wired session
-adapters/    acp · httpapi+sse · exec                 (M2–M3)
+acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```
 
 Membership test for every addition: *would a second app need it unchanged?*
@@ -106,8 +108,8 @@ converges to the correct state regardless of drops.
 | Stage | Ships | Proof |
 |---|---|---|
 | **M0 · scaffold** ✅ shipped 2026-07-12 | Two repos, Event/Op types, compose skeleton, CI + golden-file harness | `compose.Load()` returns a session that streams a faux provider |
-| M1 · one good session | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
-| M2 · the daemon | (gofer) supervisor + roster + native ACP; SDK ships `adapters/acp` | an ACP client on a phone drives a session on a laptop |
+| **M1 · one good session** ✅ shipped 2026-07-12 | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
+| **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (gofer) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
 | M3 · guardrails | Permission engine + approval messages + grants + sandbox + headless exec + LSP | Claude Code `settings.json` imported and honored |
 | M4 · ecosystem | MCP client + skills + plugin-sdk + subprocess host | a plugin from a separate repo adds a tool |
 | M5 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |

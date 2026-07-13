@@ -4,9 +4,11 @@ An importable, provider-agnostic **agent framework for Go**: an owned, auditable
 agent loop with sessions, permissions, tools, skills, MCP, ACP, plugins, and
 declarative agent manifests.
 
-> **Status: M0 scaffold.** The typed Event/Op contract, the two-tier event
-> broker, and `compose.Load()` streaming a faux provider are in place. The real
-> loop, providers, and tools land next (see the [roadmap](#roadmap)).
+> **Status: v0.2.0, M2 shipped.** The typed Event/Op contract, the two-tier
+> event broker, real Anthropic/OpenAI providers (API key + subscription
+> OAuth), the agent loop, builtin tools, the `runner` package, and a
+> clean-room `acp` (Agent Client Protocol) adapter are all in place. Next up
+> is M3, the permission/guardrails milestone (see the [roadmap](#roadmap)).
 
 ## Why
 
@@ -31,7 +33,7 @@ because everything in the model's context went through code you own.
 - **Out-of-process extensibility** — plugins are subprocesses over JSON-RPC;
   nothing untrusted runs in your process.
 
-## Quickstart (M0)
+## Quickstart
 
 ```go
 sess, err := compose.Load(ctx, "agent.yaml") // manifest → wired session
@@ -52,7 +54,10 @@ for ev := range sub.C {
 ```
 
 With `provider: faux` in the manifest this runs entirely offline — the same
-harness the golden-file tests use.
+harness the golden-file tests use. Swap in `provider: anthropic` or
+`provider: openai` (API key or subscription OAuth) for a real model; the
+`runner` package is the batteries-included alternative to hand-wiring
+loop + session yourself.
 
 ## Packages
 
@@ -60,19 +65,24 @@ harness the golden-file tests use.
 |---|---|
 | `event/` | Typed Event/Op contract · two-tier broker (lossy deltas, must-deliver terminals, drop counters) |
 | `provider/` | LLM provider interface + normalized stream · `faux` scripted provider |
+| `providers/` | `providers.Build` — construct a real provider (Anthropic/OpenAI) from manifest config |
+| `auth/` | OAuth flows + token store (`~/.gofer/auth.json`) for subscription auth |
+| `loop/` | The agent loop: model calls, tool execution, hooks |
+| `tool/` | Builtin tool registry: bash/read/edit/write/grep/glob/ls |
 | `session/` | Session identity (UUIDv7), turn execution, event emission |
 | `compose/` | Agent manifest (YAML) → wired session |
+| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`) assembling provider + tools + broker + loop + journal |
+| `acp/` | Clean-room Agent Client Protocol adapter (stdlib-only), a pure Event/Op projection |
 
-Planned: `loop/`, `permission/`, `tool/`, `skill/`, `plugin/`, `lsp/`, `mcp/`,
-`adapters/` (acp · httpapi+sse · exec).
+Planned: `permission/`, `skill/`, `plugin/`, `lsp/`, `mcp/`.
 
 ## Roadmap
 
 | Stage | Ships |
 |---|---|
 | **M0 · scaffold** ✅ | Event/Op types, broker, compose skeleton, faux provider, golden-file harness, CI |
-| M1 · one good session | Loop + real provider + builtin tools + JSONL session tree + usage/cost accounting |
-| M2 · the daemon | (in [gofer](https://github.com/jedwards1230/gofer)) supervisor + TUI + native ACP |
+| **M1 · one good session** ✅ | Loop + real provider (Anthropic + OpenAI) + builtin tools + JSONL session tree + usage/cost accounting |
+| **M2 · the daemon** ✅ | (in [gofer](https://github.com/jedwards1230/gofer)) supervisor + TUI + native ACP; SDK ships `acp/` + `runner/` |
 | M3 · guardrails | Permission engine, approval messages, sandboxed exec, LSP diagnostics |
 | M4 · ecosystem | MCP client, SKILL.md skills, plugin subprocess host |
 | M5 · auto + polish | Reviewer pipeline, WASM plugin tier, asset import |

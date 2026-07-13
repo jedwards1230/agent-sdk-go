@@ -175,9 +175,10 @@ func (s *stream) handle(frame sseFrame) (provider.StreamEvent, bool, error) {
 		ev := provider.StreamEvent{Type: provider.StreamReasoningDelta, Text: e.Delta}
 		// Tag the reasoning delta with its item id so the loop journals it onto
 		// the assembled reasoning block. Full reasoning replay (which also needs
-		// reasoning.encrypted_content) is deferred to M2; journaling the id now
-		// is free and shrinks that change. The id is on the event, or tracked
-		// from the reasoning item's output_item.added by output_index.
+		// reasoning.encrypted_content, populated from output_item.done and
+		// consumed in request.go to rebuild the reasoning item) uses this id.
+		// The id is on the event, or tracked from the reasoning item's
+		// output_item.added by output_index.
 		if id := e.ItemID; id != "" {
 			ev.Meta = map[string]string{metaItemID: id}
 		} else if id := s.reasoningByIndex[e.OutputIndex]; id != "" {
