@@ -33,3 +33,10 @@ type CancelNotification struct {
 	// SessionID identifies the session to cancel.
 	SessionID string `json:"sessionId"`
 }
+
+// LoadSessionResponse is the payload of a session/load response. Per the ACP
+// v1 schema, every LoadSessionResponse field (modes, configOptions, _meta) is
+// optional, so an empty object is a conformant result; gofer returns this
+// instead of a local ad-hoc type once it has replayed the session's history
+// via session/update notifications (see [ReplayNotifications]).
+type LoadSessionResponse struct{}

@@ -12,10 +12,29 @@ type InitializeRequest struct {
 	ClientCapabilities json.RawMessage `json:"clientCapabilities,omitempty"`
 }
 
-// AgentCapabilities declares what an agent supports. It is intentionally
-// near-empty for M2 — the point of [InitializeResponse] is version
-// negotiation, not capability advertisement.
-type AgentCapabilities struct{}
+// AgentCapabilities declares what an agent supports, per the ACP v1 schema
+// (src/v1/agent.rs AgentCapabilities). Only the fields gofer advertises are
+// modeled; the rest default to their zero (unsupported) values.
+type AgentCapabilities struct {
+	// LoadSession advertises session/load support (schema: loadSession,
+	// default false). Omitted when false — a client treats absent as false.
+	LoadSession bool `json:"loadSession,omitempty"`
+	// SessionCapabilities advertises optional session-method support; omitted
+	// when empty so a no-capability agent still marshals "agentCapabilities":{}.
+	SessionCapabilities SessionCapabilities `json:"sessionCapabilities,omitzero"`
+}
+
+// SessionCapabilities advertises optional session methods (schema:
+// SessionCapabilities). A present List advertises session/list.
+type SessionCapabilities struct {
+	// List, when non-nil, advertises session/list. Per the schema, supplying
+	// {} means supported; omitted/null means not advertised.
+	List *SessionListCapabilities `json:"list,omitempty"`
+}
+
+// SessionListCapabilities is the (currently field-less) capability object for
+// session/list; its presence as {} is the advertisement.
+type SessionListCapabilities struct{}
 
 // AuthMethod describes an authentication method an agent offers. This
 // package's agents authenticate out of band, so [InitializeResponse] always

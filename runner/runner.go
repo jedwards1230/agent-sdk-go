@@ -226,9 +226,22 @@ func (r *Runner) JournalPath() string { return r.journal.Path() }
 func (r *Runner) Fold() []provider.Message { return r.journal.Fold() }
 
 // Events returns a subscription to every event the session emits, of both
-// delivery tiers.
+// delivery tiers. The broker replays its retained must-deliver backlog into
+// the subscription first (see [event.Broker.Subscribe]), so a mid-session
+// attach recovers the lifecycle and terminal events it missed.
 func (r *Runner) Events() *event.Subscription {
 	return r.broker.Subscribe(event.FilterAll, defaultSubBuffer)
+}
+
+// EventsLive returns a subscription to events emitted AFTER the call, without
+// the retained-backlog replay [Events] performs (see
+// [event.Broker.SubscribeLive]). It is for a caller driving a new turn that
+// wants only that turn's events — subscribe, [Prompt], then read to the
+// turn's terminal event — where replaying a prior turn's retained terminal
+// event would be mistaken for this turn finishing. Use [Events] for a
+// mid-session attach that must recover missed events.
+func (r *Runner) EventsLive() *event.Subscription {
+	return r.broker.SubscribeLive(event.FilterAll, defaultSubBuffer)
 }
 
 // Prompt appends text as a user message, projects the journal's folded

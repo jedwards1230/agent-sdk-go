@@ -139,8 +139,27 @@ func (b *Broker) deliver(sub *Subscription, e Event) {
 
 // Subscribe returns a subscription for events matching filter, buffered to hold
 // buffer events. Retained must-deliver events (see [WithReplay]) are replayed
-// into the new subscription in seq order before live delivery begins.
+// into the new subscription in seq order before live delivery begins — the
+// behavior a client attaching mid-session wants, so it recovers the lifecycle
+// and terminal events it missed.
 func (b *Broker) Subscribe(filter Filter, buffer int) *Subscription {
+	return b.subscribe(filter, buffer, true)
+}
+
+// SubscribeLive is [Broker.Subscribe] without backlog replay: the subscription
+// receives only events published after it is created, never the retained
+// must-deliver backlog. Use it when the caller wants "live events from now"
+// rather than a mid-session attach — e.g. a driver that subscribes, dispatches
+// one new turn, and waits for that turn's terminal event. With plain Subscribe
+// such a driver would immediately observe a PRIOR turn's retained
+// terminal event and mistake it for its own turn's completion.
+func (b *Broker) SubscribeLive(filter Filter, buffer int) *Subscription {
+	return b.subscribe(filter, buffer, false)
+}
+
+// subscribe is the shared implementation of [Broker.Subscribe] (replay=true)
+// and [Broker.SubscribeLive] (replay=false).
+func (b *Broker) subscribe(filter Filter, buffer int, replay bool) *Subscription {
 	if buffer < 0 {
 		buffer = 0
 	}
@@ -148,9 +167,11 @@ func (b *Broker) Subscribe(filter Filter, buffer int) *Subscription {
 	defer b.mu.Unlock()
 
 	var pending []Event
-	for _, e := range b.replay {
-		if filter.accepts(e.Tier()) {
-			pending = append(pending, e)
+	if replay {
+		for _, e := range b.replay {
+			if filter.accepts(e.Tier()) {
+				pending = append(pending, e)
+			}
 		}
 	}
 

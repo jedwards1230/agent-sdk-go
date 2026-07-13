@@ -23,4 +23,6 @@ const (
 	MethodSessionUpdate = "session/update"
 	// MethodSessionRequestPermission asks the client to decide a tool call.
 	MethodSessionRequestPermission = "session/request_permission"
+	// MethodSessionList lists existing sessions (session metadata + pagination).
+	MethodSessionList = "session/list"
 )

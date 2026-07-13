@@ -175,6 +175,63 @@ func TestRunner_TextTurn(t *testing.T) {
 	}
 }
 
+// TestRunner_EventsLiveSkipsRetainedBacklog asserts EventsLive omits the
+// broker's retained must-deliver backlog that Events replays. It is the
+// SDK-level guard against a new-turn driver mistaking a PRIOR turn's retained
+// terminal event for its own turn finishing: Prompt's barrier guarantees the
+// turn's events are published (and journaled) before it returns, so the
+// backlog is populated when both subscriptions are opened below.
+func TestRunner_EventsLiveSkipsRetainedBacklog(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	prov := &scriptedProvider{events: [][]provider.StreamEvent{
+		{
+			{Type: provider.StreamTextDelta, Text: "hi"},
+			{Type: provider.StreamFinished, StopReason: provider.StopEndTurn, Usage: provider.Usage{}},
+		},
+	}}
+
+	r, err := runner.New(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: testModel, System: "test system",
+		Provider: prov,
+		Tools:    oneToolRegistry{},
+		IDGen:    seqIDGen(),
+		Clock:    seqClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	if err := r.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	// Events replays the retained backlog: at least one must-deliver event
+	// from the settled turn is waiting on the fresh subscription.
+	replaySub := r.Events()
+	select {
+	case _, ok := <-replaySub.C:
+		if !ok {
+			t.Fatal("Events subscription closed unexpectedly")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Events did not replay the retained backlog")
+	}
+	replaySub.Close()
+
+	// EventsLive does not: a subscription opened at the same point sees an
+	// empty channel (non-blocking read finds nothing to replay).
+	liveSub := r.EventsLive()
+	select {
+	case e := <-liveSub.C:
+		t.Fatalf("EventsLive replayed a retained event: %s", e.Kind())
+	default:
+	}
+	liveSub.Close()
+}
+
 // TestRunner_KillAndResume shows a tool actually executes, that the journal
 // is durable at the moment a run is killed mid-flight (a settled tool round
 // survives cancellation), and that Resume folds that prior context back into
