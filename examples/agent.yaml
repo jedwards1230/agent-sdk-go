@@ -1,5 +1,7 @@
-# Example agent manifest. At M0 the only provider is the deterministic faux
-# provider, so `compose.Load("agent.yaml")` runs entirely offline.
+# Example agent manifest. This example pins the deterministic faux provider,
+# so `compose.Load("agent.yaml")` runs entirely offline. Real providers
+# (Anthropic, OpenAI) are also available — see providers.Build and the README
+# quickstart.
 name: demo
 model: faux-1
 provider:

@@ -173,8 +173,8 @@ hooks:
 | Skills | build | the cross-tool Agent Skills SKILL.md standard |
 | Manifests | build | schema above |
 
-The survey behind these verdicts (six agents read at source level) lives on
-the home wiki: *Agent Architecture Matrix*.
+The survey behind these verdicts (six agents read at source level) is kept in
+internal design notes; this table is the settled, repo-facing summary.
 
 ## Engineering constraints
 
