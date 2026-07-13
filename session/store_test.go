@@ -433,3 +433,12 @@ func TestFileStoreTornWriteInteriorCorruption(t *testing.T) {
 		t.Errorf("Open with interior corruption: err = %v, want ErrCorruptJournal", err)
 	}
 }
+
+// TestNewFileStoreRequiresRoot locks in the SDK-independence contract: the
+// SDK invents no directory name, so NewFileStore with no WithRoot must fail
+// clearly rather than fall back to a hardcoded default.
+func TestNewFileStoreRequiresRoot(t *testing.T) {
+	if _, err := session.NewFileStore(); err == nil {
+		t.Fatal("NewFileStore() with no root: want error, got nil")
+	}
+}

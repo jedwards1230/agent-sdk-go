@@ -24,8 +24,8 @@ const anthropicProvider = "anthropic"
 // pre-rebrand alias opencode v0.1.0 used for the same service).
 //
 // UNVERIFIED AGAINST THE LIVE SERVICE: we never contact real auth in CI, so the
-// first real `gofer login anthropic` is the actual test of these hosts. If the
-// token exchange 400s, the console.anthropic.com forms
+// first real login flow driven by a consuming application is the actual test
+// of these hosts. If the token exchange 400s, the console.anthropic.com forms
 // (console.anthropic.com/v1/oauth/token and .../oauth/code/callback) are the
 // documented fallback to try.
 const (
