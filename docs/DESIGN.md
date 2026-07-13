@@ -187,3 +187,31 @@ the home wiki: *Agent Architecture Matrix*.
   can never back-pressure the loop.
 - **Observability**: no phone-home, ever. Local structured logs; optional
   OTLP export, off by default.
+
+## Observability seams (SDK stays dependency-light)
+
+The SDK takes **no OpenTelemetry dependency** and emits no telemetry on its own
+initiative — instrumentation lives in the embedding app (gofer owns the otel
+dep + exporters). What the SDK owes an embedder is *seams*, not an
+implementation:
+
+- **Context propagation is already end-to-end.** Every call path — loop,
+  provider, `session`, `runner`, tools — threads `context.Context` through
+  unbroken (`runner.New`/`Resume`/`Prompt(ctx, …)`, `loop.Run(ctx, …)` down
+  through each `callModel`/`runTools` call). An app can therefore open a span on
+  a
+  turn and have it flow through the provider call and every tool execution
+  without the SDK knowing tracing exists. This is an invariant, not an
+  aspiration: a new code path that drops `ctx` is a bug.
+- **Optional `*slog.Logger` injection where the SDK is otherwise silent.** The
+  SDK is silent by default; where SDK-internal diagnostics earn their keep, the
+  seam is an optional `*slog.Logger` the embedder passes in (nil ⇒ discard, as
+  the daemon already does for its own logger). The SDK never logs unprompted and
+  never phones home.
+- **The Event/Op stream is the instrumentation source.** The typed two-tier
+  stream in `event/` is the natural span/metric source: `*.started`/`*.finished`
+  events map to span open/close, `message`/`tool.call` deltas to span events,
+  and settled usage/cost to metrics — all in the app, without SDK involvement.
+  This is exactly how gofer wraps the stream with OTel spans (gofer `PRD.md`
+  Observability); a second embedder would instrument the same seam the same
+  way.
