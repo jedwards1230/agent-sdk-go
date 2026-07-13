@@ -1,12 +1,14 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"time"
+
+	"github.com/jedwards1230/agent-sdk-go/spill"
 )
 
 // defaultBashTimeout is the internal timeout applied when a bash call omits
@@ -64,12 +66,20 @@ type bashInput struct {
 }
 
 // Run executes the command via "<shell> -c <command>" with cmd.Dir set to
-// root. Cancelling ctx SIGKILLs the subprocess and Run returns ctx.Err().
-// Independently, an internal timeout (timeout_ms, default 120s, capped at
-// 600s) fires a [Result] with IsError set rather than an error return. If the
-// process never starts at all (e.g. root does not exist, or the shell is
-// missing), the underlying OS error is included in the [Result]'s Content
-// rather than being dropped.
+// root, streaming the process's combined stdout+stderr straight to the per-call
+// spill sink so its full output is never buffered in memory. The sink is taken
+// from ctx ([spill.FromContext]) when the loop provides one; on a direct call it
+// falls back to a file-less bounded sink whose head+tail excerpt is returned as
+// Content. When the loop provides the sink Run returns empty Content — the loop
+// derives the model-facing excerpt from the same sink. An exit-status, timeout,
+// or start-failure footer is written into the sink so it appears in the spill
+// file and the excerpt.
+//
+// Cancelling ctx SIGKILLs the subprocess and Run returns ctx.Err() (partial
+// output already streamed is durable). An internal timeout (timeout_ms, default
+// 120s, capped at 600s) yields a [Result] with IsError set rather than an error
+// return. If the process never starts (e.g. root does not exist or the shell is
+// missing), the underlying OS reason is written into the sink rather than dropped.
 func (b *Bash) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if err := ctxErr(ctx); err != nil {
 		return Result{}, err
@@ -96,57 +106,67 @@ func (b *Bash) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	cmd := exec.CommandContext(runCtx, b.shell, "-c", in.Command) // #nosec G204 -- bash is the tool's job, not a vulnerability here
 	cmd.Dir = b.root
 	configureProcessGroup(cmd)
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
+
+	// Stream process output straight to the spill sink. os/exec guarantees a
+	// single goroutine writes when Stdout and Stderr are the same value, so the
+	// sink needs no locking. A direct caller (no loop sink) gets a file-less
+	// bounded sink and reads the excerpt back as Content.
+	sink, provided := spill.FromContext(ctx)
+	var local *spill.Writer
+	if !provided {
+		local, _ = spill.Create("", "", "") // file-less: never errors
+		sink = local
+	}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 
 	runErr := cmd.Run()
 
 	// The external ctx being cancelled always aborts the call, even if the
-	// internal timeout also expired at the same moment.
+	// internal timeout also expired at the same moment. Whatever streamed before
+	// the kill is already durably in the append-only sink.
 	if ctx.Err() != nil {
+		if local != nil {
+			_, _ = local.Close()
+		}
 		return Result{}, ctx.Err()
 	}
 
-	output, truncated := truncateBytes(buf.String(), defaultMaxOutputBytes)
+	md, isErr := footer(sink, cmd, runCtx, runErr, timeout)
 
-	if runCtx.Err() != nil {
-		// Internal timeout fired; parent ctx is still live (checked above).
-		return Result{
-			IsError:  true,
-			Content:  fmt.Sprintf("%s\n… command timed out after %s", output, timeout),
-			Metadata: Metadata{Truncated: truncated},
-		}, nil
+	content := ""
+	if local != nil {
+		ref, _ := local.Close()
+		content = ref.Excerpt
+		md.Truncated = ref.Elided
 	}
+	return Result{Content: content, IsError: isErr, Metadata: md}, nil
+}
 
-	exitCode := 0
-	var startErr error
+// footer resolves the command's outcome, writes a human footer into the sink so
+// it lands in the spill file (and the excerpt), and returns the result metadata
+// and whether the call is an error.
+func footer(sink io.Writer, cmd *exec.Cmd, runCtx context.Context, runErr error, timeout time.Duration) (md Metadata, isErr bool) {
 	switch {
+	case runCtx.Err() != nil:
+		// Internal timeout fired; parent ctx is still live (checked by caller).
+		_, _ = fmt.Fprintf(sink, "\n… command timed out after %s", timeout)
+		return Metadata{}, true
 	case cmd.ProcessState != nil:
-		exitCode = cmd.ProcessState.ExitCode()
-	case runErr != nil:
-		// The process never started (ProcessState is nil) — e.g. cmd.Dir does
-		// not exist or the shell is missing. cmd.Run's error carries the real
-		// reason; surface it instead of a bare "[exit -1]".
-		exitCode = -1
-		startErr = runErr
-	}
-
-	content := output
-	switch {
-	case startErr != nil:
-		if output == "" {
-			content = fmt.Sprintf("command failed to start: %v", startErr)
-		} else {
-			content = fmt.Sprintf("%s\ncommand failed to start: %v", output, startErr)
+		exitCode := cmd.ProcessState.ExitCode()
+		if exitCode != 0 {
+			_, _ = fmt.Fprintf(sink, "\n[exit %d]", exitCode)
 		}
-	case exitCode != 0:
-		content = fmt.Sprintf("%s\n[exit %d]", output, exitCode)
+		return Metadata{ExitCode: &exitCode}, exitCode != 0
+	case runErr != nil:
+		// The process never started (ProcessState is nil) — e.g. cmd.Dir does not
+		// exist or the shell is missing. cmd.Run's error carries the real reason;
+		// surface it instead of a bare "[exit -1]".
+		exitCode := -1
+		_, _ = fmt.Fprintf(sink, "\ncommand failed to start: %v", runErr)
+		return Metadata{ExitCode: &exitCode}, true
+	default:
+		exitCode := 0
+		return Metadata{ExitCode: &exitCode}, false
 	}
-
-	return Result{
-		Content:  content,
-		IsError:  exitCode != 0,
-		Metadata: Metadata{ExitCode: &exitCode, Truncated: truncated},
-	}, nil
 }

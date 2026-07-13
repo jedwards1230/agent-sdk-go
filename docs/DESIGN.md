@@ -192,14 +192,42 @@ hooks:
 - Tools: `lsp_diagnostics` · `lsp_references` (grep→LSP hybrid) ·
   `lsp_restart`. One generic prompt line, not per-tool coaching.
 
-## Bulk-payload spill (design lands M3)
+## Bulk-payload spill (M3)
 
 Tool output is bulk ground truth, not event payload. Every tool execution
-streams its raw output append-only to a per-call file under the session dir;
-`tool.call.finished` carries `{path, bytes, sha256, head/tail excerpt}` instead
-of an unbounded payload. This bounds broker memory, makes every level of a
-session tree greppable on disk, and surfaces errors from the source. Events stay
-typed structure; the files are the bulk ground truth the events point into.
+streams its raw output **append-only** to a per-call file under the session dir,
+and `tool.call.finished` carries a reference plus a bounded excerpt instead of an
+unbounded payload. This bounds memory, makes every level of a session tree
+greppable on disk, and surfaces errors from the source. Events stay typed
+structure; the files are the bulk ground truth the events point into.
+
+**Streaming, never buffered.** The `spill.Writer` (`spill/`, stdlib-only leaf) is
+an `io.Writer`: bash points its process stdout/stderr straight at one, so no code
+path holds the full output in memory. As bytes stream through, the writer appends
+them to the file (buffered, flushed+fsynced on close), folds them into a running
+sha256 and byte count, and retains only a bounded head (2 KiB) + tail-ring
+(2 KiB) for the excerpt. A tool that returns a small bounded string (read, grep,
+…) has the loop write that string through the same writer post-hoc. The loop
+hands the per-call writer to a tool via `context` (`spill.NewContext` /
+`FromContext`). Because the writer is append-only and closed even on a
+tool/process error, whatever streamed before a mid-run kill is already durable
+and the reference is consistent with the bytes on disk.
+
+**On-disk layout.** A session gains a directory sibling to its journal file:
+`<root>/sessions/<slug>/<id>/calls/<call-id>.log` (the `<id>` dir coexists with
+the `<id>.jsonl` journal and is invisible to the store's `<id>.jsonl` globs).
+Created lazily, mode `0o700`.
+
+**Event shape** (`event.ToolCallFinished`). `result` is repurposed to the bounded
+head+tail excerpt (an elision marker notes the omitted byte count when the output
+exceeds head+tail); it stays a usable preview for old consumers. New fields
+`spill_path` / `spill_bytes` / `spill_sha256` reference the full file. `spill_path`
+is **relative to the store root** (e.g. `sessions/<slug>/<id>/calls/<call-id>.log`),
+never an absolute host path, so the serialized event stays portable. The runner
+journals the excerpt (via `result`) into the tool round, so the journal no longer
+stores unbounded output either — the spill file is the ground truth, and every
+model call remains reconstructable from the journal (the model sees the same
+bounded excerpt in-run and on resume).
 
 ## Session tree & spawn seam (design-ahead, M4)
 

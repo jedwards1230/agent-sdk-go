@@ -1,8 +1,9 @@
 // Package tool provides the [Tool] interface, a [Registry], and a set of
 // importable builtin coding tools (bash, read, edit, write, grep, glob, ls).
 // Tools are policy-free — permissions and hooks (M3) wrap them from outside.
-// The agent loop consumes the [Tool] interface; this package has no reverse
-// dependencies on the rest of the SDK.
+// The agent loop consumes the [Tool] interface; this package depends only on the
+// stdlib-only leaf [spill] package (bash streams its output to a per-call spill
+// sink taken from the context), never on the loop, session, or event machinery.
 package tool
 
 import (

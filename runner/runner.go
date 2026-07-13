@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -282,15 +283,18 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	r.broker.Publish(event.NewMessageStarted(sid, event.MessageUser))
 	r.broker.Publish(event.NewMessageFinishedMeta(sid, event.MessageUser, text, nil))
 
+	spillDir, spillRelDir := r.spillCallsDir()
 	cfg := loop.Config{
-		Provider:  r.provider,
-		Model:     r.model,
-		System:    r.system,
-		Params:    r.params,
-		Tools:     r.tools,
-		Broker:    r.broker,
-		SessionID: sid,
-		MaxIters:  r.maxIters,
+		Provider:    r.provider,
+		Model:       r.model,
+		System:      r.system,
+		Params:      r.params,
+		Tools:       r.tools,
+		Broker:      r.broker,
+		SessionID:   sid,
+		MaxIters:    r.maxIters,
+		SpillDir:    spillDir,
+		SpillRelDir: spillRelDir,
 	}
 	// The journal folds back to provider messages directly (verbatim content
 	// blocks), so the loop's input is the folded context as-is.
@@ -300,6 +304,18 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	// tool entries (which consume writes asynchronously off the broker).
 	r.awaitJournaled()
 	return err
+}
+
+// spillCallsDir returns the absolute directory this session's per-call tool
+// output spills to (<session-dir>/calls), and that directory relative to the
+// store root (forward-slashed) for the portable spill_path on
+// tool.call.finished. The directory is created lazily by the first spill.
+func (r *Runner) spillCallsDir() (abs, rel string) {
+	abs = filepath.Join(r.journal.Dir(), "calls")
+	if r0, err := filepath.Rel(r.store.Root(), abs); err == nil {
+		rel = filepath.ToSlash(r0)
+	}
+	return abs, rel
 }
 
 // awaitJournaled blocks until the consume goroutine has journaled every event
