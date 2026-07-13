@@ -1,8 +1,8 @@
 // Package auth persists provider credentials and drives the OAuth login flows
 // for subscription auth (Anthropic Claude Pro/Max, OpenAI ChatGPT). It owns
-// ~/.gofer/auth.json (mode 0600, atomic replace) and resolves a
-// [CredentialSource] the agent loop's providers consume without importing this
-// package.
+// auth.json (mode 0600, atomic replace) under a caller-supplied root directory
+// (see [WithRoot]) and resolves a [CredentialSource] the agent loop's
+// providers consume without importing this package.
 //
 // The store never launches a browser and never contacts a live auth server
 // except through the explicit [Store.Login] / refresh paths; see login.go for
@@ -73,8 +73,10 @@ type Store struct {
 // Option configures a [Store].
 type Option func(*Store)
 
-// WithRoot sets the directory that holds auth.json. Defaults to ~/.gofer.
-// Tests pass a t.TempDir().
+// WithRoot sets the directory that holds auth.json. Required: [New] returns
+// an error if no root is set. Tests pass a t.TempDir(); a real application
+// picks its own data directory and passes it explicitly — the SDK invents no
+// directory name.
 func WithRoot(dir string) Option { return func(s *Store) { s.root = dir } }
 
 // WithClock overrides the time source (for expiry tests).
@@ -90,8 +92,10 @@ func withFlows(flows map[string]loginFlow) Option {
 	return func(s *Store) { s.flows = flows }
 }
 
-// New builds a Store. With no options it uses ~/.gofer and the default HTTP
-// client, and registers the built-in Anthropic and OpenAI flows.
+// New builds a Store. [WithRoot] is required — the SDK does not invent a
+// default directory, so New returns an error if no root is set. With no other
+// options it uses the default HTTP client and registers the built-in
+// Anthropic and OpenAI flows.
 func New(opts ...Option) (*Store, error) {
 	s := &Store{
 		now:        time.Now,
@@ -102,11 +106,7 @@ func New(opts ...Option) (*Store, error) {
 		o(s)
 	}
 	if s.root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("auth: resolve home dir: %w", err)
-		}
-		s.root = filepath.Join(home, ".gofer")
+		return nil, errors.New("auth: no store root — pass WithRoot(dir)")
 	}
 	if s.flows == nil {
 		s.flows = defaultFlows()

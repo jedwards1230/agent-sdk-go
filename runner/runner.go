@@ -35,7 +35,9 @@ const defaultReplay = 256
 // are test seams.
 type Options struct {
 	// Root is the session store's root directory (holds sessions/ and, for a
-	// real provider, auth.json). Empty uses the SDK default.
+	// real provider, auth.json). Required unless Store is set: the SDK invents
+	// no directory name, so an empty Root with no injected Store surfaces the
+	// underlying store's "no store root" error.
 	Root string
 	// Cwd is the working directory tools operate in, and the project the
 	// session belongs to (via session.Slugify).

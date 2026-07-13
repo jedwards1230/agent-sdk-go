@@ -13,8 +13,9 @@ type InitializeRequest struct {
 }
 
 // AgentCapabilities declares what an agent supports, per the ACP v1 schema
-// (src/v1/agent.rs AgentCapabilities). Only the fields gofer advertises are
-// modeled; the rest default to their zero (unsupported) values.
+// (src/v1/agent.rs AgentCapabilities). Only the fields the consuming
+// application advertises are modeled; the rest default to their zero
+// (unsupported) values.
 type AgentCapabilities struct {
 	// LoadSession advertises session/load support (schema: loadSession,
 	// default false). Omitted when false — a client treats absent as false.

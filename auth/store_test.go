@@ -425,3 +425,11 @@ func TestExpiredWithinSkew(t *testing.T) {
 		t.Fatalf("token within skew should refresh")
 	}
 }
+
+func TestNewRequiresRoot(t *testing.T) {
+	// The SDK invents no directory name: New with no WithRoot must fail
+	// clearly rather than fall back to a hardcoded default.
+	if _, err := New(); err == nil {
+		t.Fatal("New() with no root: want error, got nil")
+	}
+}

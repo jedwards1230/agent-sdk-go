@@ -10,12 +10,12 @@
 // This package is transport-agnostic by design: it owns message TYPES and
 // MAPPING FUNCTIONS only. It does no networking, no JSON-RPC framing, and
 // spawns no goroutines — stdlib only. The WebSocket transport and JSON-RPC
-// method dispatch that carry these types over the wire live in gofer, which
-// imports this package and wires its projection functions onto a broker
-// subscription. That wiring is a straightforward application of the "every
-// frontend is a client of the broker" invariant ([event] package doc): an ACP
-// session is just another subscriber, translating [event.Event] to
-// session/update notifications via [ToSessionUpdate] and ACP requests to
+// method dispatch that carry these types over the wire live in the consuming
+// application, which imports this package and wires its projection functions
+// onto a broker subscription. That wiring is a straightforward application of
+// the "every frontend is a client of the broker" invariant ([event] package
+// doc): an ACP session is just another subscriber, translating [event.Event]
+// to session/update notifications via [ToSessionUpdate] and ACP requests to
 // [event.Op] values via the From* functions in this package.
 //
 // The ACP-JSON boundary lives here in both directions: outbound types marshal

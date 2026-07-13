@@ -3,8 +3,8 @@ package acp
 // ProtocolVersion is the ACP protocol version this package targets.
 const ProtocolVersion = 1
 
-// ACP JSON-RPC method names. gofer's transport dispatches on these; this
-// package does not perform dispatch itself.
+// ACP JSON-RPC method names. The consuming application's transport dispatches
+// on these; this package does not perform dispatch itself.
 const (
 	// MethodInitialize negotiates the protocol version and capabilities.
 	MethodInitialize = "initialize"

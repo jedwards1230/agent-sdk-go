@@ -75,8 +75,10 @@ type storeConfig struct {
 // StoreOption configures a [FileStore] at construction.
 type StoreOption func(*storeConfig)
 
-// WithRoot sets the store's root directory. Default: "~/.gofer". Tests
-// should always pass a [testing.T.TempDir].
+// WithRoot sets the store's root directory. Required: [NewFileStore] returns
+// an error if no root is set. Tests should always pass a [testing.T.TempDir];
+// a real application picks its own data directory and passes it explicitly —
+// the SDK invents no directory name.
 func WithRoot(dir string) StoreOption {
 	return func(c *storeConfig) {
 		if dir != "" {
@@ -136,7 +138,8 @@ func WithLogger(f func(string, ...any)) StoreOption {
 }
 
 // NewFileStore constructs a [FileStore], creating its root/sessions
-// directory if needed.
+// directory if needed. [WithRoot] is required — the SDK does not invent a
+// default directory, so NewFileStore returns an error if no root is set.
 func NewFileStore(opts ...StoreOption) (*FileStore, error) {
 	cfg := storeConfig{
 		idGen:  newV7,
@@ -149,11 +152,7 @@ func NewFileStore(opts ...StoreOption) (*FileStore, error) {
 	}
 
 	if cfg.root == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("session: resolve default store root: %w", err)
-		}
-		cfg.root = filepath.Join(home, ".gofer")
+		return nil, errors.New("session: no store root — pass WithRoot(dir)")
 	}
 
 	sessionsDir := filepath.Join(cfg.root, "sessions")
