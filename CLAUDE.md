@@ -8,10 +8,8 @@ Guidance for Claude Code when working in this repository.
 
 `agent-sdk-go` — an importable, provider-agnostic agent framework
 (loop, sessions, permissions, tools, skills, MCP, ACP, plugins, declarative
-manifests). It is the library half of the gofer platform; the application half
-(daemon + TUI) lives in [`jedwards1230/gofer`](https://github.com/jedwards1230/gofer)
-and consumes this SDK through the same typed Event/Op contract every other
-client uses.
+manifests). It is an importable library; applications (daemon + TUI) consume it
+through the same typed Event/Op contract every other client uses.
 
 Full product requirements + design: [`docs/PRD.md`](docs/PRD.md). Read it
 before structural changes — the contract, tenets, and milestone sequencing are
@@ -22,8 +20,9 @@ the test strategy.
 ## Architecture invariants (violations are bugs)
 
 1. **Membership test**: code belongs in the SDK only if a second application
-   would need it unchanged. Supervision, rosters, and TUI live in gofer.
-2. **The SDK never imports gofer.** CI builds the SDK standalone.
+   would need it unchanged. Supervision, rosters, and TUI live in the consuming
+   application.
+2. **The SDK never imports application code.** CI builds the SDK standalone.
 3. **One contract**: every frontend (TUI, ACP, headless, HTTP) consumes the
    typed Event/Op stream defined in `event/`. No client reaches past it.
 4. **Two-tier delivery**: stream deltas (`message.delta`, `tool.call.delta`)
@@ -34,6 +33,22 @@ the test strategy.
    authoritative text so lossy delta drops never corrupt a client's view.
 6. **Session IDs are UUIDv7** — globally unique and time-ordered; the fleet
    layer depends on this.
+
+## Design discipline
+
+- **Context transparency**: nothing enters the model's context that the embedder
+  can't see and override; every model call is reconstructable from the journal.
+  Prompt assembly stays small and auditable — tool/MCP schemas load on demand,
+  not all up front.
+- **Two-gate feature test**: a capability earns a place in core only if it
+  passes *both* gates — would a second app need it unchanged (membership), and
+  could a seam suffice instead of a built-in?
+- **Declarative consumption**: the SDK owns the abstraction; embedders wire
+  business logic and variables. Every capability is reachable through a
+  `compose.Load()` manifest, not just the Go API.
+- **Code style**: inline a helper used at a single call site rather than
+  hoisting it; never hardcode a config value — add a default and thread it
+  through; ask before removing code that looks intentional.
 
 ## Commands
 

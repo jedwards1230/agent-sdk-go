@@ -32,6 +32,26 @@ tool's schema). `compose.LoopConfig(m, LoopDeps)` wires a
 provider + model + tools + broker from a manifest; `compose.CredentialSource(m)`
 resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
 
+## Broker & subscription semantics (M1)
+
+The broker (`event/`) fans one session's typed stream out to N subscribers and
+distinguishes *attach* from *drive*:
+
+- **`Subscribe` / `Events`** replay the retained must-deliver backlog
+  (lifecycle + terminal events, sized by `WithReplay(n)`) in seq order before
+  live delivery — what a client attaching mid-session wants, so it recovers the
+  events it missed.
+- **`SubscribeLive` / `EventsLive`** deliver from-now only, never the backlog —
+  what a driver starting a turn wants: subscribe, dispatch one new turn, wait
+  for *that* turn's terminal event. Using replaying `Subscribe` here caused the
+  M2 followup bug (the driver observed a prior turn's retained terminal event
+  and mistook it for its own turn's completion).
+
+Deltas ride the lossy tier (dropped under backpressure, drop counters exposed);
+`*.finished` / `session.*` / `permission.*` are must-deliver. Fan-out is per
+subscriber — every registered client sees every event, regardless of which
+client's op started the turn.
+
 ## Provider parity & credentials (M1)
 
 - **No flagship provider.** `provider.Provider` (`Stream(ctx, Request)
@@ -53,12 +73,23 @@ resolves `provider.auth` (`env:VAR` today; `oauth:*` defers to an auth.Store).
 - **Credentials.** `provider.CredentialSource.Credential(ctx, providerID)
   (Credential, error)` decouples providers from the auth package. Kinds are
   `api_key` and `oauth`; `EnvCredentialSource` (API keys from env vars) ships in
-  provider core, and `auth.Store` (M1) implements the same interface over
-  `~/.gofer/auth.json` (mode `0600`, per-provider entries, refresh handling).
+  provider core, and `auth.Store` (M1) implements the same interface over an
+  on-disk `auth.json` (mode `0600`, per-provider entries, refresh handling).
+- **`providers.Build(model, creds)`** is the construction seam: it maps a
+  manifest model id to a concrete provider wired to a `CredentialSource`. It is
+  the factory-template pattern future pluggable subsystems copy — sandbox
+  backends and vendor settings loaders take the same `Build(config, deps)`
+  shape.
+- **Direct-wire APIs, no unified SDK.** Providers are built directly on each
+  vendor's HTTP API rather than a cross-vendor aggregator SDK — for full control
+  of the request/stream shape and end-to-end inspectability of everything that
+  enters the model's context. The cost is one thin adapter per vendor; the
+  payoff is that nothing in the wire path is opaque.
 
 ## Auth & credentials (M1)
 
-`auth/` owns `~/.gofer/auth.json` (mode `0600`, atomic temp-file+rename) and
+`auth/` owns an on-disk `auth.json` (mode `0600`, atomic temp-file+rename,
+store root configurable via `WithRoot`) and
 implements `provider.CredentialSource`, so provider adapters resolve auth
 without importing `auth`. It reuses the provider-core contract directly:
 `auth.CredKind`/`Credential`/`CredentialSource` are aliases of the `provider.*`
@@ -70,7 +101,7 @@ from `auth`).
 
 Expired OAuth tokens refresh transparently inside `Credential`, single-flighted
 by a ctx-aware in-process write semaphore plus a cross-process advisory flock on
-`~/.gofer/auth.lock`, with a double-check re-read — because refresh tokens rotate
+an `auth.lock` beside the token store, with a double-check re-read — because refresh tokens rotate
 and a concurrent double-refresh would invalidate the winner. The refresh holds
 that lock across the token-endpoint call, so acquisition honors the caller's
 context: a cancelled `Credential(ctx)` returns promptly rather than waiting out
@@ -101,7 +132,7 @@ contacted in tests or at build time.
 rule       := ToolName | ToolName "(" specifier ")"
 specifier  := prefix ":*"          Bash(git status:*)      command prefix
             | glob                 Read(src/**) · Edit(*.env)
-            | mcp tool             mcp__contextforge__*(*)
+            | mcp tool             mcp__search__*(*)
 lists      := deny[] > ask[] > allow[]     first match in that order wins
 unmatched  ⇒ ask (fail-safe)
 compound shell (&&, |, ;) ⇒ dangerous
@@ -110,17 +141,20 @@ sources    := embedded defaults < global config < project config < session grant
               (deny from ANY source is un-overridable)
 ```
 
-Compatible with Claude Code `settings.json` allow/ask/deny — that file
-imports directly (the M3 acceptance gate). Grants persist with TTL behind an
-anti-escalation cache: a read grant never satisfies a write ask, and
-dangerous specs never widen past exact-match.
+The engine consumes typed `[]Rule`; vendor formats are import adapters that
+produce those rules. Claude Code `settings.json` allow/ask/deny is one such
+loader among others (native YAML is another) — the adapter lands with the
+vendor-format milestone (M4/M5), and which package hosts the CC loader is
+undecided (home TBD at M4). Grants persist with TTL behind an
+anti-escalation cache: a read grant never satisfies a write ask, and dangerous
+specs never widen past exact-match.
 
 ## Agent manifest (compose/)
 
 ```yaml
-# ~/.gofer/agents/homelab-ops.yaml
-agent: homelab-ops
-description: infra work against the k8s homelab
+# release-ops.yaml — an agent manifest
+agent: release-ops
+description: release automation and deployment checks
 provider:
   model: anthropic/claude-sonnet-5     # provider/model id from the catalog
   auth: env:ANTHROPIC_API_KEY          # or op://…, or oauth:anthropic
@@ -131,11 +165,11 @@ prompt:
 tools:
   builtin: [bash, read, edit, write, grep, glob, ls]
   mcp:
-    contextforge: { url: https://mcp.example.com, auth: oauth }
+    search: { url: https://mcp.example.com, auth: oauth }
   plugins:
-    - module: github.com/someone/gofer-plugin-k9s   # subprocess, own repo
+    - module: github.com/someone/agent-plugin-k9s   # subprocess, own repo
 lsp: { auto: true }                    # registry auto-detect; per-server overrides
-skills: [./skills, ~/.gofer/skills]
+skills: [./skills, ~/.config/agent-sdk/skills]
 permissions:
   allow: ["Bash(kubectl get:*)", "Read(**)"]
   ask:   ["Bash(kubectl:*)", "Edit(**)"]
@@ -158,12 +192,46 @@ hooks:
 - Tools: `lsp_diagnostics` · `lsp_references` (grep→LSP hybrid) ·
   `lsp_restart`. One generic prompt line, not per-tool coaching.
 
+## Bulk-payload spill (design lands M3)
+
+Tool output is bulk ground truth, not event payload. Every tool execution
+streams its raw output append-only to a per-call file under the session dir;
+`tool.call.finished` carries `{path, bytes, sha256, head/tail excerpt}` instead
+of an unbounded payload. This bounds broker memory, makes every level of a
+session tree greppable on disk, and surfaces errors from the source. Events stay
+typed structure; the files are the bulk ground truth the events point into.
+
+## Session tree & spawn seam (design-ahead, M4)
+
+A subagent is a real session, not a sub-object: its own UUIDv7 journal, linked
+to its parent. The SDK ships the spawn seam and the linking events — the parent
+journal records a must-deliver `session.spawned{child_id, agent}`, child
+metadata carries `parent_id`, and depth (parent-chain length) is capped at 5 and
+enforced at spawn. The application wires this to its supervisor/roster (tree
+view, peek/attach into any child). Ships M4; recorded here so the session and
+event contracts leave room for it now.
+
+## Extension tiers
+
+Three tiers, by trust and coupling:
+
+1. **Core** — hot path, security, or contract; compiled in (loop, broker,
+   permission engine, session).
+2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
+   import (`mcp/`, vendor settings loaders). First-party and trusted, but not
+   forced on every embedder.
+3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
+   over JSON-RPC (host lands M4). Nothing untrusted runs in-process.
+
+The tier is set by the two-gate test: would a second app need it unchanged
+(core vs optional package), and could a seam suffice instead of a built-in?
+
 ## Component sourcing (survey verdict, 2026-07-11)
 
 | Need | Verdict | Source |
 |---|---|---|
 | MCP client | **adopt** | `modelcontextprotocol/go-sdk` (official) |
-| ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in gofer, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
+| ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in the application, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
 | WASM plugin tier | **adopt** | `knqyf263/go-plugin` (wazero, typed interfaces) |
 | Provider + streaming | build | thin, with a cross-vendor content-block message model |
 | Loop + hooks | build | clean-room the proven seams; **FSL-licensed prior art is read-only, never a dependency** |
@@ -180,8 +248,8 @@ internal design notes; this table is the settled, repo-facing summary.
 
 - **Platforms**: macOS + Linux first-class (including sandbox backends);
   Windows later, no sandbox v1. Single static binary; `go install` works.
-- **Go 1.26**; range-over-func iterators are load-bearing in the event
-  stream and per-test stream fakes.
+- **Go 1.25** (matches `go.mod`); range-over-func iterators (available since
+  Go 1.23) are load-bearing in the event stream and per-test stream fakes.
 - **Streaming budget**: first provider token reaches an attached client with
   ≤ one frame of added latency; the lossy delta tier exists so a slow client
   can never back-pressure the loop.
@@ -191,8 +259,8 @@ internal design notes; this table is the settled, repo-facing summary.
 ## Observability seams (SDK stays dependency-light)
 
 The SDK takes **no OpenTelemetry dependency** and emits no telemetry on its own
-initiative — instrumentation lives in the embedding app (gofer owns the otel
-dep + exporters). What the SDK owes an embedder is *seams*, not an
+initiative — instrumentation lives in the embedding app (the application owns
+the otel dep + exporters). What the SDK owes an embedder is *seams*, not an
 implementation:
 
 - **Context propagation is already end-to-end.** Every call path — loop,
@@ -212,6 +280,5 @@ implementation:
   stream in `event/` is the natural span/metric source: `*.started`/`*.finished`
   events map to span open/close, `message`/`tool.call` deltas to span events,
   and settled usage/cost to metrics — all in the app, without SDK involvement.
-  This is exactly how gofer wraps the stream with OTel spans (gofer `PRD.md`
-  Observability); a second embedder would instrument the same seam the same
-  way.
+  An embedding application wraps the stream with OTel spans exactly this way; a
+  second embedder would instrument the same seam the same way.

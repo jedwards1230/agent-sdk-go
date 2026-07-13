@@ -66,7 +66,7 @@ loop + session yourself.
 | `event/` | Typed Event/Op contract · two-tier broker (lossy deltas, must-deliver terminals, drop counters) |
 | `provider/` | LLM provider interface + normalized stream · `faux` scripted provider |
 | `providers/` | `providers.Build` — construct a real provider (Anthropic/OpenAI) from manifest config |
-| `auth/` | OAuth flows + token store (`~/.gofer/auth.json`) for subscription auth |
+| `auth/` | OAuth flows + on-disk token store (`auth.json`, mode 0600) for subscription auth |
 | `loop/` | The agent loop: model calls, tool execution, hooks |
 | `tool/` | Builtin tool registry: bash/read/edit/write/grep/glob/ls |
 | `session/` | Session identity (UUIDv7), turn execution, event emission |
@@ -82,9 +82,9 @@ Planned: `permission/`, `skill/`, `plugin/`, `lsp/`, `mcp/`.
 |---|---|
 | **M0 · scaffold** ✅ | Event/Op types, broker, compose skeleton, faux provider, golden-file harness, CI |
 | **M1 · one good session** ✅ | Loop + real provider (Anthropic + OpenAI) + builtin tools + JSONL session tree + usage/cost accounting |
-| **M2 · the daemon** ✅ | (in [gofer](https://github.com/jedwards1230/gofer)) supervisor + TUI + native ACP; SDK ships `acp/` + `runner/` |
-| M3 · guardrails | Permission engine, approval messages, sandboxed exec, LSP diagnostics |
-| M4 · ecosystem | MCP client, SKILL.md skills, plugin subprocess host |
+| **M2 · the daemon** ✅ | (in the consuming application) supervisor + TUI + native ACP; SDK ships `acp/` + `runner/` |
+| M3 · guardrails | Sandboxed/contained exec, approval messages, binary containment policy, tool-output spill files, headless exec, LSP diagnostics |
+| M4 · ecosystem | MCP client (tool-search-first), SKILL.md skills, plugin subprocess host, session tree / subagent spawn seam, vendor settings adapters, provider breadth |
 | M5 · auto + polish | Reviewer pipeline, WASM plugin tier, asset import |
 
 The SDK must always build and test green with **zero** application code

@@ -1,9 +1,10 @@
 # agent-sdk-go — PRD & design
 
-> Library half of the **gofer** platform. The application half (daemon,
-> supervisor, TUI) is [`jedwards1230/gofer`](https://github.com/jedwards1230/gofer).
-> This document is the repo-scoped cut of the platform design doc; decisions
-> recorded here are settled unless a dated entry supersedes them.
+> The importable library layer of an agent platform. The application layer
+> (daemon, supervisor, TUI) lives in a separate repo and consumes this SDK
+> through the typed Event/Op contract. This document is the repo-scoped cut of
+> the platform design doc; decisions recorded here are settled unless a dated
+> entry supersedes them.
 > Companions: [`DESIGN.md`](DESIGN.md) (normative interfaces: loop seam,
 > permission grammar, manifest schema, sourcing decisions) and
 > [`TESTING.md`](TESTING.md) (test strategy + CI gates).
@@ -22,8 +23,8 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
   tests green with zero application code present.*
 - **The plugin author**: ships a tool/hook from their own repo against a small
   published contract; never touches core.
-- **The operator**: served by gofer, which consumes this SDK through the same
-  contract as every other client.
+- **The operator**: served by an application built on this SDK, which consumes
+  it through the same contract as every other client.
 
 ## Design tenets
 
@@ -33,8 +34,9 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
    accumulate-then-send walls off ACP and live UIs.
 3. **Everything is a client** — one typed Event/Op contract; TUI, ACP,
    headless, HTTP are projections. None is privileged.
-4. **Structural permissions** — rule engine with allow/ask/deny,
-   Claude-Code-settings-compatible grammar; approvals are protocol messages.
+4. **Structural permissions** — approvals are protocol messages; enforcement is
+   a format-agnostic rule engine over typed rules. Vendor formats (Claude Code
+   `settings.json`, native YAML) are import adapters (M4/M5).
 5. **Declarative agents, code as escape hatch** — an agent is a manifest
    (provider, tools, permissions, skills, hooks); `compose.Load()` wires it.
 6. **Out-of-process extensibility** — plugins are subprocesses over JSON-RPC
@@ -53,7 +55,7 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
 ```
 provider/    LLM iface · normalized stream · model registry · CredentialSource
 providers/   providers.Build — construct a provider from manifest config     (M2)
-auth/        OAuth flows · token store (~/.gofer/auth.json) (M1)
+auth/        OAuth flows · on-disk token store (auth.json, 0600) (M1)
 loop/        runAgentLoop · hooks · StreamFn          (M1)
 session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
 runner/      batteries-included *Runner (provider+tools+broker+loop+journal)  (M2)
@@ -68,7 +70,7 @@ acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```
 
 Membership test for every addition: *would a second app need it unchanged?*
-If not, it belongs in gofer.
+If not, it belongs in an application built on the SDK.
 
 ## The Event/Op contract
 
@@ -109,9 +111,9 @@ converges to the correct state regardless of drops.
 |---|---|---|
 | **M0 · scaffold** ✅ shipped 2026-07-12 | Two repos, Event/Op types, compose skeleton, CI + golden-file harness | `compose.Load()` returns a session that streams a faux provider |
 | **M1 · one good session** ✅ shipped 2026-07-12 | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
-| **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (gofer) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
-| M3 · guardrails | Permission engine + approval messages + grants + sandbox + headless exec + LSP | Claude Code `settings.json` imported and honored |
-| M4 · ecosystem | MCP client + skills + plugin-sdk + subprocess host | a plugin from a separate repo adds a tool |
+| **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (application) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
+| M3 · guardrails | Sandbox/containment (Seatbelt on macOS, bwrap+seccomp on Linux) + approval protocol events + binary containment policy (sandboxable → run contained; else → ask a human) + tool-output spill files + headless exec + LSP | a non-sandboxable tool call raises `permission.requested` and a client's reply gates execution |
+| M4 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
 | M5 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ## Settled decisions
@@ -128,8 +130,9 @@ converges to the correct state regardless of drops.
 - **Subscription OAuth lands M1** (moved up from M3), both vendors: Anthropic
   (`claude setup-token`-style PKCE) and OpenAI (codex/ChatGPT-subscription
   login). API-key auth works day one for both. The ToS gray zone is accepted.
-- **Token store**: `~/.gofer/auth.json`, mode `0600`, per-provider entries with
-  refresh-token handling. Providers reach credentials through the
+- **Token store**: an on-disk `auth.json` (mode `0600`, per-provider entries
+  with refresh-token handling) under a configurable store root. Providers reach
+  credentials through the
   `provider.CredentialSource` interface (a static env-var implementation ships
   in provider core); a keychain backend can layer behind the same interface
   later.
@@ -141,4 +144,4 @@ converges to the correct state regardless of drops.
 
 - No graph/DAG workflow engine — this is an interactive agent loop.
 - No hosted service, no central registry, no telemetry.
-- No UI in this repo; TUI and supervision live in gofer.
+- No UI in this repo; TUI and supervision live in the consuming application.
