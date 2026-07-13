@@ -22,9 +22,11 @@ are **M4/M5, not M3**.
       Protects memory, makes every level of a session tree greppable on disk,
       surfaces errors from the source. (design: DESIGN.md)
 - [ ] **Sandbox seam.** A containment interface the loop consults before running
-      a tool. Binary policy: sandboxable → run contained; otherwise → emit
-      `permission.requested`. Concrete backends (seatbelt / bwrap+seccomp) are an
-      application/optional-package concern; the SDK owns the decision seam.
+      a tool. Binary policy: sandboxable → run contained; otherwise (not
+      sandboxable, or no backend available on this host) → emit
+      `permission.requested` and let a human decide — never silently block or run
+      uncontained (decided 2026-07-13). Concrete backends (seatbelt / bwrap+seccomp)
+      are an application/optional-package concern; the SDK owns the decision seam.
 - [ ] **Approval protocol events.** Confirm `permission.requested` /
       `permission.resolved` events + the `permission.reply` op carry everything a
       real client's approval relay needs; add fields only if a live client proves
@@ -50,3 +52,11 @@ test ./... && golangci-lint run`).
 Format-agnostic `Rule` engine + CC `settings.json` loader · session tree /
 subagent spawn seam · MCP client + tool-search index · provider breadth
 (`openai-compat` + manifest `ModelInfo` overlay).
+
+**Permission-format home (decided 2026-07-13):** the rule engine and all format
+loaders live under `permission/` — the engine consumes one typed `Rule`; each
+format (CC `settings.json`, the native manifest block) is a thin `bytes → []Rule`
+loader sharing the same matcher/glob helpers. This is a *permission-format*
+concern, **not** provider support — it is unrelated to `provider/` and must not
+couple to it. Ship only the CC loader + native format; other agents' formats
+would be future siblings, never core.
