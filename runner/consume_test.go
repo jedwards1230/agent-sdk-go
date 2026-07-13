@@ -149,7 +149,7 @@ func TestRunner_KillDuringToolStreaming(t *testing.T) {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
 
-	entries := j.Entries()
+	entries := skipMeta(j.Entries())
 	if len(entries) != 2 {
 		t.Fatalf("Entries after kill mid tool-streaming: got %d, want 2 (user message + settled assistant message): %+v", len(entries), entries)
 	}
@@ -243,7 +243,7 @@ func TestConsume_ToolCallFinishedIsError(t *testing.T) {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
 
-	entries := j.Entries()
+	entries := skipMeta(j.Entries())
 	if len(entries) != 4 {
 		t.Fatalf("Entries: got %d, want 4 (user + assistant tool_use + tool_result round + assistant reply): %+v", len(entries), entries)
 	}
@@ -317,7 +317,7 @@ func TestConsume_ReasoningMetaPreserved(t *testing.T) {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
 
-	entries := j.Entries()
+	entries := skipMeta(j.Entries())
 	if len(entries) != 2 {
 		t.Fatalf("Entries: got %d, want 2 (user + assistant): %+v", len(entries), entries)
 	}

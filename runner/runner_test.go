@@ -166,7 +166,18 @@ func TestRunner_TextTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
-	entries := j.Entries()
+	rawEntries := j.Entries()
+	if len(rawEntries) != 3 {
+		t.Fatalf("raw Entries: got %d, want 3 (meta + user + assistant): %+v", len(rawEntries), rawEntries)
+	}
+	if rawEntries[0].Type != session.EntryMeta {
+		t.Errorf("rawEntries[0].Type = %s, want %s", rawEntries[0].Type, session.EntryMeta)
+	}
+	if metaPayload, err := rawEntries[0].Meta(); err != nil || metaPayload.Cwd != cwd {
+		t.Errorf("rawEntries[0].Meta() = %+v, %v, want Cwd = %q", metaPayload, err, cwd)
+	}
+
+	entries := skipMeta(rawEntries)
 	if len(entries) != 2 {
 		t.Fatalf("Entries: got %d, want 2: %+v", len(entries), entries)
 	}
@@ -302,7 +313,7 @@ func TestRunner_KillAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
-	entries := verifyJournal.Entries()
+	entries := skipMeta(verifyJournal.Entries())
 	// The assistant message (carrying the tool_use block) and the tool_result
 	// round are distinct entries, so a settled tool turn is user message +
 	// assistant(tool_use) + tool_round(tool_result).
@@ -427,8 +438,92 @@ func TestRunner_KillAndResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", id, err)
 	}
-	if got := len(finalJournal.Entries()); got != 5 {
+	if got := len(skipMeta(finalJournal.Entries())); got != 5 {
 		t.Fatalf("final Entries: got %d, want 5 (the journal grew with the continuation)", got)
+	}
+}
+
+// TestRunner_MetaEntryPersistsCwd asserts New writes an [session.EntryMeta]
+// entry carrying opts.Cwd as the journal's very first (root) entry, that it
+// survives a Close + reopen (proving durability across e.g. a daemon
+// restart), and that Resume does NOT append a second one.
+func TestRunner_MetaEntryPersistsCwd(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	prov := &scriptedProvider{events: [][]provider.StreamEvent{
+		{
+			{Type: provider.StreamTextDelta, Text: "hi"},
+			{Type: provider.StreamFinished, StopReason: provider.StopEndTurn, Usage: provider.Usage{}},
+		},
+	}}
+
+	r, err := runner.New(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: testModel, System: "test system",
+		Provider: prov, Tools: oneToolRegistry{},
+		IDGen: seqIDGen(), Clock: seqClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	id := r.ID()
+	path := r.JournalPath()
+
+	rawEntries := r.Fold() // sanity: no prompt yet, empty context
+	if len(rawEntries) != 0 {
+		t.Fatalf("Fold before any Prompt = %+v, want empty", rawEntries)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen via ReadEntries (no live journal, disk-only enumeration) to prove
+	// the meta entry is durable without resuming.
+	onDisk, err := session.ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries: %v", err)
+	}
+	if len(onDisk) != 1 {
+		t.Fatalf("ReadEntries = %+v, want exactly 1 entry (the meta root)", onDisk)
+	}
+	if onDisk[0].Type != session.EntryMeta {
+		t.Fatalf("onDisk[0].Type = %s, want %s", onDisk[0].Type, session.EntryMeta)
+	}
+	meta, err := onDisk[0].Meta()
+	if err != nil {
+		t.Fatalf("onDisk[0].Meta(): %v", err)
+	}
+	if meta.Cwd != cwd {
+		t.Errorf("onDisk[0].Meta().Cwd = %q, want %q", meta.Cwd, cwd)
+	}
+
+	// Resume must NOT append a second meta entry.
+	r2, err := runner.Resume(context.Background(), id, runner.Options{
+		Root: root, Cwd: cwd, Model: testModel, System: "test system",
+		Provider: prov, Tools: oneToolRegistry{},
+	})
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if err := r2.Close(); err != nil {
+		t.Fatalf("Close (resumed): %v", err)
+	}
+
+	afterResume, err := session.ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries (after resume): %v", err)
+	}
+	metaCount := 0
+	for _, e := range afterResume {
+		if e.Type == session.EntryMeta {
+			metaCount++
+		}
+	}
+	if metaCount != 1 {
+		t.Fatalf("meta entry count after create-then-resume = %d, want exactly 1: %+v", metaCount, afterResume)
+	}
+	if afterResume[0].Type != session.EntryMeta {
+		t.Fatalf("afterResume[0].Type = %s, want %s (meta stays the root)", afterResume[0].Type, session.EntryMeta)
 	}
 }
 
