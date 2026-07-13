@@ -91,6 +91,11 @@ type Runner struct {
 	ownsStore bool
 
 	journalDone chan struct{}
+	// barrier hands the consume goroutine an ack channel: after a Prompt run
+	// returns, Prompt sends one and blocks until consume has drained (journaled)
+	// the run's events, so the next Prompt's user-message append cannot reorder
+	// ahead of this run's assistant/tool entries. See awaitJournaled.
+	barrier chan chan struct{}
 
 	mu   sync.Mutex
 	jerr error
@@ -199,6 +204,7 @@ func build(opts Options, store *session.FileStore, journal *session.Journal, pro
 		store:       store,
 		ownsStore:   opts.Store == nil,
 		journalDone: make(chan struct{}),
+		barrier:     make(chan chan struct{}),
 	}
 	go r.consume(journalSub)
 
@@ -251,7 +257,26 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	// The journal folds back to provider messages directly (verbatim content
 	// blocks), so the loop's input is the folded context as-is.
 	_, err := loop.Run(ctx, cfg, r.journal.Fold())
+	// Block until consume has journaled this run's turns, so a subsequent
+	// Prompt's user-message append cannot land ahead of this run's assistant and
+	// tool entries (which consume writes asynchronously off the broker).
+	r.awaitJournaled()
 	return err
+}
+
+// awaitJournaled blocks until the consume goroutine has journaled every event
+// published so far — the run that just completed. It returns immediately if the
+// Runner has been closed (consume has exited).
+func (r *Runner) awaitJournaled() {
+	ack := make(chan struct{})
+	select {
+	case r.barrier <- ack:
+		select {
+		case <-ack:
+		case <-r.journalDone:
+		}
+	case <-r.journalDone:
+	}
 }
 
 // Close shuts down the runner's broker (closing every subscription,

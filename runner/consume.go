@@ -25,6 +25,15 @@ type toolResult struct {
 	isError bool
 }
 
+// reasoningBlock is one settled reasoning message's content and its opaque
+// per-block Meta (e.g. an Anthropic signature, or an OpenAI reasoning item id
+// and encrypted_content). One is kept per reasoning MessageFinished so distinct
+// reasoning items in a turn do not collapse into one block and lose Meta.
+type reasoningBlock struct {
+	text string
+	meta map[string]string
+}
+
 // turnAcc accumulates one model-call iteration's settled output across events
 // and journals it as the SDK's verbatim-content-block entries: an assistant
 // [session.NewMessageEntry] carrying the turn's reasoning, text, and tool_use
@@ -46,16 +55,15 @@ type toolResult struct {
 //     call has a result — so the journal never holds a tool_use without its
 //     result.
 type turnAcc struct {
-	reasoning     strings.Builder
-	text          strings.Builder
-	reasoningMeta map[string]string // accumulated MessageFinished.Meta for reasoning content
-	textMeta      map[string]string // accumulated MessageFinished.Meta for text content
-	usage         provider.Usage
-	started       []startedCall         // tool calls announced this turn, in order
-	results       map[string]toolResult // tool.call.finished result by call id
-	stop          string                // turn.finished stop reason
-	finished      bool                  // turn.finished observed for this iteration
-	msgFlushed    bool                  // assistant message entry already written
+	reasoningBlocks []reasoningBlock // one entry per settled reasoning message, in order
+	text            strings.Builder
+	textMeta        map[string]string // accumulated MessageFinished.Meta for text content
+	usage           provider.Usage
+	started         []startedCall         // tool calls announced this turn, in order
+	results         map[string]toolResult // tool.call.finished result by call id
+	stop            string                // turn.finished stop reason
+	finished        bool                  // turn.finished observed for this iteration
+	msgFlushed      bool                  // assistant message entry already written
 }
 
 func newTurnAcc() *turnAcc {
@@ -64,9 +72,8 @@ func newTurnAcc() *turnAcc {
 
 // reset clears the accumulator for the next iteration.
 func (a *turnAcc) reset() {
-	a.reasoning.Reset()
+	a.reasoningBlocks = nil
 	a.text.Reset()
-	a.reasoningMeta = nil
 	a.textMeta = nil
 	a.usage = provider.Usage{}
 	a.started = nil
@@ -101,10 +108,17 @@ func mergeMeta(dst, src map[string]string) map[string]string {
 // through the journal and is replayed verbatim on a later turn.
 func (a *turnAcc) assistantBlocks(includeToolUse bool) []provider.ContentBlock {
 	var blocks []provider.ContentBlock
-	if s := a.reasoning.String(); s != "" {
-		block := provider.ReasoningBlock(s)
-		if len(a.reasoningMeta) > 0 {
-			block.Meta = a.reasoningMeta
+	// One reasoning block per settled reasoning message, in order. A block is
+	// emitted even when its summary text is empty as long as it carries Meta —
+	// an OpenAI reasoning item can stream no summary yet still carry the
+	// encrypted_content / item_id Meta that buildInput must replay.
+	for _, rb := range a.reasoningBlocks {
+		if rb.text == "" && len(rb.meta) == 0 {
+			continue
+		}
+		block := provider.ReasoningBlock(rb.text)
+		if len(rb.meta) > 0 {
+			block.Meta = rb.meta
 		}
 		blocks = append(blocks, block)
 	}
@@ -123,55 +137,101 @@ func (a *turnAcc) assistantBlocks(includeToolUse bool) []provider.ContentBlock {
 	return blocks
 }
 
-// consume drains sub until the broker closes it, journaling each iteration's
-// settled output (see turnAcc). It runs on its own goroutine for the lifetime
-// of the Runner; Close waits for it to finish draining before closing the
-// journal, so a killed run's already-settled prefix is durable once Close
-// returns.
+// consume journals each iteration's settled output (see turnAcc) until the
+// broker closes its subscription. It runs on its own goroutine for the lifetime
+// of the Runner. It also services [Runner.awaitJournaled] barriers: when a
+// Prompt finishes its run it sends a barrier, and consume drains every buffered
+// event before acking, so the caller's next user-message append cannot reorder
+// ahead of this run's assistant/tool entries. Close waits for it to finish
+// draining before closing the journal, so a killed run's already-settled prefix
+// is durable once Close returns.
 func (r *Runner) consume(sub *event.Subscription) {
 	defer close(r.journalDone)
 
 	acc := newTurnAcc()
-	for e := range sub.C {
-		switch ev := e.(type) {
-		case event.MessageFinished:
-			switch ev.MessageKind {
-			case event.MessageText:
-				acc.text.WriteString(ev.Content)
-				acc.textMeta = mergeMeta(acc.textMeta, ev.Meta)
-			case event.MessageReasoning:
-				acc.reasoning.WriteString(ev.Content)
-				acc.reasoningMeta = mergeMeta(acc.reasoningMeta, ev.Meta)
-			}
-
-		case event.ToolCallStarted:
-			acc.started = append(acc.started, startedCall{id: ev.ID, name: ev.Name, input: ev.Input})
-
-		case event.ToolCallFinished:
-			acc.results[ev.ID] = toolResult{content: ev.Result, isError: ev.IsError}
-			r.maybeFlushToolTurn(acc)
-
-		case event.TurnFinished:
-			acc.usage = ev.Usage
-			acc.stop = ev.StopReason
-			acc.finished = true
-			if ev.StopReason == string(provider.StopToolUse) {
-				// Tools will run; wait for their results, then flush the
-				// assistant message and the result round together.
-				r.maybeFlushToolTurn(acc)
-			} else {
-				// No tools will run: flush the settled text/reasoning now,
-				// dropping any orphaned announced calls.
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				// Belt-and-suspenders: settled text that never saw a
+				// turn.finished (an out-of-band teardown) is persisted rather
+				// than dropped. No-op after a normal reset or an already-flushed
+				// message.
 				r.flushAssistant(acc, false)
-				acc.reset()
+				return
+			}
+			r.handleEvent(acc, e)
+
+		case ack := <-r.barrier:
+			// Drain everything already buffered before acking: the run's
+			// publishes all completed before Prompt sent the barrier, so this
+			// guarantees the run's turns are journaled by the time the ack fires.
+			closed := r.drain(sub, acc)
+			close(ack)
+			if closed {
+				r.flushAssistant(acc, false)
+				return
 			}
 		}
 	}
+}
 
-	// Belt-and-suspenders: settled text that never saw a turn.finished (an
-	// out-of-band teardown) is persisted rather than dropped. No-op after a
-	// normal reset or an already-flushed message.
-	r.flushAssistant(acc, false)
+// handleEvent journals one settled event into the turn accumulator.
+func (r *Runner) handleEvent(acc *turnAcc, e event.Event) {
+	switch ev := e.(type) {
+	case event.MessageFinished:
+		switch ev.MessageKind {
+		case event.MessageText:
+			acc.text.WriteString(ev.Content)
+			acc.textMeta = mergeMeta(acc.textMeta, ev.Meta)
+		case event.MessageReasoning:
+			// Each settled reasoning message is its own block. The loop already
+			// merges a contiguous reasoning run into one MessageFinished, so a
+			// second reasoning event in a turn is a distinct item whose Meta (an
+			// OpenAI item id / encrypted_content) must not collapse into the
+			// first item's.
+			acc.reasoningBlocks = append(acc.reasoningBlocks, reasoningBlock{text: ev.Content, meta: mergeMeta(nil, ev.Meta)})
+		}
+
+	case event.ToolCallStarted:
+		acc.started = append(acc.started, startedCall{id: ev.ID, name: ev.Name, input: ev.Input})
+
+	case event.ToolCallFinished:
+		acc.results[ev.ID] = toolResult{content: ev.Result, isError: ev.IsError}
+		r.maybeFlushToolTurn(acc)
+
+	case event.TurnFinished:
+		acc.usage = ev.Usage
+		acc.stop = ev.StopReason
+		acc.finished = true
+		if ev.StopReason == string(provider.StopToolUse) {
+			// Tools will run; wait for their results, then flush the assistant
+			// message and the result round together.
+			r.maybeFlushToolTurn(acc)
+		} else {
+			// No tools will run: flush the settled text/reasoning now, dropping
+			// any orphaned announced calls.
+			r.flushAssistant(acc, false)
+			acc.reset()
+		}
+	}
+}
+
+// drain journals every event currently buffered on sub without blocking,
+// returning whether the subscription was closed (the broker shut down) while
+// draining.
+func (r *Runner) drain(sub *event.Subscription, acc *turnAcc) (closed bool) {
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				return true
+			}
+			r.handleEvent(acc, e)
+		default:
+			return false
+		}
+	}
 }
 
 // maybeFlushToolTurn flushes a StopToolUse iteration once every announced call
