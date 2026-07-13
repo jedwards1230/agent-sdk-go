@@ -269,6 +269,14 @@ func (e TurnStarted) withMeta(seq uint64, ts time.Time) Event {
 
 // TurnFinished marks the end of a turn, carrying the stop reason, the turn's
 // normalized token usage, and (when the model is priced) its cost.
+//
+// Ordinarily each TurnFinished pairs with a preceding TurnStarted. The one
+// exception is the loop's iteration cap: when a run stops at the cap while the
+// model is still requesting tools, the loop emits a terminal TurnFinished
+// carrying provider.StopMaxTurns ("max_turns") with NO matching TurnStarted, so
+// a client that maps TurnFinished to a settled response sees a run end instead
+// of hanging. Clients that pair TurnStarted/TurnFinished to track active turns
+// must tolerate this unmatched terminal.
 type TurnFinished struct {
 	meta
 	StopReason string
