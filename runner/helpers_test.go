@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/session"
 )
 
 // msgText concatenates a message's text blocks.
@@ -37,4 +38,16 @@ func blocksOfType(m provider.Message, t provider.BlockType) []provider.ContentBl
 		}
 	}
 	return out
+}
+
+// skipMeta drops a runner.New-created journal's leading [session.EntryMeta]
+// entry (its root, carrying the session's cwd), if present, so tests
+// asserting on the conversation entries by index don't have to special-case
+// it. Fold-based assertions never need this: [session.Journal.Fold] already
+// skips EntryMeta entries.
+func skipMeta(entries []session.Entry) []session.Entry {
+	if len(entries) > 0 && entries[0].Type == session.EntryMeta {
+		return entries[1:]
+	}
+	return entries
 }

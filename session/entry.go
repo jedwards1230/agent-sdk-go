@@ -26,6 +26,10 @@ const (
 	// EntryCompaction summarizes every ancestor entry before it; [Journal.Fold]
 	// stops walking ancestors once it reaches one.
 	EntryCompaction EntryType = "compaction"
+	// EntryMeta carries durable session-create metadata (currently the cwd).
+	// It is written as the first entry in a freshly created journal, so it is
+	// always the tree's root. It contributes nothing to [Journal.Fold].
+	EntryMeta EntryType = "session_meta"
 )
 
 // Entry is one immutable node in a session's tree — the unit of one JSONL
@@ -83,6 +87,14 @@ type CompactionPayload struct {
 // audit.
 type ForkPayload struct {
 	From string `json:"from"`
+}
+
+// MetaPayload is the [Entry.Payload] shape for [EntryMeta] entries: durable
+// session-create metadata. Extensible — future session metadata rides here
+// alongside Cwd.
+type MetaPayload struct {
+	// Cwd is the working directory the session was created for.
+	Cwd string `json:"cwd,omitempty"`
 }
 
 // ErrEntryType indicates a typed accessor ([Entry.Message], [Entry.ToolRound],
@@ -179,6 +191,18 @@ func newForkPointEntry(at string) Entry {
 	}
 }
 
+// NewMetaEntry constructs a session-metadata entry carrying cwd. It is
+// intended to be the first entry appended to a freshly created journal (see
+// [runner.New]), so it becomes the tree's root. ID, Parent, and Time are left
+// zero; [Journal.Append] fills them in.
+func NewMetaEntry(cwd string) Entry {
+	payload := MetaPayload{Cwd: cwd}
+	return Entry{
+		Type:    EntryMeta,
+		Payload: marshalPayload(payload),
+	}
+}
+
 // Message unmarshals e's payload as a [MessagePayload] and returns it
 // projected back to a [provider.Message], with every content block (and its
 // Meta) intact. It returns [ErrEntryType] if e is not an [EntryMessage].
@@ -228,6 +252,19 @@ func (e Entry) Fork() (ForkPayload, error) {
 	}
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
 		return ForkPayload{}, fmt.Errorf("session: unmarshal fork_point payload of entry %s: %w", e.ID, err)
+	}
+	return p, nil
+}
+
+// Meta unmarshals e's payload as a [MetaPayload]. It returns [ErrEntryType]
+// if e is not an [EntryMeta].
+func (e Entry) Meta() (MetaPayload, error) {
+	var p MetaPayload
+	if e.Type != EntryMeta {
+		return p, fmt.Errorf("session: entry %s is %s, not %s: %w", e.ID, e.Type, EntryMeta, ErrEntryType)
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return MetaPayload{}, fmt.Errorf("session: unmarshal session_meta payload of entry %s: %w", e.ID, err)
 	}
 	return p, nil
 }

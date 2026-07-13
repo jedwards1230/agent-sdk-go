@@ -317,6 +317,67 @@ func TestFileStoreTornWriteResume(t *testing.T) {
 	}
 }
 
+// TestReadEntries asserts session.ReadEntries reads a journal file's entries
+// straight off disk — including a leading meta entry — without creating a
+// live append handle or touching any store's cache.
+func TestReadEntries(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+
+	store, err := session.NewFileStore(session.WithRoot(root), session.WithStoreIDGen(newCounterIDGen("s")))
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	j, err := store.Create(ctx, "proj")
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := j.Append(session.NewMetaEntry("/work/proj")); err != nil {
+		t.Fatalf("Append meta: %v", err)
+	}
+	if _, err := j.Append(session.NewMessageEntry(provider.UserText("hi"))); err != nil {
+		t.Fatalf("Append message: %v", err)
+	}
+	path := j.Path()
+	if err := store.Close(); err != nil {
+		t.Fatalf("store.Close: %v", err)
+	}
+
+	entries, err := session.ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ReadEntries: got %d entries, want 2: %+v", len(entries), entries)
+	}
+	if entries[0].Type != session.EntryMeta {
+		t.Fatalf("entries[0].Type = %s, want %s", entries[0].Type, session.EntryMeta)
+	}
+	meta, err := entries[0].Meta()
+	if err != nil {
+		t.Fatalf("entries[0].Meta(): %v", err)
+	}
+	if meta.Cwd != "/work/proj" {
+		t.Errorf("entries[0].Meta().Cwd = %q, want %q", meta.Cwd, "/work/proj")
+	}
+	if entries[1].Type != session.EntryMessage {
+		t.Errorf("entries[1].Type = %s, want %s", entries[1].Type, session.EntryMessage)
+	}
+}
+
+// TestReadEntriesMissingFile asserts ReadEntries on a nonexistent path
+// returns (nil, nil), matching readJournal's contract for a not-yet-created
+// session.
+func TestReadEntriesMissingFile(t *testing.T) {
+	entries, err := session.ReadEntries(filepath.Join(t.TempDir(), "missing.jsonl"))
+	if err != nil {
+		t.Fatalf("ReadEntries: %v", err)
+	}
+	if entries != nil {
+		t.Errorf("ReadEntries on missing file = %+v, want nil", entries)
+	}
+}
+
 // TestFileStoreTornWriteInteriorCorruption asserts an interior corrupt line
 // (not the final line) is treated as real corruption, not a torn write.
 func TestFileStoreTornWriteInteriorCorruption(t *testing.T) {

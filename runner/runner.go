@@ -121,6 +121,17 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 		}
 		return nil, fmt.Errorf("runner: create session: %w", err)
 	}
+	// Persist the cwd as the journal's first (root) entry so it survives a
+	// daemon restart — session/list on a disk-only session needs it to
+	// cwd-filter without resuming. Resume never hits this path: it opens an
+	// existing journal that already has its meta entry.
+	if _, err := journal.Append(session.NewMetaEntry(opts.Cwd)); err != nil {
+		_ = journal.Close()
+		if opts.Store == nil {
+			_ = store.Close()
+		}
+		return nil, fmt.Errorf("runner: append session metadata: %w", err)
+	}
 	return build(opts, store, journal, prov, false), nil
 }
 
