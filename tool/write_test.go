@@ -54,6 +54,30 @@ func TestWriteOverwritesExisting(t *testing.T) {
 	}
 }
 
+func TestWriteNonexistentRootCreatesIt(t *testing.T) {
+	// Write's contract is to create missing parent directories (see
+	// Description), so a nonexistent root is not an error case for this tool
+	// — unlike ls/glob/read/edit/bash, which require their root to already
+	// exist. This test documents that intentional behavior.
+	dir := t.TempDir()
+	root := filepath.Join(dir, "no", "such", "dir")
+	w := NewWrite(root)
+	res, err := w.Run(context.Background(), json.RawMessage(`{"path":"f.txt","content":"hi"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("IsError = true, content: %q, want the missing root to be created", res.Content)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "hi" {
+		t.Fatalf("file = %q, want %q", got, "hi")
+	}
+}
+
 func TestWriteMissingPath(t *testing.T) {
 	dir := t.TempDir()
 	w := NewWrite(dir)
