@@ -354,11 +354,25 @@ marker is absolute — the divergence is intentional. A file-less writer keeps t
 pathless `… [N bytes elided] …`.
 
 **Event shape** (`event.ToolCallFinished`). `result` carries whatever the model
-sees (bounded excerpt by default; full content for a `FullResult` tool). New
-fields `spill_path` / `spill_bytes` / `spill_sha256` reference the full file.
+sees (bounded excerpt by default; full content for a `FullResult` tool). The
+`spill_path` / `spill_bytes` / `spill_sha256` fields reference the full file.
 `spill_path` is **relative to the store root** (e.g.
 `sessions/<slug>/<id>/calls/<call-id>.log`), never an absolute host path, so the
 serialized event stays portable.
+
+`input` carries the **complete, assembled** tool input the call ran with — the
+authoritative payload a client reconciles against. It is deliberately distinct
+from `tool.call.started`'s `input`, which is only the start-of-block **seed**: a
+provider that streams a tool call's arguments as `tool.call.delta` fragments (the
+Anthropic `input_json_delta` shape) announces `started` with an empty `{}` and
+does not settle the real arguments until the stream ends. `tool.call.finished` is
+the must-deliver terminal that carries them, so a consumer that needs the real
+arguments — to journal the assistant's `tool_use` block, or to surface them in a
+UI — reads `finished.input`, not `started.input`. The loop's assembly is
+resilient to *how* a provider delivers the input: arguments that arrive only at
+`content_block_start` (an inline seed with no deltas) fold into the same
+accumulator streamed deltas write to, and an empty `{}` at the block's end never
+masks a real seed or accumulated deltas.
 
 **Root vs Cwd (why the marker is absolute).** The session store root
 (`runner.Options.Root`, the embedder's app dir) and the tool working dir
@@ -502,9 +516,10 @@ The mapping and the ordering that makes open/close pairing safe:
   turn/tool/session/error metrics.
 - **Redaction is the app's job at the mapping boundary.** The stream carries raw
   payloads an app must **not** copy into span attributes: `tool.call.started`
-  carries `input` (tool params) and `message.*` carry model text. Instrument
-  with ids, names, counts, durations, costs, verdicts — never prompt text, tool
-  params, or tool results.
+  and `tool.call.finished` both carry `input` (tool params — the seed on
+  `started`, the authoritative assembled input on `finished`) and `message.*`
+  carry model text. Instrument with ids, names, counts, durations, costs,
+  verdicts — never prompt text, tool params, or tool results.
 
 A second embedder instruments the same seam the same way — the mapping above is
 the contract, not one app's convention.

@@ -106,6 +106,10 @@ type ToolCallUpdateFields struct {
 	Kind ToolKind `json:"kind,omitempty"`
 	// Content is the call's updated output, or nil if unchanged.
 	Content []ToolCallContent `json:"content,omitempty"`
+	// RawInput is the tool's raw JSON arguments, or nil if unchanged/absent. A
+	// call announced with a placeholder input (an empty "{}" while the arguments
+	// were still streaming) reconciles to its authoritative input here.
+	RawInput json.RawMessage `json:"rawInput,omitempty"`
 	// RawOutput is the tool's raw JSON result, or nil if unchanged/absent.
 	RawOutput json.RawMessage `json:"rawOutput,omitempty"`
 }

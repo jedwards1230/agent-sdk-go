@@ -202,6 +202,15 @@ func (h *streamHandle) onBlockStart(e sseEvent) (provider.StreamEvent, bool, err
 		if len(input) == 0 {
 			input = json.RawMessage(`{}`)
 		}
+		// A model can deliver the whole tool input inline on content_block_start
+		// (with no input_json_delta frames following) instead of streaming it.
+		// Seed the accumulator with that inline input so onBlockStop assembles the
+		// real arguments rather than "{}". Streamed deltas and inline input are
+		// mutually exclusive per the Messages API, so this never double-writes
+		// with a later delta.
+		if !blankInput(input) {
+			st.input.WriteString(string(input))
+		}
 		return provider.StreamEvent{
 			Type: provider.StreamToolCallStart,
 			Tool: &provider.ToolCall{ID: st.toolID, Name: st.toolName, Input: input},
@@ -265,6 +274,14 @@ func (h *streamHandle) onBlockStop(e sseEvent) (provider.StreamEvent, bool, erro
 		Type: provider.StreamToolCallEnd,
 		Tool: &provider.ToolCall{ID: st.toolID, Name: st.toolName, Input: json.RawMessage(input)},
 	}, true, nil
+}
+
+// blankInput reports whether a tool-use input payload carries no arguments —
+// empty bytes or an empty JSON object ("{}"). Such a value must not seed the
+// input accumulator, so a later assembly falls back to the real payload.
+func blankInput(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "{}"
 }
 
 // Close releases the underlying response body. It is safe to call more than once.
