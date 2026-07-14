@@ -150,15 +150,16 @@ func pathFromMarker(t *testing.T, excerpt string) string {
 	return strings.TrimSpace(rest[:j])
 }
 
-// TestRunner_SpillMarkerPathResolvesWhenCwdDiffersFromRoot is the real gofer
-// scenario: the session store Root and the tool Cwd are DIFFERENT directories.
+// TestRunner_SpillMarkerPathResolvesWhenCwdDiffersFromRoot is the common
+// embedder scenario: the session store Root and the tool Cwd are DIFFERENT
+// directories.
 // A capped tool's excerpt marker must name a path the read tool can resolve from
 // the tool cwd — which only works because the marker names the ABSOLUTE spill
 // path (a root-relative path would resolve against Cwd and miss). It reads the
 // path straight out of the marker text (what the model would do) and asserts the
 // complete original output comes back.
 func TestRunner_SpillMarkerPathResolvesWhenCwdDiffersFromRoot(t *testing.T) {
-	root := t.TempDir() // session store lives here (e.g. ~/.gofer)
+	root := t.TempDir() // session store lives here (the embedder's app dir)
 	cwd := t.TempDir()  // tools operate here (the project dir) — deliberately different
 	if root == cwd {
 		t.Fatal("root and cwd must differ for this test")
