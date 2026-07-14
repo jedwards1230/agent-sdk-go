@@ -138,6 +138,14 @@ type Config struct {
 	// recorded (as the parent of the .log file) in tool.call.finished's portable
 	// spill_path so the event never leaks an absolute host path.
 	SpillRelDir string
+
+	// Guard decides how each tool call is handled before execution
+	// (run-contained / ask / deny). nil ⇒ every call runs uncontained (no
+	// gating) — existing behavior, unchanged.
+	Guard Guard
+	// Approver awaits a human's reply on a DecisionAsk. Required if Guard can
+	// return DecisionAsk; nil ⇒ an ask fails closed (deny).
+	Approver Approver
 }
 
 // Result is the outcome of a [Run].
@@ -335,6 +343,9 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 // carry — the full output lives only in the spill file.
 func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.ContentBlock {
 	call = r.beforeTool(ctx, call)
+	if block, proceed := r.gate(ctx, call); !proceed {
+		return block
+	}
 
 	w, err := spill.Create(r.cfg.SpillDir, r.cfg.SpillRelDir, call.ID)
 	if err != nil {
@@ -392,6 +403,84 @@ func (r *runner) execTool(ctx context.Context, call ToolCall) ToolResult {
 		res = out
 	}
 	return r.afterTool(ctx, call, res)
+}
+
+// --- guard / permission seam ---
+
+// gate consults the guard, emits permission events, and on an "ask" awaits a
+// human reply. Returns (block, false) when the call is blocked (a denied
+// tool_result the caller returns as-is), or (zero, true) to proceed to exec.
+func (r *runner) gate(ctx context.Context, call ToolCall) (provider.ContentBlock, bool) {
+	if r.cfg.Guard == nil {
+		return provider.ContentBlock{}, true
+	}
+	g := r.cfg.Guard.Evaluate(ctx, call)
+	switch g.Decision {
+	case DecisionRunContained:
+		return provider.ContentBlock{}, true
+	case DecisionDeny:
+		// static deny: no human asked ⇒ emit resolved(deny) only, then finished.
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "denied by policy"), false
+	case DecisionAsk:
+		return r.awaitApproval(ctx, call, g)
+	default:
+		// unknown decision ⇒ fail closed.
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "unknown guard decision"), false
+	}
+}
+
+// awaitApproval emits permission.requested and, if an Approver is configured,
+// awaits its reply; both a missing Approver and an Await error fail closed
+// (deny).
+func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (provider.ContentBlock, bool) {
+	spec := g.Spec
+	if spec == nil {
+		spec = decodeInput(call.Input)
+	}
+	r.broker().Publish(event.NewPermissionRequested(r.cfg.SessionID, call.ID, call.Name, spec, g.Trace))
+	if r.cfg.Approver == nil {
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "no approver configured"), false
+	}
+	reply, err := r.cfg.Approver.Await(ctx, call.ID)
+	if err != nil { // ctx cancelled / approver failed ⇒ fail closed
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "permission await: "+err.Error()), false
+	}
+	r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, reply.Verdict, g.Rule))
+	if reply.Verdict == event.VerdictAllow {
+		if reply.Remember {
+			if gr, ok := r.cfg.Guard.(Granter); ok {
+				gr.Grant(call)
+			}
+		}
+		return provider.ContentBlock{}, true
+	}
+	return r.finishBlocked(call, "denied by user"), false
+}
+
+// finishBlocked emits tool.call.finished for a gated-off call and returns the
+// error tool_result block the model sees. (No spill: nothing executed.)
+func (r *runner) finishBlocked(call ToolCall, reason string) provider.ContentBlock {
+	content := "permission denied: " + reason
+	r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, content, true, nil))
+	return provider.ToolResultBlock(call.ID, content, true)
+}
+
+// decodeInput best-effort decodes a tool call's JSON input into a map for the
+// permission events' Spec field. Malformed or empty input yields nil rather
+// than an error — the events are advisory, not authoritative.
+func decodeInput(input json.RawMessage) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // --- never-throw hook wrappers ---

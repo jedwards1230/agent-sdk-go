@@ -149,6 +149,71 @@ undecided (home TBD at M4). Grants persist with TTL behind an
 anti-escalation cache: a read grant never satisfies a write ask, and dangerous
 specs never widen past exact-match.
 
+**Implementation home (M3, `permission/`).** The engine itself — `permission.Rule`
++ `permission.Engine` (`New`, `Evaluate`, `Grant`) — ships in M3 as a thin,
+format-agnostic slice: deny > ask > allow precedence, an unmatched request is
+`ask` (fail-safe), and `Grant` appends a runtime session-scoped rule. It imports
+only `event` + stdlib. The TTL / anti-escalation / dangerous-downgrade policy and
+every vendor-format loader (`settings.json`, native manifest) are **not** here
+yet — M4/M5, landing in the same `permission/` package per the decided
+permission-format home (2026-07-13).
+
+## Guard / decision seam (M3)
+
+The loop's before-exec gate (`loop/guard.go`, `loop/gate.go`) is the sandbox
+seam named in the [PRD](PRD.md) milestone table: M3's permission story is
+deliberately binary — a tool call is either sandboxable (run contained) or it
+raises an approval request. There is no third "run uncontained" outcome.
+
+- **`Decision`** — `DecisionRunContained` / `DecisionAsk` / `DecisionDeny`. A
+  **`Guard`** (`Evaluate(ctx, ToolCall) Guarding`) returns one plus the
+  `Rule`/`Spec`/`Trace` the permission events carry. `Config.Guard` is nil by
+  default: every call runs uncontained, exactly the pre-M3 behavior — zero new
+  events, zero new goroutines, no golden-file changes on any existing path.
+- **`Approver`** (`Await(ctx, id) (Reply, error)`) is how the loop's own
+  goroutine blocks on a human's reply to a `DecisionAsk`. **`Gate`** is the
+  reference implementation: `Await` selects on a per-id buffered reply channel
+  and `ctx.Done()` — it spawns **no goroutine**, so a cancelled turn cannot leak
+  one. The consuming application routes an inbound `event.PermissionReply` op
+  into `Gate.Reply`, which never blocks (buffered chan) and silently drops a
+  reply with no live waiter (already answered, or the turn was cancelled).
+- **`Container`** (`CanContain(ctx, ToolCall) (bool, error)`) is the sandbox
+  capability check. The SDK defines **only this interface** — concrete backends
+  (Seatbelt on macOS, bwrap+seccomp on Linux) are an application/optional-package
+  concern and must never land in the SDK.
+- **`RuleGuard`** composes a `permission.Engine` with an optional `Container`
+  into the M3 policy: a deny rule → `DecisionDeny`; an ask rule or an unmatched
+  request → `DecisionAsk`; an allow rule → `DecisionRunContained` only if
+  `Container.CanContain` says so, else `DecisionAsk` — an allow verdict never
+  runs a call uncontained (decided 2026-07-13). `RuleGuard` also implements
+  **`Granter`** (`Grant(call)`): a remembered "always allow" reply appends a
+  session-scoped allow rule to the engine via `Engine.Grant`, so an identical
+  future call skips the ask. TTL / anti-escalation live with the engine (M4/M5),
+  not here.
+- **Emit → await → reply flow** (`runner.gate` in `loop/loop.go`, called from
+  `runOneTool` right after `beforeTool` and before the tool executes or spills
+  any output):
+  - `DecisionRunContained` — the call proceeds; no permission events at all.
+  - `DecisionDeny` — a **static** policy block: the loop publishes
+    `permission.resolved{deny}` **without** a preceding `permission.requested`
+    (no human was asked, so nothing was requested), then a blocked
+    `tool.call.finished{is_error}` so the tool_use/tool_result pairing the
+    provider sees stays well-formed.
+  - `DecisionAsk` — the loop publishes `permission.requested`, then (if
+    `Config.Approver` is set) blocks on `Approver.Await(ctx, call.ID)` for the
+    matching `permission.reply`, then publishes `permission.resolved{verdict}`.
+    An allow reply lets the call proceed (and grants a remember, if asked); a
+    deny reply blocks it the same way a static deny does.
+- **Fail-closed everywhere permission is uncertain**: a nil `Config.Approver`
+  under `DecisionAsk` denies immediately after emitting the request (nothing
+  can await a reply); an `Approver.Await` error (including a cancelled ctx)
+  denies; a `Container.CanContain` error on an otherwise-allowed call escalates
+  to `DecisionAsk` rather than either running uncontained or silently blocking.
+  An unrecognized `Decision` value also denies.
+- Every gated-off call (deny or ask-then-deny) still emits `tool.call.finished`
+  — nothing executed, so there is no spill — keeping the loop's tool-round
+  invariant (one `tool_result` per `tool_use`) intact for every outcome.
+
 ## Agent manifest (compose/)
 
 ```yaml

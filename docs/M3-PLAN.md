@@ -27,16 +27,28 @@ are **M4/M5, not M3**.
       so the model can `read` it to load the whole output from any cwd (Root≠Cwd
       safe). Protects memory, makes every level of a session tree greppable on
       disk, surfaces errors from the source. (`spill/`, design: DESIGN.md)
-- [ ] **Sandbox seam.** A containment interface the loop consults before running
-      a tool. Binary policy: sandboxable → run contained; otherwise (not
-      sandboxable, or no backend available on this host) → emit
+- [x] **Sandbox seam (SDK side shipped).** `Decision{RunContained,Ask,Deny}` +
+      `Guard`/`Granter`/`Container` interfaces (`loop/guard.go`) and `RuleGuard`,
+      the M3 binary+deny policy composing a `permission.Engine` with an optional
+      `Container`. Binary policy: sandboxable → run contained; otherwise (not
+      sandboxable, no backend, or a `Container` error) → emit
       `permission.requested` and let a human decide — never silently block or run
       uncontained (decided 2026-07-13). Concrete backends (seatbelt / bwrap+seccomp)
-      are an application/optional-package concern; the SDK owns the decision seam.
-- [ ] **Approval protocol events.** Confirm `permission.requested` /
-      `permission.resolved` events + the `permission.reply` op carry everything a
-      real client's approval relay needs; add fields only if a live client proves
-      a gap. No rule engine yet — the verdict is a human ask.
+      remain an application/optional-package concern; the SDK owns only the
+      decision seam. `Config.Guard`/`Config.Approver` default nil ⇒ every call
+      runs uncontained, unchanged from pre-M3 behavior. (design: DESIGN.md
+      "Guard / decision seam")
+- [x] **Approval protocol events.** Confirmed `permission.requested` /
+      `permission.resolved` + the `permission.reply` op are sufficient for the
+      emit → await → reply flow — no contract change needed. Wired end to end:
+      `runner.gate`/`awaitApproval` (`loop/loop.go`) emit the events; `Gate`
+      (`loop/gate.go`) is the reference `Approver` bridging an emitted
+      `permission.requested` to an inbound `permission.reply` op, blocking the
+      loop's own goroutine (no spawned goroutine, so a cancelled turn leaks
+      nothing) on a per-id buffered channel selected against `ctx.Done()`. Static
+      deny resolves without a preceding request (no human asked); every
+      fail-closed path (nil approver, await error, container error) is explicit
+      in DESIGN.md.
 - [ ] **Headless exec adapter.** One-shot drivable session emitting JSONL events
       on stdout, with output-schema support (the app's `exec` verb consumes this).
 - [ ] **LSP package.** Server registry + diagnostics seam; the loop surfaces
@@ -55,9 +67,10 @@ test ./... && golangci-lint run`).
 
 ## Explicitly deferred (M4/M5)
 
-Format-agnostic `Rule` engine + CC `settings.json` loader · session tree /
-subagent spawn seam · MCP client + tool-search index · provider breadth
-(`openai-compat` + manifest `ModelInfo` overlay).
+CC `settings.json` loader + native manifest loader · TTL / anti-escalation /
+dangerous-downgrade grant policy · session tree / subagent spawn seam · MCP
+client + tool-search index · provider breadth (`openai-compat` + manifest
+`ModelInfo` overlay).
 
 **Permission-format home (decided 2026-07-13):** the rule engine and all format
 loaders live under `permission/` — the engine consumes one typed `Rule`; each
@@ -66,3 +79,9 @@ loader sharing the same matcher/glob helpers. This is a *permission-format*
 concern, **not** provider support — it is unrelated to `provider/` and must not
 couple to it. Ship only the CC loader + native format; other agents' formats
 would be future siblings, never core.
+
+**Thin engine landed (M3):** `permission.Rule` + `permission.Engine`
+(`New`/`Evaluate`/`Grant`) shipped as the format-agnostic core described above —
+deny > ask > allow precedence, unmatched ⇒ ask, `Grant` for a runtime
+session-scoped allow. It imports only `event` + stdlib and has no vendor-format
+loader yet; those (and TTL/anti-escalation) stay M4/M5 in the same package.
