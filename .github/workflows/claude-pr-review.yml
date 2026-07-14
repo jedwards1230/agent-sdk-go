@@ -17,6 +17,7 @@ jobs:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # preferred (subscription)
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # fallback (metered API)
     with:
+      extra_plugins: go-quality@jedwards1230-plugins
       focus: |
         agent-sdk-go is an importable, provider-agnostic agent framework for Go —
         an owned agent loop with a typed Event/Op contract that every client
