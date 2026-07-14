@@ -52,5 +52,5 @@ func (a toolAdapter) Run(ctx context.Context, input json.RawMessage) (ToolResult
 	}
 	// tool.Result.Metadata.Diagnostics is an M3 slot the builtins never populate;
 	// it is not surfaced here at M1.
-	return ToolResult{Content: res.Content, IsError: res.IsError}, nil
+	return ToolResult{Content: res.Content, IsError: res.IsError, FullResult: res.FullResult}, nil
 }

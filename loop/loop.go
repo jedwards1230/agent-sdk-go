@@ -21,6 +21,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/spill"
 )
 
 // defaultMaxIters caps the model-call rounds in one Run when Config.MaxIters is
@@ -58,6 +59,11 @@ type ToolResult struct {
 	IsError bool
 	// Diagnostics are optional advisory messages (e.g. LSP findings).
 	Diagnostics []string
+	// FullResult asks the loop to feed the model this Content in full rather
+	// than the bounded spill excerpt (the read tool's escape hatch). Output is
+	// still spilled to disk regardless; only the model-facing/journaled text
+	// changes. Streaming tools (bash) leave it false.
+	FullResult bool
 }
 
 // ToolCall is a resolved tool invocation passed to the BeforeTool/AfterTool
@@ -121,6 +127,17 @@ type Config struct {
 	SessionID string
 	// MaxIters caps model-call rounds; <= 0 uses the default.
 	MaxIters int
+
+	// SpillDir is the absolute directory each tool call's output is streamed to,
+	// one append-only <call-id>.log per call. Empty disables file spilling:
+	// output is still bounded to an in-memory head+tail excerpt (no code path
+	// buffers the full output), but no file is written and tool.call.finished
+	// carries no spill_path.
+	SpillDir string
+	// SpillRelDir is SpillDir expressed relative to the session store root. It is
+	// recorded (as the parent of the .log file) in tool.call.finished's portable
+	// spill_path so the event never leaks an absolute host path.
+	SpillRelDir string
 }
 
 // Result is the outcome of a [Run].
@@ -289,39 +306,92 @@ func (r *runner) turnFinished(stop provider.StopReason, usage provider.Usage) ev
 	return event.NewTurnFinished(r.cfg.SessionID, string(stop), usage)
 }
 
-// runTools executes each requested tool call (through the hooks) and returns the
-// tool_result content blocks to append as the next user message.
+// runTools executes each requested tool call (through the hooks), spilling its
+// output to a durable per-call file, and returns the tool_result content blocks
+// (carrying the bounded excerpt) to append as the next user message.
 func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.ContentBlock {
 	blocks := make([]provider.ContentBlock, 0, len(calls))
 	for _, call := range calls {
 		// Honor cancellation between tool calls: emit a cancelled result for each
 		// remaining call rather than invoking it, keeping the message well-formed
-		// (every tool_use gets a matching tool_result).
+		// (every tool_use gets a matching tool_result). A pre-empted call ran no
+		// tool, so there is nothing to spill.
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
 			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, true, nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
-		call = r.beforeTool(ctx, call)
-
-		var res ToolResult
-		if r.cfg.Tools == nil {
-			res = ToolResult{Content: fmt.Sprintf("no tool registry configured for tool %q", call.Name), IsError: true}
-		} else if tool, ok := r.cfg.Tools.Get(call.Name); !ok {
-			res = ToolResult{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
-		} else if out, err := tool.Run(ctx, call.Input); err != nil {
-			res = ToolResult{Content: err.Error(), IsError: true}
-		} else {
-			res = out
-		}
-
-		res = r.afterTool(ctx, call, res)
-
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
-		blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, res.IsError))
+		blocks = append(blocks, r.runOneTool(ctx, call))
 	}
 	return blocks
+}
+
+// runOneTool runs one resolved tool call through a per-call spill sink and emits
+// tool.call.finished. The tool's output streams into an append-only file (bash
+// writes straight through the sink; other tools return a bounded string the loop
+// writes through it); only a bounded head+tail excerpt + running sha256/byte
+// count is retained in memory. The excerpt is what the model and the event both
+// carry — the full output lives only in the spill file.
+func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.ContentBlock {
+	call = r.beforeTool(ctx, call)
+
+	w, err := spill.Create(r.cfg.SpillDir, r.cfg.SpillRelDir, call.ID)
+	if err != nil {
+		// Could not open a spill file: degrade to the tool's own (bounded) result
+		// rather than crashing the loop.
+		r.emitError("spill: "+err.Error(), false)
+		res := r.execTool(ctx, call)
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
+		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
+	}
+
+	res := r.execTool(spill.NewContext(ctx, w), call)
+	// A tool that streamed everything into the sink (bash) returns empty content;
+	// any returned content is a bounded string the loop records through the sink.
+	if res.Content != "" {
+		_, _ = w.Write([]byte(res.Content))
+	}
+	ref, closeErr := w.Close()
+	if closeErr != nil {
+		// The spill file is suspect: emit the tool's own content and drop the
+		// (possibly inconsistent) reference, but never crash the loop.
+		r.emitError("spill: close "+call.ID+": "+closeErr.Error(), false)
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
+		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
+	}
+
+	// The model (and the journal, via the event) sees the bounded excerpt by
+	// default; a FullResult tool (read) hands over its full content instead —
+	// the output is spilled to disk either way. The elision marker in an
+	// excerpt names the spill file, so the model can read the full output.
+	modelContent := ref.Excerpt
+	if res.FullResult {
+		modelContent = res.Content
+	}
+	if ref.Path != "" {
+		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
+	} else {
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics))
+	}
+	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
+}
+
+// execTool resolves and runs call through the registry and the AfterTool hook,
+// mapping every miss to an error result. ctx already carries the per-call spill
+// sink for a streaming tool.
+func (r *runner) execTool(ctx context.Context, call ToolCall) ToolResult {
+	var res ToolResult
+	if r.cfg.Tools == nil {
+		res = ToolResult{Content: fmt.Sprintf("no tool registry configured for tool %q", call.Name), IsError: true}
+	} else if tool, ok := r.cfg.Tools.Get(call.Name); !ok {
+		res = ToolResult{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
+	} else if out, err := tool.Run(ctx, call.Input); err != nil {
+		res = ToolResult{Content: err.Error(), IsError: true}
+	} else {
+		res = out
+	}
+	return r.afterTool(ctx, call, res)
 }
 
 // --- never-throw hook wrappers ---

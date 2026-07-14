@@ -1,0 +1,1 @@
+{"type":"tool.call.finished","session_id":"test-session","seq":5,"time":"2025-01-01T00:00:00Z","id":"t1","result":"spilled tool output\n","spill_path":"sessions/proj/sess-1/calls/t1.log","spill_bytes":20,"spill_sha256":"d3db5dd7d0726ca784ab16d5b1073f69076ca47850b4ac3a108b5e64d8361361"}

@@ -16,11 +16,14 @@ are **M4/M5, not M3**.
 
 ## Work packages
 
-- [ ] **Bulk-output spill.** Tool executions stream raw output to an append-only
-      per-call file under the session dir; `tool.call.finished` carries
-      `{path, bytes, sha256, head/tail excerpt}` instead of an unbounded payload.
-      Protects memory, makes every level of a session tree greppable on disk,
-      surfaces errors from the source. (design: DESIGN.md)
+- [x] **Bulk-output spill.** Tool executions stream raw output to an append-only
+      per-call file under the session dir (`<id>/calls/<call-id>.log`);
+      `tool.call.finished` carries `spill_path` (store-root-relative) + `spill_bytes`
+      + `spill_sha256` plus a bounded head+tail excerpt in `result` instead of an
+      unbounded payload. bash streams straight to the file (no full-buffer path);
+      other tools' bounded strings are written through the same sink. Protects
+      memory, makes every level of a session tree greppable on disk, surfaces
+      errors from the source. (`spill/`, design: DESIGN.md)
 - [ ] **Sandbox seam.** A containment interface the loop consults before running
       a tool. Binary policy: sandboxable → run contained; otherwise (not
       sandboxable, or no backend available on this host) → emit

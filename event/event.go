@@ -500,19 +500,54 @@ func (e ToolCallDelta) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// ToolCallFinished closes a tool call with its result, whether it errored, and
-// optional diagnostics.
+// ToolCallFinished closes a tool call with a bounded excerpt of its result,
+// whether it errored, optional diagnostics, and — when the output was streamed to
+// a durable spill file — a reference to that file.
+//
+// Result is a bounded head+tail excerpt of the tool's output, not the full
+// payload: the full, untruncated output lives in the spill file named by
+// SpillPath, and the excerpt is a preview old consumers can still read. SpillPath
+// is relative to the session store root (e.g.
+// "sessions/<slug>/<id>/calls/<call-id>.log"), never an absolute host path, so
+// the event stays portable when serialized; SpillBytes and SpillSHA256 describe
+// the full on-disk content. The three Spill fields are empty when no file was
+// written (e.g. a call pre-empted by cancellation, or a session with no store).
 type ToolCallFinished struct {
 	meta
 	ID          string
 	Result      string
 	IsError     bool
 	Diagnostics []string
+	// SpillPath is the spill file relative to the store root, or empty when the
+	// output was not spilled to a file.
+	SpillPath string
+	// SpillBytes is the full byte length of the spilled output.
+	SpillBytes int64
+	// SpillSHA256 is the hex-encoded sha256 of the full spilled output.
+	SpillSHA256 string
 }
 
-// NewToolCallFinished builds a tool.call.finished event.
+// NewToolCallFinished builds a tool.call.finished event with no spill-file
+// reference (result carries the bounded excerpt directly). Use
+// [NewToolCallFinishedSpill] to attach a spill reference.
 func NewToolCallFinished(session, id, result string, isError bool, diagnostics []string) ToolCallFinished {
 	return ToolCallFinished{meta: meta{session: session}, ID: id, Result: result, IsError: isError, Diagnostics: diagnostics}
+}
+
+// NewToolCallFinishedSpill builds a tool.call.finished event carrying a spill
+// reference — the store-root-relative path, byte count, and sha256 of the durable
+// file holding the full output — alongside the bounded excerpt.
+func NewToolCallFinishedSpill(session, id, excerpt string, isError bool, diagnostics []string, spillPath string, spillBytes int64, spillSHA256 string) ToolCallFinished {
+	return ToolCallFinished{
+		meta:        meta{session: session},
+		ID:          id,
+		Result:      excerpt,
+		IsError:     isError,
+		Diagnostics: diagnostics,
+		SpillPath:   spillPath,
+		SpillBytes:  spillBytes,
+		SpillSHA256: spillSHA256,
+	}
 }
 
 // Kind returns KindToolCallFinished.
@@ -521,7 +556,8 @@ func (ToolCallFinished) Kind() string { return KindToolCallFinished }
 // Tier returns TierMustDeliver.
 func (ToolCallFinished) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {id, result, is_error?, diagnostics?}.
+// MarshalJSON encodes the envelope plus {id, result, is_error?, diagnostics?,
+// spill_path?, spill_bytes?, spill_sha256?}.
 func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
@@ -529,7 +565,10 @@ func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 		Result      string   `json:"result"`
 		IsError     bool     `json:"is_error,omitempty"`
 		Diagnostics []string `json:"diagnostics,omitempty"`
-	}{baseEnvelope(e), e.ID, e.Result, e.IsError, e.Diagnostics})
+		SpillPath   string   `json:"spill_path,omitempty"`
+		SpillBytes  int64    `json:"spill_bytes,omitempty"`
+		SpillSHA256 string   `json:"spill_sha256,omitempty"`
+	}{baseEnvelope(e), e.ID, e.Result, e.IsError, e.Diagnostics, e.SpillPath, e.SpillBytes, e.SpillSHA256})
 }
 
 func (e ToolCallFinished) withMeta(seq uint64, ts time.Time) Event {
