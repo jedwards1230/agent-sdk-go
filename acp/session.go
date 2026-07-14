@@ -11,6 +11,10 @@ type NewSessionRequest struct {
 	// McpServers carries MCP server configs opaquely; this package does not
 	// project them.
 	McpServers []json.RawMessage `json:"mcpServers,omitempty"`
+	// Model optionally requests a specific model id for the session. Empty
+	// means the daemon resolves its own default; this field is additive and
+	// backward-compatible — a client that omits it sees no behavior change.
+	Model string `json:"model,omitempty"`
 }
 
 // NewSessionResponse is the payload of a session/new response.

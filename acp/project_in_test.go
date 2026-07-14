@@ -65,6 +65,22 @@ func TestFromNewSession(t *testing.T) {
 	}
 }
 
+// TestFromNewSessionIgnoresModel documents that a requested Model is not
+// projected onto event.SessionNew, which has no model field yet: a consuming
+// application that wants to honor it reads req.Model off the decoded request
+// directly, before or after calling FromNewSession.
+func TestFromNewSessionIgnoresModel(t *testing.T) {
+	req := acp.NewSessionRequest{Cwd: "/work", Model: "claude-sonnet-5"}
+	got := acp.FromNewSession(req)
+	want := event.SessionNew{Cwd: "/work"}
+	if got != want {
+		t.Errorf("FromNewSession() = %#v, want %#v", got, want)
+	}
+	if req.Model != "claude-sonnet-5" {
+		t.Errorf("req.Model = %q, want %q (unchanged by projection)", req.Model, "claude-sonnet-5")
+	}
+}
+
 func TestFromLoadSession(t *testing.T) {
 	got := acp.FromLoadSession(acp.LoadSessionRequest{SessionID: "sess-1", Cwd: "/work"})
 	want := event.SessionResume{SessionID: "sess-1"}
