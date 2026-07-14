@@ -61,6 +61,13 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 			status = ToolCallStatusFailed
 		}
 		fields := ToolCallUpdateFields{Status: status}
+		// The pending ToolCall (from tool.call.started) carries only the
+		// start-of-block seed; tool.call.finished carries the authoritative
+		// assembled input. Surface it so a client reconciles a placeholder "{}"
+		// with the real arguments.
+		if len(ev.Input) > 0 {
+			fields.RawInput = ev.Input
+		}
 		if ev.Result != "" {
 			fields.Content = []ToolCallContent{
 				ToolCallContentBlock{Content: TextBlock(ev.Result)},

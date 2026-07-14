@@ -21,6 +21,7 @@ import (
 
 	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
+	"github.com/jedwards1230/agent-sdk-go/spill"
 )
 
 // defaultMaxIters caps the model-call rounds in one Run when Config.MaxIters is
@@ -58,6 +59,11 @@ type ToolResult struct {
 	IsError bool
 	// Diagnostics are optional advisory messages (e.g. LSP findings).
 	Diagnostics []string
+	// FullResult asks the loop to feed the model this Content in full rather
+	// than the bounded spill excerpt (the read tool's escape hatch). Output is
+	// still spilled to disk regardless; only the model-facing/journaled text
+	// changes. Streaming tools (bash) leave it false.
+	FullResult bool
 }
 
 // ToolCall is a resolved tool invocation passed to the BeforeTool/AfterTool
@@ -121,6 +127,25 @@ type Config struct {
 	SessionID string
 	// MaxIters caps model-call rounds; <= 0 uses the default.
 	MaxIters int
+
+	// SpillDir is the absolute directory each tool call's output is streamed to,
+	// one append-only <call-id>.log per call. Empty disables file spilling:
+	// output is still bounded to an in-memory head+tail excerpt (no code path
+	// buffers the full output), but no file is written and tool.call.finished
+	// carries no spill_path.
+	SpillDir string
+	// SpillRelDir is SpillDir expressed relative to the session store root. It is
+	// recorded (as the parent of the .log file) in tool.call.finished's portable
+	// spill_path so the event never leaks an absolute host path.
+	SpillRelDir string
+
+	// Guard decides how each tool call is handled before execution
+	// (run-contained / ask / deny). nil ⇒ every call runs uncontained (no
+	// gating) — existing behavior, unchanged.
+	Guard Guard
+	// Approver awaits a human's reply on a DecisionAsk. Required if Guard can
+	// return DecisionAsk; nil ⇒ an ask fails closed (deny).
+	Approver Approver
 }
 
 // Result is the outcome of a [Run].
@@ -289,39 +314,173 @@ func (r *runner) turnFinished(stop provider.StopReason, usage provider.Usage) ev
 	return event.NewTurnFinished(r.cfg.SessionID, string(stop), usage)
 }
 
-// runTools executes each requested tool call (through the hooks) and returns the
-// tool_result content blocks to append as the next user message.
+// runTools executes each requested tool call (through the hooks), spilling its
+// output to a durable per-call file, and returns the tool_result content blocks
+// (carrying the bounded excerpt) to append as the next user message.
 func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.ContentBlock {
 	blocks := make([]provider.ContentBlock, 0, len(calls))
 	for _, call := range calls {
 		// Honor cancellation between tool calls: emit a cancelled result for each
 		// remaining call rather than invoking it, keeping the message well-formed
-		// (every tool_use gets a matching tool_result).
+		// (every tool_use gets a matching tool_result). A pre-empted call ran no
+		// tool, so there is nothing to spill.
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
-			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, true, nil))
+			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, true, nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
-		call = r.beforeTool(ctx, call)
-
-		var res ToolResult
-		if r.cfg.Tools == nil {
-			res = ToolResult{Content: fmt.Sprintf("no tool registry configured for tool %q", call.Name), IsError: true}
-		} else if tool, ok := r.cfg.Tools.Get(call.Name); !ok {
-			res = ToolResult{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
-		} else if out, err := tool.Run(ctx, call.Input); err != nil {
-			res = ToolResult{Content: err.Error(), IsError: true}
-		} else {
-			res = out
-		}
-
-		res = r.afterTool(ctx, call, res)
-
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
-		blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, res.IsError))
+		blocks = append(blocks, r.runOneTool(ctx, call))
 	}
 	return blocks
+}
+
+// runOneTool runs one resolved tool call through a per-call spill sink and emits
+// tool.call.finished. The tool's output streams into an append-only file (bash
+// writes straight through the sink; other tools return a bounded string the loop
+// writes through it); only a bounded head+tail excerpt + running sha256/byte
+// count is retained in memory. The excerpt is what the model and the event both
+// carry — the full output lives only in the spill file.
+func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.ContentBlock {
+	call = r.beforeTool(ctx, call)
+	if block, proceed := r.gate(ctx, call); !proceed {
+		return block
+	}
+
+	w, err := spill.Create(r.cfg.SpillDir, r.cfg.SpillRelDir, call.ID)
+	if err != nil {
+		// Could not open a spill file: degrade to the tool's own (bounded) result
+		// rather than crashing the loop.
+		r.emitError("spill: "+err.Error(), false)
+		res := r.execTool(ctx, call)
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
+		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
+	}
+
+	res := r.execTool(spill.NewContext(ctx, w), call)
+	// A tool that streamed everything into the sink (bash) returns empty content;
+	// any returned content is a bounded string the loop records through the sink.
+	if res.Content != "" {
+		_, _ = w.Write([]byte(res.Content))
+	}
+	ref, closeErr := w.Close()
+	if closeErr != nil {
+		// The spill file is suspect: emit the tool's own content and drop the
+		// (possibly inconsistent) reference, but never crash the loop.
+		r.emitError("spill: close "+call.ID+": "+closeErr.Error(), false)
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
+		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
+	}
+
+	// The model (and the journal, via the event) sees the bounded excerpt by
+	// default; a FullResult tool (read) hands over its full content instead —
+	// the output is spilled to disk either way. The elision marker in an
+	// excerpt names the spill file, so the model can read the full output.
+	modelContent := ref.Excerpt
+	if res.FullResult {
+		modelContent = res.Content
+	}
+	if ref.Path != "" {
+		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
+	} else {
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics))
+	}
+	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
+}
+
+// execTool resolves and runs call through the registry and the AfterTool hook,
+// mapping every miss to an error result. ctx already carries the per-call spill
+// sink for a streaming tool.
+func (r *runner) execTool(ctx context.Context, call ToolCall) ToolResult {
+	var res ToolResult
+	if r.cfg.Tools == nil {
+		res = ToolResult{Content: fmt.Sprintf("no tool registry configured for tool %q", call.Name), IsError: true}
+	} else if tool, ok := r.cfg.Tools.Get(call.Name); !ok {
+		res = ToolResult{Content: fmt.Sprintf("unknown tool %q", call.Name), IsError: true}
+	} else if out, err := tool.Run(ctx, call.Input); err != nil {
+		res = ToolResult{Content: err.Error(), IsError: true}
+	} else {
+		res = out
+	}
+	return r.afterTool(ctx, call, res)
+}
+
+// --- guard / permission seam ---
+
+// gate consults the guard, emits permission events, and on an "ask" awaits a
+// human reply. Returns (block, false) when the call is blocked (a denied
+// tool_result the caller returns as-is), or (zero, true) to proceed to exec.
+func (r *runner) gate(ctx context.Context, call ToolCall) (provider.ContentBlock, bool) {
+	if r.cfg.Guard == nil {
+		return provider.ContentBlock{}, true
+	}
+	g := r.cfg.Guard.Evaluate(ctx, call)
+	switch g.Decision {
+	case DecisionRunContained:
+		return provider.ContentBlock{}, true
+	case DecisionDeny:
+		// static deny: no human asked ⇒ emit resolved(deny) only, then finished.
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "denied by policy"), false
+	case DecisionAsk:
+		return r.awaitApproval(ctx, call, g)
+	default:
+		// unknown decision ⇒ fail closed.
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "unknown guard decision"), false
+	}
+}
+
+// awaitApproval emits permission.requested and, if an Approver is configured,
+// awaits its reply; both a missing Approver and an Await error fail closed
+// (deny).
+func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (provider.ContentBlock, bool) {
+	spec := g.Spec
+	if spec == nil {
+		spec = decodeInput(call.Input)
+	}
+	r.broker().Publish(event.NewPermissionRequested(r.cfg.SessionID, call.ID, call.Name, spec, g.Trace))
+	if r.cfg.Approver == nil {
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "no approver configured"), false
+	}
+	reply, err := r.cfg.Approver.Await(ctx, call.ID)
+	if err != nil { // ctx cancelled / approver failed ⇒ fail closed
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
+		return r.finishBlocked(call, "permission await: "+err.Error()), false
+	}
+	r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, reply.Verdict, g.Rule))
+	if reply.Verdict == event.VerdictAllow {
+		if reply.Remember {
+			if gr, ok := r.cfg.Guard.(Granter); ok {
+				gr.Grant(call)
+			}
+		}
+		return provider.ContentBlock{}, true
+	}
+	return r.finishBlocked(call, "denied by user"), false
+}
+
+// finishBlocked emits tool.call.finished for a gated-off call and returns the
+// error tool_result block the model sees. (No spill: nothing executed.)
+func (r *runner) finishBlocked(call ToolCall, reason string) provider.ContentBlock {
+	content := "permission denied: " + reason
+	r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, content, true, nil))
+	return provider.ToolResultBlock(call.ID, content, true)
+}
+
+// decodeInput best-effort decodes a tool call's JSON input into a map for the
+// permission events' Spec field. Malformed or empty input yields nil rather
+// than an error — the events are advisory, not authoritative.
+func decodeInput(input json.RawMessage) map[string]any {
+	if len(input) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(input, &m); err != nil {
+		return nil
+	}
+	return m
 }
 
 // --- never-throw hook wrappers ---
@@ -532,15 +691,30 @@ func (c *converter) toolEnd(t *provider.ToolCall, meta map[string]string) {
 }
 
 // assembledInput resolves a tool call's final input: the End event's assembled
-// input if present, else the accumulated deltas, else the Start seed.
+// input when it carries real arguments, else the accumulated deltas, else the
+// Start seed. An End that is empty or a bare "{}" is treated as no-input so the
+// fallback still fires — a provider that reports "{}" at End while the real
+// arguments arrived at Start (as a seed) or via deltas must not have them masked
+// by that empty terminal object.
 func assembledInput(a *toolAssembly, end json.RawMessage) json.RawMessage {
-	if len(end) > 0 {
+	if !blankInput(end) {
 		return end
 	}
 	if a.buf.Len() > 0 {
 		return json.RawMessage(a.buf.String())
 	}
-	return a.seed
+	if len(a.seed) > 0 {
+		return a.seed
+	}
+	return end
+}
+
+// blankInput reports whether a tool-input payload carries no arguments — empty
+// bytes or an empty JSON object ("{}"). Such a value must not mask a real seed
+// or accumulated deltas during assembly.
+func blankInput(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "{}"
 }
 
 // flush closes any open message. Tool calls that saw a Start but no End are

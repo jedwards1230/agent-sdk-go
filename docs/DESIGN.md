@@ -149,6 +149,71 @@ undecided (home TBD at M4). Grants persist with TTL behind an
 anti-escalation cache: a read grant never satisfies a write ask, and dangerous
 specs never widen past exact-match.
 
+**Implementation home (M3, `permission/`).** The engine itself — `permission.Rule`
++ `permission.Engine` (`New`, `Evaluate`, `Grant`) — ships in M3 as a thin,
+format-agnostic slice: deny > ask > allow precedence, an unmatched request is
+`ask` (fail-safe), and `Grant` appends a runtime session-scoped rule. It imports
+only `event` + stdlib. The TTL / anti-escalation / dangerous-downgrade policy and
+every vendor-format loader (`settings.json`, native manifest) are **not** here
+yet — M4/M5, landing in the same `permission/` package per the decided
+permission-format home (2026-07-13).
+
+## Guard / decision seam (M3)
+
+The loop's before-exec gate (`loop/guard.go`, `loop/gate.go`) is the sandbox
+seam named in the [PRD](PRD.md) milestone table: M3's permission story is
+deliberately binary — a tool call is either sandboxable (run contained) or it
+raises an approval request. There is no third "run uncontained" outcome.
+
+- **`Decision`** — `DecisionRunContained` / `DecisionAsk` / `DecisionDeny`. A
+  **`Guard`** (`Evaluate(ctx, ToolCall) Guarding`) returns one plus the
+  `Rule`/`Spec`/`Trace` the permission events carry. `Config.Guard` is nil by
+  default: every call runs uncontained, exactly the pre-M3 behavior — zero new
+  events, zero new goroutines, no golden-file changes on any existing path.
+- **`Approver`** (`Await(ctx, id) (Reply, error)`) is how the loop's own
+  goroutine blocks on a human's reply to a `DecisionAsk`. **`Gate`** is the
+  reference implementation: `Await` selects on a per-id buffered reply channel
+  and `ctx.Done()` — it spawns **no goroutine**, so a cancelled turn cannot leak
+  one. The consuming application routes an inbound `event.PermissionReply` op
+  into `Gate.Reply`, which never blocks (buffered chan) and silently drops a
+  reply with no live waiter (already answered, or the turn was cancelled).
+- **`Container`** (`CanContain(ctx, ToolCall) (bool, error)`) is the sandbox
+  capability check. The SDK defines **only this interface** — concrete backends
+  (Seatbelt on macOS, bwrap+seccomp on Linux) are an application/optional-package
+  concern and must never land in the SDK.
+- **`RuleGuard`** composes a `permission.Engine` with an optional `Container`
+  into the M3 policy: a deny rule → `DecisionDeny`; an ask rule or an unmatched
+  request → `DecisionAsk`; an allow rule → `DecisionRunContained` only if
+  `Container.CanContain` says so, else `DecisionAsk` — an allow verdict never
+  runs a call uncontained (decided 2026-07-13). `RuleGuard` also implements
+  **`Granter`** (`Grant(call)`): a remembered "always allow" reply appends a
+  session-scoped allow rule to the engine via `Engine.Grant`, so an identical
+  future call skips the ask. TTL / anti-escalation live with the engine (M4/M5),
+  not here.
+- **Emit → await → reply flow** (`runner.gate` in `loop/loop.go`, called from
+  `runOneTool` right after `beforeTool` and before the tool executes or spills
+  any output):
+  - `DecisionRunContained` — the call proceeds; no permission events at all.
+  - `DecisionDeny` — a **static** policy block: the loop publishes
+    `permission.resolved{deny}` **without** a preceding `permission.requested`
+    (no human was asked, so nothing was requested), then a blocked
+    `tool.call.finished{is_error}` so the tool_use/tool_result pairing the
+    provider sees stays well-formed.
+  - `DecisionAsk` — the loop publishes `permission.requested`, then (if
+    `Config.Approver` is set) blocks on `Approver.Await(ctx, call.ID)` for the
+    matching `permission.reply`, then publishes `permission.resolved{verdict}`.
+    An allow reply lets the call proceed (and grants a remember, if asked); a
+    deny reply blocks it the same way a static deny does.
+- **Fail-closed everywhere permission is uncertain**: a nil `Config.Approver`
+  under `DecisionAsk` denies immediately after emitting the request (nothing
+  can await a reply); an `Approver.Await` error (including a cancelled ctx)
+  denies; a `Container.CanContain` error on an otherwise-allowed call escalates
+  to `DecisionAsk` rather than either running uncontained or silently blocking.
+  An unrecognized `Decision` value also denies.
+- Every gated-off call (deny or ask-then-deny) still emits `tool.call.finished`
+  — nothing executed, so there is no spill — keeping the loop's tool-round
+  invariant (one `tool_result` per `tool_use`) intact for every outcome.
+
 ## Agent manifest (compose/)
 
 ```yaml
@@ -181,25 +246,143 @@ hooks:
   pre_tool_use: [./hooks/audit]        # subprocess: JSON in/out, allow|deny|rewrite
 ```
 
+## Headless exec adapter (M3)
+
+The `exec/` package is the SDK half of an application's `exec` verb: a one-shot,
+transport- and app-agnostic adapter that drives a drivable session with a single
+prompt to completion. `exec.Run(ctx, sess, prompt, opts)` takes any session
+satisfying the minimal `exec.Session` seam (`ID`/`Events`/`Prompt` — both
+`*session.Session` and `*runner.Runner` qualify), subscribes before prompting,
+and streams every emitted event as JSONL (one compact object per line, in seq
+order) to an `io.Writer` (`os.Stdout` by default), draining on a separate
+goroutine so a full must-deliver buffer never deadlocks the publisher. It stops
+at the terminal `turn.finished` and returns a `Result` (session id, final text,
+stop reason, event count). This is a pure projection of the standard event
+contract — no new event kind.
+
+`Options.OutputSchema` optionally validates the run's final text result against
+a **documented subset of JSON Schema draft 2020-12** (`exec/schema.go`, stdlib
+only: `type`, `properties`/`required`, `additionalProperties`, `items`, `enum`,
+`minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`). A mismatch
+is reported out-of-band through the Go return value as a `*SchemaError` (with the
+`Result` still populated), **never** as a new event kind.
+
 ## LSP (M3)
 
-- **Manager**: embedded server registry (~370 servers, nvim-lspconfig-shaped
-  dataset) with lazy per-file-event startup — filetype + root-marker + PATH
-  gating, a generic-command blocklist, and failed-lookup retry damping.
-- **Diagnostics injected into tool results** (edit/write/view): current-file
-  vs project split, errors first, truncated at 10, after a two-phase settle
-  debounce (bail-fast 1s, then a 300ms version-stability window).
-- Tools: `lsp_diagnostics` · `lsp_references` (grep→LSP hybrid) ·
-  `lsp_restart`. One generic prompt line, not per-tool coaching.
+`lsp/` is a stdlib-only leaf shipping the registry + diagnostics seam;
+everything below "Future" is a later consuming layer built on top of it, not
+part of this package.
 
-## Bulk-payload spill (design lands M3)
+- **Registry** (`lsp.Registry`): a small, hand-curated language → launch-command
+  table (gopls, typescript-language-server, pyright, rust-analyzer, clangd —
+  not the ~370-server nvim-lspconfig dataset), resolved against PATH.
+  `Resolve` distinguishes "no server registered for this language"
+  (`ErrNotRegistered`) from "registered but not installed" (`ErrNotOnPath`)
+  via `errors.Is`.
+- **Client** (`lsp.Client`): a hand-rolled JSON-RPC-over-stdio client
+  (Content-Length framing + JSON-RPC 2.0) — the LSP base protocol is a few
+  dozen lines, so hand-rolling it keeps the package dependency-free rather
+  than pulling in a jsonrpc library for a trivial amount of code. One
+  background goroutine reads framed messages, routing responses to pending
+  calls and `textDocument/publishDiagnostics` notifications to the
+  diagnostics seam. That goroutine is the SDK's one otherwise-silent spot, so
+  `NewClient`/`Start` accept an optional `lsp.WithLogger(*slog.Logger)` (nil ⇒
+  discard) surfacing its three invisible paths (see "Instrumentation seams").
+  `Start` spawns a real server via `os/exec`; that path
+  isn't exercised in CI (no LSP servers installed there) — tests script a
+  fake server over an in-memory `io.Pipe` Transport instead.
+- **Diagnostics seam** (`lsp.Publisher`): the client hands every
+  `publishDiagnostics` notification to a `Publisher` as a normalized `Batch`.
+  The SDK defines ONLY this interface — deciding how (or whether) diagnostics
+  reach a model or UI is the consuming application's job, exactly like the
+  loop package's `Container` seam. `lsp` never imports `event/`;
+  `Batch.Strings()` renders each diagnostic as a one-line string so a
+  consumer can assign the result straight onto
+  `event.ToolCallFinished.Diagnostics` / `loop.ToolResult.Diagnostics` (both
+  already exist) without `lsp` taking a reverse dependency on either.
+
+**Future (not shipped by `lsp/`)**: an embedded ~370-server registry
+(nvim-lspconfig-shaped dataset) with lazy per-file-event startup, diagnostics
+injected into tool results (current-file vs project split, errors first,
+settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
+tools built on top of the `Registry` + `Publisher` seam above.
+
+## Bulk-payload spill (M3)
 
 Tool output is bulk ground truth, not event payload. Every tool execution
-streams its raw output append-only to a per-call file under the session dir;
-`tool.call.finished` carries `{path, bytes, sha256, head/tail excerpt}` instead
-of an unbounded payload. This bounds broker memory, makes every level of a
-session tree greppable on disk, and surfaces errors from the source. Events stay
-typed structure; the files are the bulk ground truth the events point into.
+streams its raw output **append-only** to a per-call file under the session dir,
+and `tool.call.finished` carries a reference plus a bounded excerpt instead of an
+unbounded payload. This bounds memory, makes every level of a session tree
+greppable on disk, and surfaces errors from the source. Events stay typed
+structure; the files are the bulk ground truth the events point into.
+
+**Streaming, never buffered.** The `spill.Writer` (`spill/`, stdlib-only leaf) is
+an `io.Writer`: bash points its process stdout/stderr straight at one, so no code
+path holds the full output in memory. As bytes stream through, the writer appends
+them to the file (buffered, flushed+fsynced on close), folds them into a running
+sha256 and byte count, and retains only a bounded head (2 KiB) + tail-ring
+(2 KiB) for the excerpt. A tool that returns a small bounded string (read, grep,
+…) has the loop write that string through the same writer post-hoc. The loop
+hands the per-call writer to a tool via `context` (`spill.NewContext` /
+`FromContext`). Because the writer is append-only and closed even on a
+tool/process error, whatever streamed before a mid-run kill is already durable
+and the reference is consistent with the bytes on disk.
+
+**On-disk layout.** A session gains a directory sibling to its journal file:
+`<root>/sessions/<slug>/<id>/calls/<call-id>.log` (the `<id>` dir coexists with
+the `<id>.jsonl` journal and is invisible to the store's `<id>.jsonl` globs).
+Created lazily, mode `0o700`.
+
+**Model-facing rule.** Durability is universal — *every* tool call spills to
+disk. What the model sees is the bounded excerpt **by default**, with one escape
+hatch: a tool may set `FullResult` on its `Result` to hand the model the full
+content instead (still spilled). The **read** tool sets it, so an explicit file
+read is never truncated to head+tail — its output is bounded by the operation the
+model asked for, which is not the memory-safety concern (that is only unbounded
+streaming tools like bash, which must never set `FullResult`). Whichever text the
+model sees is the text the runner journals, so every model call is reconstructable
+from the journal in-run and on resume.
+
+**Excerpt names the file.** When an excerpt elides, its marker names the spill
+file — `… [N bytes elided — full output at <abs-path>] …` — so the model knows
+the full output is on disk and can read it back. The marker names the **absolute**
+path so the read tool resolves it from **any** working directory: read resolves a
+relative path against its cwd, which need not match the store root, so a
+root-relative path in the marker would silently miss. The structured `spill_path`
+event field stays store-root-relative (for portability); only the model-facing
+marker is absolute — the divergence is intentional. A file-less writer keeps the
+pathless `… [N bytes elided] …`.
+
+**Event shape** (`event.ToolCallFinished`). `result` carries whatever the model
+sees (bounded excerpt by default; full content for a `FullResult` tool). The
+`spill_path` / `spill_bytes` / `spill_sha256` fields reference the full file.
+`spill_path` is **relative to the store root** (e.g.
+`sessions/<slug>/<id>/calls/<call-id>.log`), never an absolute host path, so the
+serialized event stays portable.
+
+`input` carries the **complete, assembled** tool input the call ran with — the
+authoritative payload a client reconciles against. It is deliberately distinct
+from `tool.call.started`'s `input`, which is only the start-of-block **seed**: a
+provider that streams a tool call's arguments as `tool.call.delta` fragments (the
+Anthropic `input_json_delta` shape) announces `started` with an empty `{}` and
+does not settle the real arguments until the stream ends. `tool.call.finished` is
+the must-deliver terminal that carries them, so a consumer that needs the real
+arguments — to journal the assistant's `tool_use` block, or to surface them in a
+UI — reads `finished.input`, not `started.input`. The loop's assembly is
+resilient to *how* a provider delivers the input: arguments that arrive only at
+`content_block_start` (an inline seed with no deltas) fold into the same
+accumulator streamed deltas write to, and an empty `{}` at the block's end never
+masks a real seed or accumulated deltas.
+
+**Root vs Cwd (why the marker is absolute).** The session store root
+(`runner.Options.Root`, the embedder's app dir) and the tool working dir
+(`runner.Options.Cwd`, the project dir) are commonly different, and the read tool
+resolves a relative path against Cwd. So the elision marker names the **absolute**
+spill path: a model that reads exactly the path the marker gives it gets the full
+output back regardless of where Cwd sits. The structured `spill_path` field stays
+root-relative and is not what the model reads — the two intentionally differ. This
+keeps the read tool decoupled from the session store (it just resolves an absolute
+path via its normal path resolution).
 
 ## Session tree & spawn seam (design-ahead, M4)
 
@@ -256,29 +439,87 @@ internal design notes; this table is the settled, repo-facing summary.
 - **Observability**: no phone-home, ever. Local structured logs; optional
   OTLP export, off by default.
 
-## Observability seams (SDK stays dependency-light)
+## Instrumentation seams (SDK stays dependency-light)
 
 The SDK takes **no OpenTelemetry dependency** and emits no telemetry on its own
 initiative — instrumentation lives in the embedding app (the application owns
-the otel dep + exporters). What the SDK owes an embedder is *seams*, not an
+the otel dep + exporters). `go list -deps ./...` names no `otel` package; a new
+import of one is a bug. What the SDK owes an embedder is *seams*, not an
 implementation:
 
-- **Context propagation is already end-to-end.** Every call path — loop,
-  provider, `session`, `runner`, tools — threads `context.Context` through
-  unbroken (`runner.New`/`Resume`/`Prompt(ctx, …)`, `loop.Run(ctx, …)` down
-  through each `callModel`/`runTools` call). An app can therefore open a span on
-  a
-  turn and have it flow through the provider call and every tool execution
-  without the SDK knowing tracing exists. This is an invariant, not an
-  aspiration: a new code path that drops `ctx` is a bug.
+- **Context propagation is end-to-end.** Every call path — loop, provider,
+  `session`, `runner`, tools, guard, approver — threads `context.Context`
+  through unbroken (`runner.New`/`Resume`/`Prompt(ctx, …)` →
+  `loop.Run(ctx, …)` → `callModel`/`runTools` → the provider `Stream(ctx, …)`,
+  `Guard.Evaluate(ctx, …)`, `Approver.Await(ctx, …)`, and each tool's
+  `Run(ctx, …)`). An app can open a span on a turn and have it flow through the
+  provider call and every tool execution without the SDK knowing tracing
+  exists. This is an invariant, not an aspiration: a new code path that drops
+  `ctx` is a bug. It is proven by `runner/ctxprop_test.go`, which plants a value
+  in the ctx handed to `Prompt` and asserts it is observed at all four seams
+  (provider, guard, approver, tool).
 - **Optional `*slog.Logger` injection where the SDK is otherwise silent.** The
   SDK is silent by default; where SDK-internal diagnostics earn their keep, the
   seam is an optional `*slog.Logger` the embedder passes in (nil ⇒ discard, as
   the daemon already does for its own logger). The SDK never logs unprompted and
-  never phones home.
-- **The Event/Op stream is the instrumentation source.** The typed two-tier
-  stream in `event/` is the natural span/metric source: `*.started`/`*.finished`
-  events map to span open/close, `message`/`tool.call` deltas to span events,
-  and settled usage/cost to metrics — all in the app, without SDK involvement.
-  An embedding application wraps the stream with OTel spans exactly this way; a
-  second embedder would instrument the same seam the same way.
+  never phones home. Two such seams exist today: `session.WithLogger` (torn-write
+  warnings) and `lsp.WithLogger` (the LSP read loop's three otherwise-invisible
+  paths — a malformed frame or publishDiagnostics notification dropped, and the
+  read loop exiting on a transport death no in-flight call observed; a deliberate
+  `Close` logs at debug so intentional shutdown is not noise). The loop needs
+  none — every error and degraded path it hits is already surfaced on the stream
+  as a `session.error` event (stream failures, spill open/close failures, the
+  iteration-cap stop), not swallowed; likewise broker drops are exposed as
+  counters. Add a logger option only when a genuine diagnostic would otherwise
+  vanish with no event and no counter — not as blanket instrumentation.
+
+### The Event/Op stream is the span/metric source
+
+The typed two-tier stream in `event/` is the natural span/metric source, and an
+embedder maps it to spans **entirely in the app** — the SDK never sees a span.
+The mapping and the ordering that makes open/close pairing safe:
+
+| Span | Opened by | Closed by | Correlation key |
+|---|---|---|---|
+| run / prompt | app, around its own `Prompt(ctx)` call | the terminal `turn.finished` (stop ≠ `tool_use`, or a `max_turns` terminal) | app-owned — no event needed |
+| turn = model/provider call | `turn.started` | `turn.finished` | "currently-open turn" (turns never overlap) |
+| tool | `tool.call.started{id}` | `tool.call.finished{id}` | `id` |
+| permission | `permission.requested{id}` | `permission.resolved{id}` | `id` (same as the tool call) |
+
+- **A "turn" brackets exactly one model call.** Per loop iteration the emit
+  order is `turn.started` → `message.*` / `tool.call.started` (during the
+  provider stream) → **`turn.finished`** → (if tools were requested)
+  `permission.*` → `tool.call.finished`. So `turn.started`/`turn.finished`
+  bracket the provider stream and *nothing else* — the turn span **is** the
+  provider-call span (there is no separate provider event to open a distinct
+  child from). Tool execution runs **after** `turn.finished`, between turns.
+- **Tool spans are siblings under the run span, not children of the turn span.**
+  Because `tool.call.finished` (and the `permission.*` pair) publish *after* the
+  enclosing `turn.finished`, a tool span cannot nest inside the turn span — it
+  would outlive it. Nest tool spans under the app-owned run span, keyed by call
+  `id`; the run span alternates turn(model-call) spans and tool spans. (Naively
+  nesting a tool under "the currently-open turn" is the trap this ordering
+  guards against.)
+- **Pairing is safe without new wire fields.** Tool and permission spans pair on
+  the call `id` they already carry. Turn spans pair by position: the loop makes
+  one model call at a time (turns never overlap) and every lifecycle/terminal
+  event is must-deliver and per-session `seq`-ordered, so "open the turn on
+  `turn.started`, close it on the next `turn.finished`" is unambiguous. The one
+  edge case is the iteration-cap terminal — a `turn.finished{max_turns}` with
+  **no** matching `turn.started` (documented on `event.TurnFinished`); a pairing
+  consumer must tolerate that unmatched terminal. No `turn_id` on tool events is
+  needed: tools nest under the run span by `id`, not under a turn. (This was
+  evaluated against the "does a span-source event lack a correlation field?"
+  bar and found sufficient — no wire field was added.)
+- **Metrics** come from the same stream: `turn.finished{usage, cost}` →
+  token/cost counters, `turn.*`/`tool.call.*`/`session.*` counts →
+  turn/tool/session/error metrics.
+- **Redaction is the app's job at the mapping boundary.** The stream carries raw
+  payloads an app must **not** copy into span attributes: `tool.call.started`
+  and `tool.call.finished` both carry `input` (tool params — the seed on
+  `started`, the authoritative assembled input on `finished`) and `message.*`
+  carry model text. Instrument with ids, names, counts, durations, costs,
+  verdicts — never prompt text, tool params, or tool results.
+
+A second embedder instruments the same seam the same way — the mapping above is
+the contract, not one app's convention.

@@ -169,6 +169,10 @@ func NewFileStore(opts ...StoreOption) (*FileStore, error) {
 	}, nil
 }
 
+// Root returns the store's root directory. It is the base the portable,
+// root-relative spill paths on tool.call.finished are resolved against.
+func (s *FileStore) Root() string { return s.root }
+
 // Slugify turns an arbitrary string (typically an absolute project cwd) into
 // a safe, filesystem-friendly project slug: lowercased, runs of
 // non-alphanumeric characters collapsed to a single '-', and leading/

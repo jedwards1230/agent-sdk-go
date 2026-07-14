@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,14 @@ func (j *Journal) ProjectSlug() string { return j.projectSlug }
 
 // Path returns the journal's JSONL file path.
 func (j *Journal) Path() string { return j.path }
+
+// Dir returns the session's on-disk directory — a sibling of the journal file,
+// named <id> alongside the <id>.jsonl journal (e.g.
+// <root>/sessions/<slug>/<id>) — for per-session artifacts such as tool-output
+// spill files. The directory coexists with the journal file and is invisible to
+// the store's <id>.jsonl globs. Dir does not create the directory; a consumer
+// makes it lazily when it first writes.
+func (j *Journal) Dir() string { return strings.TrimSuffix(j.path, ".jsonl") }
 
 // Head returns the id of the current HEAD entry (the last entry in append
 // order), or "" if the journal is empty.

@@ -225,6 +225,50 @@ func TestStreamToolCallInterleaved(t *testing.T) {
 	}
 }
 
+// TestStreamToolCallInlineInput covers the delivery mode the interleaved test
+// does not: a tool call whose entire input arrives inline on
+// content_block_start, with NO input_json_delta frames following. The assembled
+// input (StreamToolCallEnd) must carry the real arguments, not "{}" — the seed
+// must fold into the accumulator so onBlockStop assembles it.
+func TestStreamToolCallInlineInput(t *testing.T) {
+	body := sse(
+		frame("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":20}}}`),
+		frame("content_block_start", `{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_7","name":"bash","input":{"cmd":"ls -la"}}}`),
+		frame("content_block_stop", `{"type":"content_block_stop","index":0}`),
+		frame("message_delta", `{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":15}}`),
+		frame("message_stop", `{"type":"message_stop"}`),
+	)
+	p := testProvider(t, provider.CredAPIKey, sseHandler(body))
+	h, _ := p.Stream(context.Background(), provider.Request{})
+	defer func() { _ = h.Close() }()
+
+	got := drain(t, h)
+
+	var start, end *provider.StreamEvent
+	for i := range got {
+		switch got[i].Type {
+		case provider.StreamToolCallStart:
+			start = &got[i]
+		case provider.StreamToolCallEnd:
+			end = &got[i]
+		case provider.StreamToolCallDelta:
+			t.Errorf("unexpected tool delta for inline-input call: %s", got[i].Tool.Delta)
+		}
+	}
+	if start == nil || start.Tool.ID != "toolu_7" || start.Tool.Name != "bash" {
+		t.Fatalf("tool start = %+v", start)
+	}
+	if string(start.Tool.Input) != `{"cmd":"ls -la"}` {
+		t.Errorf("start input = %s, want inline arguments", start.Tool.Input)
+	}
+	if end == nil {
+		t.Fatal("no tool end event")
+	}
+	if string(end.Tool.Input) != `{"cmd":"ls -la"}` {
+		t.Errorf("assembled input = %s, want inline arguments (not {})", end.Tool.Input)
+	}
+}
+
 func TestStreamCacheTokens(t *testing.T) {
 	body := sse(
 		frame("message_start", `{"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":80,"cache_creation_input_tokens":20,"output_tokens":1}}}`),

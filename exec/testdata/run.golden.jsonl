@@ -1,0 +1,12 @@
+{"type":"session.created","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":1,"time":"2025-01-01T00:00:00Z"}
+{"type":"turn.started","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":2,"time":"2025-01-01T00:00:00Z"}
+{"type":"message.started","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":3,"time":"2025-01-01T00:00:00Z","kind":"reasoning"}
+{"type":"message.delta","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":4,"time":"2025-01-01T00:00:00Z","kind":"reasoning","text":"The user said hello. "}
+{"type":"message.delta","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":5,"time":"2025-01-01T00:00:00Z","kind":"reasoning","text":"I'll greet them back."}
+{"type":"message.finished","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":6,"time":"2025-01-01T00:00:00Z","kind":"reasoning","content":"The user said hello. I'll greet them back."}
+{"type":"message.started","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":7,"time":"2025-01-01T00:00:00Z","kind":"text"}
+{"type":"message.delta","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":8,"time":"2025-01-01T00:00:00Z","kind":"text","text":"Hello"}
+{"type":"message.delta","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":9,"time":"2025-01-01T00:00:00Z","kind":"text","text":"! How can "}
+{"type":"message.delta","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":10,"time":"2025-01-01T00:00:00Z","kind":"text","text":"I help you today?"}
+{"type":"message.finished","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":11,"time":"2025-01-01T00:00:00Z","kind":"text","content":"Hello! How can I help you today?"}
+{"type":"turn.finished","session_id":"0192a1b2-c3d4-7e5f-8a90-000000000001","seq":12,"time":"2025-01-01T00:00:00Z","stop_reason":"end_turn","usage":{"input_tokens":9,"output_tokens":7}}

@@ -120,7 +120,8 @@ func (t *Read) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	}
 
 	return Result{
-		Content:  b.String(),
-		Metadata: Metadata{Extra: map[string]any{"lines": total}},
+		Content:    b.String(),
+		FullResult: true, // an explicit read is never capped to the spill excerpt
+		Metadata:   Metadata{Extra: map[string]any{"lines": total}},
 	}, nil
 }
