@@ -246,6 +246,27 @@ hooks:
   pre_tool_use: [./hooks/audit]        # subprocess: JSON in/out, allow|deny|rewrite
 ```
 
+## Headless exec adapter (M3)
+
+The `exec/` package is the SDK half of an application's `exec` verb: a one-shot,
+transport- and app-agnostic adapter that drives a drivable session with a single
+prompt to completion. `exec.Run(ctx, sess, prompt, opts)` takes any session
+satisfying the minimal `exec.Session` seam (`ID`/`Events`/`Prompt` — both
+`*session.Session` and `*runner.Runner` qualify), subscribes before prompting,
+and streams every emitted event as JSONL (one compact object per line, in seq
+order) to an `io.Writer` (`os.Stdout` by default), draining on a separate
+goroutine so a full must-deliver buffer never deadlocks the publisher. It stops
+at the terminal `turn.finished` and returns a `Result` (session id, final text,
+stop reason, event count). This is a pure projection of the standard event
+contract — no new event kind.
+
+`Options.OutputSchema` optionally validates the run's final text result against
+a **documented subset of JSON Schema draft 2020-12** (`exec/schema.go`, stdlib
+only: `type`, `properties`/`required`, `additionalProperties`, `items`, `enum`,
+`minimum`/`maximum`, `minLength`/`maxLength`, `minItems`/`maxItems`). A mismatch
+is reported out-of-band through the Go return value as a `*SchemaError` (with the
+`Result` still populated), **never** as a new event kind.
+
 ## LSP (M3)
 
 - **Manager**: embedded server registry (~370 servers, nvim-lspconfig-shaped
