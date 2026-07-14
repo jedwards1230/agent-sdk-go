@@ -125,12 +125,12 @@ func TestLargeOutputStreamsFullyAndExcerptsHeadTail(t *testing.T) {
 	if !strings.HasSuffix(ref.Excerpt, string(content[n-(2<<10):])) {
 		t.Error("excerpt does not end with the tail of the content")
 	}
-	// A file-backed writer's marker names the spill path so the model can read
-	// the full output back.
+	// A file-backed writer's marker names the ABSOLUTE spill path so the model
+	// can read the full output back from any working directory.
 	omitted := n - (2 << 10) - (2 << 10)
-	wantMarker := fmt.Sprintf("[%d bytes elided — full output at sessions/p/s/calls/big.log]", omitted)
+	wantMarker := fmt.Sprintf("[%d bytes elided — full output at %s]", omitted, filepath.Join(dir, "big.log"))
 	if !strings.Contains(ref.Excerpt, wantMarker) {
-		t.Errorf("excerpt missing path-naming elision marker %q: %.80q…", wantMarker, ref.Excerpt)
+		t.Errorf("excerpt missing absolute path-naming elision marker %q: %.80q…", wantMarker, ref.Excerpt)
 	}
 }
 

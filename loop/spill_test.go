@@ -81,6 +81,46 @@ func TestToolCallFinishedSpillGolden(t *testing.T) {
 	}
 }
 
+// TestToolCallFinishedElidedGolden locks the shape of an ELIDED tool.call.finished:
+// the bounded head+tail excerpt with the path-naming marker in `result`, plus the
+// root-relative `spill_path`/`spill_bytes`/`spill_sha256`. The marker names an
+// absolute path under a temp SpillDir, so the volatile store-root prefix is
+// normalized to a stable <SPILL_ROOT> placeholder before comparison (standard
+// golden hygiene); the relative spill_path field is left untouched.
+func TestToolCallFinishedElidedGolden(t *testing.T) {
+	b := event.NewBroker(event.WithClock(spillClock))
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	// 4200 bytes > the 4 KiB excerpt window, so the excerpt elides. Distinct
+	// head/tail bytes make the golden legible.
+	out := strings.Repeat("A", 2100) + strings.Repeat("Z", 2100)
+	cfg := baseConfig(b, scripted(
+		toolTurn("t1", "echo", `{"msg":"hi"}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = &fakeTool{name: "echo", result: loop.ToolResult{Content: out}}
+	spillDir := t.TempDir()
+	cfg.SpillDir = spillDir
+	cfg.SpillRelDir = "sessions/proj/sess-1/calls"
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	finished := drainFinished(sub)
+	if len(finished) != 1 {
+		t.Fatalf("want 1 tool.call.finished, got %d", len(finished))
+	}
+	line, err := json.Marshal(finished[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Normalize the volatile absolute store-root prefix in the marker; the
+	// root-relative spill_path field carries no temp path and is left as-is.
+	line = []byte(strings.ReplaceAll(string(line), spillDir, "<SPILL_ROOT>"))
+	goldenio.Assert(t, filepath.Join("testdata", "toolcall_spill_elided.golden.jsonl"), append(line, '\n'))
+}
+
 // TestBashStreamsMultiMegabyteWithoutBuffering runs the REAL bash tool through
 // the loop with a multi-megabyte output and proves: the spill file receives the
 // full untruncated output, the event ref (bytes/sha) matches the file, the
@@ -134,12 +174,14 @@ func TestBashStreamsMultiMegabyteWithoutBuffering(t *testing.T) {
 	}
 
 	// The event excerpt is a small bounded preview whose elision marker names the
-	// spill_path, so the model can read the full output back.
+	// ABSOLUTE spill path, so the model can read the full output back from any cwd.
+	// (The structured spill_path field stays root-relative; only the marker is absolute.)
 	if len(ev.Result) > 8<<10 {
 		t.Errorf("excerpt len = %d, want a small bounded preview", len(ev.Result))
 	}
-	if !strings.Contains(ev.Result, "bytes elided — full output at "+ev.SpillPath) {
-		t.Errorf("excerpt marker should name the spill_path %q: %.120q…", ev.SpillPath, ev.Result)
+	wantAbs := filepath.Join(callsDir, "bash-1.log")
+	if !strings.Contains(ev.Result, "bytes elided — full output at "+wantAbs) {
+		t.Errorf("excerpt marker should name the absolute spill path %q: %.140q…", wantAbs, ev.Result)
 	}
 
 	// The model-facing tool_result carries the SAME bounded excerpt, not the 3 MB
@@ -217,57 +259,6 @@ func TestReadReturnsFullContentUncapped(t *testing.T) {
 	if string(onDisk) != full {
 		t.Errorf("spill file content != full read result")
 	}
-}
-
-// TestReadingSpillFileReturnsCompleteOutput proves the escape hatch closes the
-// loop: after a capped tool (bash) spills its full output, reading that spill
-// file back returns the COMPLETE original output. It uses an ABSOLUTE path to
-// the spill file — see the Root-vs-Cwd caveat in the PR/DESIGN.md: the event's
-// spill_path is store-root-relative while read resolves relative paths against
-// the tool cwd, so a bare read(<spill_path>) only resolves when Root and Cwd
-// share a base; an absolute path always works.
-func TestReadingSpillFileReturnsCompleteOutput(t *testing.T) {
-	b := event.NewBroker()
-	defer b.Close()
-	sub := b.Subscribe(event.FilterMustDeliver, 256)
-
-	callsDir := t.TempDir()
-	cfg := baseConfig(b, scripted(
-		toolTurn("bash-1", "bash", `{"command":"head -c 3000000 /dev/zero | tr '\\0' 'a'"}`),
-		textTurn("done", provider.StopEndTurn),
-	))
-	cfg.Tools = loop.FromRegistry(tool.NewRegistry(tool.NewBash(t.TempDir())))
-	cfg.SpillDir = callsDir
-	cfg.SpillRelDir = "sessions/p/s/calls"
-	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	ev := drainFinished(sub)
-	if len(ev) != 1 || ev[0].SpillBytes != 3_000_000 {
-		t.Fatalf("unexpected spill event: %+v", ev)
-	}
-
-	// Read the spill file back via the read tool, by absolute path.
-	absSpill := filepath.Join(callsDir, "bash-1.log")
-	readRes, err := tool.NewRead(t.TempDir()).Run(context.Background(), json.RawMessage(`{"path":`+jsonString(absSpill)+`}`))
-	if err != nil {
-		t.Fatalf("read spill: %v", err)
-	}
-	if readRes.IsError {
-		t.Fatalf("read of spill file errored: %q", readRes.Content)
-	}
-	if !readRes.FullResult {
-		t.Errorf("read should return full (uncapped) content")
-	}
-	if got := strings.Count(readRes.Content, "a"); got != 3_000_000 {
-		t.Errorf("read returned %d 'a' bytes, want the complete 3000000", got)
-	}
-}
-
-// jsonString quotes s as a JSON string literal.
-func jsonString(s string) string {
-	buf, _ := json.Marshal(s)
-	return string(buf)
 }
 
 // TestBashNonZeroExitFooterInSpill confirms bash's exit-status footer is streamed

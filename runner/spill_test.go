@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -128,5 +129,117 @@ func TestRunner_SpillsBashOutputToSessionDir(t *testing.T) {
 
 	if err := r.Close(); err != nil {
 		t.Errorf("Close: %v", err)
+	}
+}
+
+// pathFromMarker extracts the spill path an elision marker names, from the
+// "… full output at <path>] …" text — i.e. exactly the string the model would
+// read out of the excerpt.
+func pathFromMarker(t *testing.T, excerpt string) string {
+	t.Helper()
+	const lead = "full output at "
+	i := strings.Index(excerpt, lead)
+	if i < 0 {
+		t.Fatalf("no elision marker in excerpt: %.140q", excerpt)
+	}
+	rest := excerpt[i+len(lead):]
+	j := strings.Index(rest, "]")
+	if j < 0 {
+		t.Fatalf("malformed elision marker: %.140q", rest)
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
+// TestRunner_SpillMarkerPathResolvesWhenCwdDiffersFromRoot is the real gofer
+// scenario: the session store Root and the tool Cwd are DIFFERENT directories.
+// A capped tool's excerpt marker must name a path the read tool can resolve from
+// the tool cwd — which only works because the marker names the ABSOLUTE spill
+// path (a root-relative path would resolve against Cwd and miss). It reads the
+// path straight out of the marker text (what the model would do) and asserts the
+// complete original output comes back.
+func TestRunner_SpillMarkerPathResolvesWhenCwdDiffersFromRoot(t *testing.T) {
+	root := t.TempDir() // session store lives here (e.g. ~/.gofer)
+	cwd := t.TempDir()  // tools operate here (the project dir) — deliberately different
+	if root == cwd {
+		t.Fatal("root and cwd must differ for this test")
+	}
+
+	// 5000 bytes of 'a' — over the 4 KiB excerpt window, so the result elides and
+	// carries a path-naming marker.
+	cmd, err := json.Marshal(map[string]string{"command": `head -c 5000 /dev/zero | tr '\0' 'a'`})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	prov := &scriptedProvider{events: [][]provider.StreamEvent{
+		{
+			{Type: provider.StreamToolCallStart, Tool: &provider.ToolCall{ID: "call-1", Name: "bash"}},
+			{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: "call-1", Name: "bash", Input: cmd}},
+			{Type: provider.StreamFinished, StopReason: provider.StopToolUse, Usage: provider.Usage{InputTokens: 4, OutputTokens: 1}},
+		},
+		{
+			{Type: provider.StreamTextDelta, Text: "done"},
+			{Type: provider.StreamFinished, StopReason: provider.StopEndTurn, Usage: provider.Usage{InputTokens: 3, OutputTokens: 1}},
+		},
+	}}
+
+	r, err := runner.New(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: testModel,
+		Provider: prov,
+		Tools:    loop.FromRegistry(tool.NewRegistry(tool.NewBash(cwd))),
+		IDGen:    seqIDGen(), Clock: seqClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	sub := r.Events()
+	if err := r.Prompt(context.Background(), "make output"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+
+	var ev event.ToolCallFinished
+	for {
+		e, ok := <-sub.C
+		if !ok {
+			t.Fatal("stream closed before tool.call.finished")
+		}
+		if tf, is := e.(event.ToolCallFinished); is {
+			ev = tf
+			break
+		}
+	}
+
+	// The marker names an ABSOLUTE path, under Root (the store), not under Cwd.
+	markerPath := pathFromMarker(t, ev.Result)
+	if !filepath.IsAbs(markerPath) {
+		t.Fatalf("marker path %q is not absolute; read from a different cwd could not resolve it", markerPath)
+	}
+	if !strings.HasPrefix(markerPath, root) {
+		t.Errorf("marker path %q is not under the store root %q", markerPath, root)
+	}
+	// The structured event field, by contrast, stays root-relative.
+	if filepath.IsAbs(ev.SpillPath) || !strings.HasPrefix(ev.SpillPath, "sessions/") {
+		t.Errorf("event spill_path should stay root-relative, got %q", ev.SpillPath)
+	}
+
+	// The model reads exactly the marker's path, through a read tool rooted at
+	// Cwd (≠ Root), and gets the COMPLETE original output back.
+	readInput, err := json.Marshal(map[string]string{"path": markerPath})
+	if err != nil {
+		t.Fatalf("marshal read input: %v", err)
+	}
+	readRes, err := tool.NewRead(cwd).Run(context.Background(), readInput)
+	if err != nil {
+		t.Fatalf("read spill via marker path: %v", err)
+	}
+	if readRes.IsError {
+		t.Fatalf("read of marker path errored (cwd≠root not resolved): %q", readRes.Content)
+	}
+	if !readRes.FullResult {
+		t.Errorf("read should return full uncapped content")
+	}
+	if got := strings.Count(readRes.Content, "a"); got != 5000 {
+		t.Errorf("read via marker path returned %d 'a' bytes, want the complete 5000", got)
 	}
 }

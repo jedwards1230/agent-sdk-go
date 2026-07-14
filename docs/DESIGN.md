@@ -229,8 +229,13 @@ model sees is the text the runner journals, so every model call is reconstructab
 from the journal in-run and on resume.
 
 **Excerpt names the file.** When an excerpt elides, its marker names the spill
-file — `… [N bytes elided — full output at <spill_path>] …` — so the model knows
-the full output is on disk and can read it back. A file-less writer keeps the
+file — `… [N bytes elided — full output at <abs-path>] …` — so the model knows
+the full output is on disk and can read it back. The marker names the **absolute**
+path so the read tool resolves it from **any** working directory: read resolves a
+relative path against its cwd, which need not match the store root, so a
+root-relative path in the marker would silently miss. The structured `spill_path`
+event field stays store-root-relative (for portability); only the model-facing
+marker is absolute — the divergence is intentional. A file-less writer keeps the
 pathless `… [N bytes elided] …`.
 
 **Event shape** (`event.ToolCallFinished`). `result` carries whatever the model
@@ -240,14 +245,15 @@ fields `spill_path` / `spill_bytes` / `spill_sha256` reference the full file.
 `sessions/<slug>/<id>/calls/<call-id>.log`), never an absolute host path, so the
 serialized event stays portable.
 
-**Known limitation (Root vs Cwd).** `spill_path` is relative to the session store
-root (`runner.Options.Root`), while the read tool resolves a relative path against
-the tool working dir (`runner.Options.Cwd`), and the runner lets those differ. So
-a bare `read(<spill_path>)` only resolves when Root and Cwd share a base; an
-**absolute** path to the spill file always works. Coupling the generic read tool
-to the session store to fix this is out of scope — a follow-up should reconcile
-the two roots (or expose an absolute spill path to the client) rather than special-
-casing read.
+**Root vs Cwd (why the marker is absolute).** The session store root
+(`runner.Options.Root`, e.g. `~/.gofer`) and the tool working dir
+(`runner.Options.Cwd`, the project dir) are commonly different, and the read tool
+resolves a relative path against Cwd. So the elision marker names the **absolute**
+spill path: a model that reads exactly the path the marker gives it gets the full
+output back regardless of where Cwd sits. The structured `spill_path` field stays
+root-relative and is not what the model reads — the two intentionally differ. This
+keeps the read tool decoupled from the session store (it just resolves an absolute
+path via its normal path resolution).
 
 ## Session tree & spawn seam (design-ahead, M4)
 

@@ -49,7 +49,12 @@ var ErrClosed = errors.New("spill: write after close")
 // is the bounded head+tail preview.
 type Ref struct {
 	// Path is the spill file relative to the store root (forward-slashed), or
-	// empty when the writer is file-less.
+	// empty when the writer is file-less. It is deliberately root-relative so the
+	// serialized event stays portable (no host path leaks). This is NOT the same
+	// string the excerpt's elision marker names: the marker uses the ABSOLUTE
+	// path so the read tool can resolve it from any working directory (see
+	// [Writer]'s excerpt). The divergence is intentional — the structured field
+	// is for portability, the marker is for the model to act on.
 	Path string
 	// Bytes is the total number of bytes written.
 	Bytes int64
@@ -69,7 +74,8 @@ type Ref struct {
 // the excerpt. It is not safe for concurrent use; callers serialize writes (for
 // bash, os/exec guarantees a single goroutine writes when Stdout==Stderr).
 type Writer struct {
-	relPath string // recorded in Ref.Path; empty ⇒ file-less
+	relPath string // recorded in Ref.Path (store-root-relative); empty ⇒ file-less
+	absPath string // absolute file path; named in the excerpt's elision marker
 	f       *os.File
 	bw      *bufio.Writer
 	hash    hash.Hash
@@ -104,6 +110,7 @@ func Create(dir, relDir, callID string) (*Writer, error) {
 	w.f = f
 	w.bw = bufio.NewWriterSize(f, spillBufSize)
 	w.relPath = path.Join(filepath.ToSlash(relDir), name)
+	w.absPath = abs
 	return w, nil
 }
 
@@ -190,11 +197,14 @@ func (w *Writer) excerpt() (string, bool) {
 	}
 	omitted := w.n - int64(headBytes) - int64(tailBytes)
 	var marker string
-	if w.relPath != "" {
-		// Name the spill file so the model knows the full output is on disk and
-		// can read it back (the path is the same root-relative path the event
-		// carries).
-		marker = fmt.Sprintf("\n… [%d bytes elided — full output at %s] …\n", omitted, w.relPath)
+	if w.absPath != "" {
+		// Name the ABSOLUTE spill path so the model can read the full output back
+		// with the read tool from ANY working directory — the read tool resolves
+		// a relative path against its cwd, which need not match the store root the
+		// (portable, root-relative) Ref.Path is measured from. The structured
+		// event field stays relative; only this human/model-facing marker is
+		// absolute. See Ref.Path.
+		marker = fmt.Sprintf("\n… [%d bytes elided — full output at %s] …\n", omitted, w.absPath)
 	} else {
 		marker = fmt.Sprintf("\n… [%d bytes elided] …\n", omitted)
 	}
