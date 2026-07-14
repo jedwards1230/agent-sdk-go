@@ -2,9 +2,7 @@
 
 Living checklist for the M3 milestone in this repo. The spec is
 [`PRD.md`](PRD.md) (milestone table + tenets) and [`DESIGN.md`](DESIGN.md)
-(normative seams); this doc tracks progress and sequencing. Cross-repo plan of
-record lives in the umbrella orchestration repo
-(`docs/projects/gofer-m3-plan-and-docs-refresh.md`).
+(normative seams); this doc tracks progress and sequencing.
 
 ## Scope
 

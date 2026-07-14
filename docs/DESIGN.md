@@ -361,7 +361,7 @@ fields `spill_path` / `spill_bytes` / `spill_sha256` reference the full file.
 serialized event stays portable.
 
 **Root vs Cwd (why the marker is absolute).** The session store root
-(`runner.Options.Root`, e.g. `~/.gofer`) and the tool working dir
+(`runner.Options.Root`, the embedder's app dir) and the tool working dir
 (`runner.Options.Cwd`, the project dir) are commonly different, and the read tool
 resolves a relative path against Cwd. So the elision marker names the **absolute**
 spill path: a model that reads exactly the path the marker gives it gets the full
