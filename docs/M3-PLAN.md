@@ -21,9 +21,12 @@ are **M4/M5, not M3**.
       `tool.call.finished` carries `spill_path` (store-root-relative) + `spill_bytes`
       + `spill_sha256` plus a bounded head+tail excerpt in `result` instead of an
       unbounded payload. bash streams straight to the file (no full-buffer path);
-      other tools' bounded strings are written through the same sink. Protects
-      memory, makes every level of a session tree greppable on disk, surfaces
-      errors from the source. (`spill/`, design: DESIGN.md)
+      other tools' bounded strings are written through the same sink. **Escape
+      hatch (shipped #39):** excerpt-by-default, but the `read` tool returns FULL
+      uncapped content, and every elision marker names the **absolute** spill path
+      so the model can `read` it to load the whole output from any cwd (Root≠Cwd
+      safe). Protects memory, makes every level of a session tree greppable on
+      disk, surfaces errors from the source. (`spill/`, design: DESIGN.md)
 - [ ] **Sandbox seam.** A containment interface the loop consults before running
       a tool. Binary policy: sandboxable → run contained; otherwise (not
       sandboxable, or no backend available on this host) → emit
