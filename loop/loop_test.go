@@ -170,6 +170,53 @@ func TestToolCallRound(t *testing.T) {
 	}
 }
 
+// seedOnlyToolTurn models a provider that carries the whole tool input inline on
+// the Start event (as the seed) and reports a bare "{}" at End — the shape the
+// Anthropic adapter produced for an inline-input tool call before assembly was
+// made resilient. The loop must assemble the real seed, not the empty End.
+func seedOnlyToolTurn(id, name, input string) []provider.StreamEvent {
+	return []provider.StreamEvent{
+		{Type: provider.StreamToolCallStart, Tool: &provider.ToolCall{ID: id, Name: name, Input: json.RawMessage(input)}},
+		{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: id, Name: name, Input: json.RawMessage(`{}`)}},
+		{Type: provider.StreamFinished, StopReason: provider.StopToolUse, Usage: provider.Usage{InputTokens: 4, OutputTokens: 1}},
+	}
+}
+
+// TestToolCallFinishedCarriesInput asserts tool.call.finished carries the
+// authoritative assembled input (Defect 2), and that assembly prefers a real
+// Start seed over an empty "{}" End (Defect 1, loop layer). tool.call.started
+// carries only the seed, so the finished event is the must-deliver signal a
+// client reconciles the real arguments from.
+func TestToolCallFinishedCarriesInput(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	tool := &fakeTool{name: "bash", result: loop.ToolResult{Content: "ok"}}
+	cfg := baseConfig(b, scripted(
+		seedOnlyToolTurn("t1", "bash", `{"cmd":"ls -la"}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The tool ran with the real input, not the empty "{}" End.
+	if string(tool.gotIn) != `{"cmd":"ls -la"}` {
+		t.Errorf("tool input = %s, want assembled arguments (not {})", tool.gotIn)
+	}
+
+	finished := drainFinished(sub)
+	if len(finished) != 1 {
+		t.Fatalf("want 1 tool.call.finished, got %d", len(finished))
+	}
+	if string(finished[0].Input) != `{"cmd":"ls -la"}` {
+		t.Errorf("tool.call.finished input = %s, want authoritative arguments (not {})", finished[0].Input)
+	}
+}
+
 func TestUnknownToolIsError(t *testing.T) {
 	b := event.NewBroker()
 	defer b.Close()

@@ -18,9 +18,13 @@ type startedCall struct {
 	input json.RawMessage
 }
 
-// toolResult is one tool call's settled outcome — its result text and
-// whether it errored — as tool.call.finished carries it.
+// toolResult is one tool call's settled outcome — the authoritative input it
+// ran with, its result text, and whether it errored — as tool.call.finished
+// carries it. input is the complete assembled input, distinct from the
+// tool.call.started seed (an empty "{}" when a provider streams the arguments);
+// it is preferred over that seed when journaling the tool_use block.
 type toolResult struct {
+	input   json.RawMessage
 	content string
 	isError bool
 }
@@ -131,7 +135,15 @@ func (a *turnAcc) assistantBlocks(includeToolUse bool) []provider.ContentBlock {
 	}
 	if includeToolUse {
 		for _, c := range a.started {
-			blocks = append(blocks, provider.ToolUseBlock(c.id, c.name, c.input))
+			// tool.call.started carries only the start-of-block seed (an empty
+			// "{}" for a streamed tool call); tool.call.finished carries the
+			// authoritative assembled input. Prefer the latter when it arrived so
+			// the journaled tool_use block holds the real arguments, not "{}".
+			input := c.input
+			if res, ok := a.results[c.id]; ok && len(res.input) > 0 {
+				input = res.input
+			}
+			blocks = append(blocks, provider.ToolUseBlock(c.id, c.name, input))
 		}
 	}
 	return blocks
@@ -197,7 +209,7 @@ func (r *Runner) handleEvent(acc *turnAcc, e event.Event) {
 		acc.started = append(acc.started, startedCall{id: ev.ID, name: ev.Name, input: ev.Input})
 
 	case event.ToolCallFinished:
-		acc.results[ev.ID] = toolResult{content: ev.Result, isError: ev.IsError}
+		acc.results[ev.ID] = toolResult{input: ev.Input, content: ev.Result, isError: ev.IsError}
 		r.maybeFlushToolTurn(acc)
 
 	case event.TurnFinished:

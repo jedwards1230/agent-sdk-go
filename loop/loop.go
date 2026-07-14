@@ -326,7 +326,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 		// tool, so there is nothing to spill.
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
-			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, true, nil))
+			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, true, nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
@@ -353,7 +353,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// rather than crashing the loop.
 		r.emitError("spill: "+err.Error(), false)
 		res := r.execTool(ctx, call)
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -368,7 +368,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// The spill file is suspect: emit the tool's own content and drop the
 		// (possibly inconsistent) reference, but never crash the loop.
 		r.emitError("spill: close "+call.ID+": "+closeErr.Error(), false)
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, res.Content, res.IsError, res.Diagnostics))
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -381,9 +381,9 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		modelContent = res.Content
 	}
 	if ref.Path != "" {
-		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
+		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
 	} else {
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics))
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics))
 	}
 	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
 }
@@ -465,7 +465,7 @@ func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (
 // error tool_result block the model sees. (No spill: nothing executed.)
 func (r *runner) finishBlocked(call ToolCall, reason string) provider.ContentBlock {
 	content := "permission denied: " + reason
-	r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, content, true, nil))
+	r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, content, true, nil))
 	return provider.ToolResultBlock(call.ID, content, true)
 }
 
@@ -691,15 +691,30 @@ func (c *converter) toolEnd(t *provider.ToolCall, meta map[string]string) {
 }
 
 // assembledInput resolves a tool call's final input: the End event's assembled
-// input if present, else the accumulated deltas, else the Start seed.
+// input when it carries real arguments, else the accumulated deltas, else the
+// Start seed. An End that is empty or a bare "{}" is treated as no-input so the
+// fallback still fires — a provider that reports "{}" at End while the real
+// arguments arrived at Start (as a seed) or via deltas must not have them masked
+// by that empty terminal object.
 func assembledInput(a *toolAssembly, end json.RawMessage) json.RawMessage {
-	if len(end) > 0 {
+	if !blankInput(end) {
 		return end
 	}
 	if a.buf.Len() > 0 {
 		return json.RawMessage(a.buf.String())
 	}
-	return a.seed
+	if len(a.seed) > 0 {
+		return a.seed
+	}
+	return end
+}
+
+// blankInput reports whether a tool-input payload carries no arguments — empty
+// bytes or an empty JSON object ("{}"). Such a value must not mask a real seed
+// or accumulated deltas during assembly.
+func blankInput(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s == "" || s == "{}"
 }
 
 // flush closes any open message. Tool calls that saw a Start but no End are

@@ -47,16 +47,16 @@ func TestToSessionUpdate(t *testing.T) {
 				`"title":"ls","kind":"other","status":"pending"}}`,
 		},
 		{
-			name:   "tool call finished ok -> tool_call_update completed",
-			event:  event.NewToolCallFinished(sid, "tc-1", "3 files", false, nil),
+			name:   "tool call finished ok -> tool_call_update completed with authoritative input",
+			event:  event.NewToolCallFinished(sid, "tc-1", json.RawMessage(`{"cmd":"ls"}`), "3 files", false, nil),
 			wantOK: true,
 			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update",` +
-				`"toolCallId":"tc-1","status":"completed",` +
+				`"toolCallId":"tc-1","status":"completed","rawInput":{"cmd":"ls"},` +
 				`"content":[{"type":"content","content":{"type":"text","text":"3 files"}}]}}`,
 		},
 		{
-			name:   "tool call finished with empty result omits content",
-			event:  event.NewToolCallFinished(sid, "tc-1", "", false, nil),
+			name:   "tool call finished with empty result and no input omits content and rawInput",
+			event:  event.NewToolCallFinished(sid, "tc-1", nil, "", false, nil),
 			wantOK: true,
 			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update",` +
 				`"toolCallId":"tc-1","status":"completed"}}`,
