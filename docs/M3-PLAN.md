@@ -64,10 +64,15 @@ are **M4/M5, not M3**.
       server runs in CI. The embedded ~370-server dataset, a lazy
       per-file-event manager, and `lsp_*` tools remain a later consuming
       layer, not shipped here. (`lsp/`, design: DESIGN.md "LSP")
-- [ ] **OTel seams.** Assert context propagation through every call path; expose
-      optional `*slog.Logger` injection points; keep the Event/Op stream as the
-      span source. The SDK takes **no** otel dependency — the application owns
-      exporters.
+- [x] **OTel seams.** Context propagation asserted end-to-end
+      (`runner/ctxprop_test.go`: a ctx value planted at `Prompt` is observed at
+      the provider, guard, approver, and tool seams); the optional
+      `*slog.Logger` seam is `session.WithLogger` (the loop surfaces its
+      diagnostics as `session.error` events, so needs none); the Event/Op stream
+      is documented as the span/metric source with a concrete event→span mapping
+      and the ordering that makes open/close pairing safe (DESIGN.md
+      "Instrumentation seams"). The SDK takes **no** otel dependency
+      (`go list -deps ./...` names none) — the application owns exporters.
 
 ## Acceptance
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"sync"
@@ -56,13 +57,36 @@ type Client struct {
 
 	pendingMu sync.Mutex
 	pending   map[int64]chan callResult
+
+	// log receives the read loop's otherwise-invisible diagnostics (see
+	// [WithLogger]). Never nil after construction: an unset logger is
+	// normalized to slog.DiscardHandler so every call site logs unconditionally.
+	log *slog.Logger
+}
+
+// Option configures a [Client] at construction.
+type Option func(*Client)
+
+// WithLogger attaches an optional structured logger for the background read
+// loop's otherwise-silent diagnostics — the only paths in this client that
+// neither reach a caller nor surface on the event stream: a malformed frame or
+// publishDiagnostics notification dropped, and the read loop exiting on a
+// transport death that no in-flight call observed. nil ⇒ the client stays
+// silent (the default). The client never logs on the request path, and a
+// deliberate [Client.Close] logs at debug level so intentional shutdown is not
+// noise. This is the SDK's optional-*slog.Logger instrumentation seam (the SDK
+// takes no telemetry dependency of its own — see docs/DESIGN.md
+// "Instrumentation seams").
+func WithLogger(l *slog.Logger) Option {
+	return func(c *Client) { c.log = l }
 }
 
 // NewClient wraps t as an LSP connection, publishing every
 // textDocument/publishDiagnostics notification it receives to pub tagged with
 // session. The background read loop starts immediately; call [Client.Close]
-// to stop it and release the Transport.
-func NewClient(t Transport, pub Publisher, session string) *Client {
+// to stop it and release the Transport. Pass [WithLogger] to surface the read
+// loop's otherwise-silent diagnostics.
+func NewClient(t Transport, pub Publisher, session string, opts ...Option) *Client {
 	c := &Client{
 		pub:       pub,
 		session:   session,
@@ -71,6 +95,12 @@ func NewClient(t Transport, pub Publisher, session string) *Client {
 		closed:    make(chan struct{}),
 		readDone:  make(chan struct{}),
 		pending:   make(map[int64]chan callResult),
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	if c.log == nil {
+		c.log = slog.New(slog.DiscardHandler)
 	}
 	go c.readLoop(bufio.NewReader(t))
 	return c
@@ -248,6 +278,16 @@ func (c *Client) readLoop(r *bufio.Reader) {
 	for {
 		frame, err := readFrame(r)
 		if err != nil {
+			select {
+			case <-c.closed:
+				// Deliberate Close shut the transport down: expected, not noise.
+				c.log.Debug("lsp: read loop stopped on close", "session", c.session)
+			default:
+				// The transport died on its own (server crash/exit) with no
+				// Close. If no call is in flight, failPending reaches no waiter,
+				// so this is the only signal the connection is gone.
+				c.log.Warn("lsp: read loop stopped on transport error", "session", c.session, "error", err)
+			}
 			c.failPending(fmt.Errorf("lsp: connection closed: %w", err))
 			return
 		}
@@ -255,6 +295,7 @@ func (c *Client) readLoop(r *bufio.Reader) {
 		if err := json.Unmarshal(frame, &msg); err != nil {
 			// A malformed frame from a well-behaved server should not happen;
 			// drop it rather than crash the read loop over one bad message.
+			c.log.Warn("lsp: dropping malformed frame", "session", c.session, "error", err)
 			continue
 		}
 		switch {
@@ -334,6 +375,7 @@ func (c *Client) handleDiagnostics(raw json.RawMessage) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		// A malformed notification from a well-behaved server should not
 		// happen; drop it rather than crash the read loop.
+		c.log.Warn("lsp: dropping malformed publishDiagnostics notification", "session", c.session, "error", err)
 		return
 	}
 	items := make([]Diagnostic, len(p.Diagnostics))
