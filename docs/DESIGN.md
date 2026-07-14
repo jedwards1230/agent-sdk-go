@@ -218,16 +218,36 @@ and the reference is consistent with the bytes on disk.
 the `<id>.jsonl` journal and is invisible to the store's `<id>.jsonl` globs).
 Created lazily, mode `0o700`.
 
-**Event shape** (`event.ToolCallFinished`). `result` is repurposed to the bounded
-head+tail excerpt (an elision marker notes the omitted byte count when the output
-exceeds head+tail); it stays a usable preview for old consumers. New fields
-`spill_path` / `spill_bytes` / `spill_sha256` reference the full file. `spill_path`
-is **relative to the store root** (e.g. `sessions/<slug>/<id>/calls/<call-id>.log`),
-never an absolute host path, so the serialized event stays portable. The runner
-journals the excerpt (via `result`) into the tool round, so the journal no longer
-stores unbounded output either — the spill file is the ground truth, and every
-model call remains reconstructable from the journal (the model sees the same
-bounded excerpt in-run and on resume).
+**Model-facing rule.** Durability is universal — *every* tool call spills to
+disk. What the model sees is the bounded excerpt **by default**, with one escape
+hatch: a tool may set `FullResult` on its `Result` to hand the model the full
+content instead (still spilled). The **read** tool sets it, so an explicit file
+read is never truncated to head+tail — its output is bounded by the operation the
+model asked for, which is not the memory-safety concern (that is only unbounded
+streaming tools like bash, which must never set `FullResult`). Whichever text the
+model sees is the text the runner journals, so every model call is reconstructable
+from the journal in-run and on resume.
+
+**Excerpt names the file.** When an excerpt elides, its marker names the spill
+file — `… [N bytes elided — full output at <spill_path>] …` — so the model knows
+the full output is on disk and can read it back. A file-less writer keeps the
+pathless `… [N bytes elided] …`.
+
+**Event shape** (`event.ToolCallFinished`). `result` carries whatever the model
+sees (bounded excerpt by default; full content for a `FullResult` tool). New
+fields `spill_path` / `spill_bytes` / `spill_sha256` reference the full file.
+`spill_path` is **relative to the store root** (e.g.
+`sessions/<slug>/<id>/calls/<call-id>.log`), never an absolute host path, so the
+serialized event stays portable.
+
+**Known limitation (Root vs Cwd).** `spill_path` is relative to the session store
+root (`runner.Options.Root`), while the read tool resolves a relative path against
+the tool working dir (`runner.Options.Cwd`), and the runner lets those differ. So
+a bare `read(<spill_path>)` only resolves when Root and Cwd share a base; an
+**absolute** path to the spill file always works. Coupling the generic read tool
+to the session store to fix this is out of scope — a follow-up should reconcile
+the two roots (or expose an absolute spill path to the client) rather than special-
+casing read.
 
 ## Session tree & spawn seam (design-ahead, M4)
 

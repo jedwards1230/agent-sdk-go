@@ -125,9 +125,12 @@ func TestLargeOutputStreamsFullyAndExcerptsHeadTail(t *testing.T) {
 	if !strings.HasSuffix(ref.Excerpt, string(content[n-(2<<10):])) {
 		t.Error("excerpt does not end with the tail of the content")
 	}
+	// A file-backed writer's marker names the spill path so the model can read
+	// the full output back.
 	omitted := n - (2 << 10) - (2 << 10)
-	if !strings.Contains(ref.Excerpt, fmt.Sprintf("[%d bytes elided]", omitted)) {
-		t.Errorf("excerpt missing elision marker for %d bytes: %.80q…", omitted, ref.Excerpt)
+	wantMarker := fmt.Sprintf("[%d bytes elided — full output at sessions/p/s/calls/big.log]", omitted)
+	if !strings.Contains(ref.Excerpt, wantMarker) {
+		t.Errorf("excerpt missing path-naming elision marker %q: %.80q…", wantMarker, ref.Excerpt)
 	}
 }
 
@@ -175,6 +178,10 @@ func TestFilelessWriterHasNoPathButBoundedExcerpt(t *testing.T) {
 	}
 	if !ref.Elided || len(ref.Excerpt) > 8<<10 {
 		t.Errorf("file-less excerpt should be bounded+elided, got len %d elided %v", len(ref.Excerpt), ref.Elided)
+	}
+	// File-less: the marker is pathless (there is no file to name).
+	if !strings.Contains(ref.Excerpt, "bytes elided]") || strings.Contains(ref.Excerpt, "full output at") {
+		t.Errorf("file-less marker should be pathless, got %.80q…", ref.Excerpt)
 	}
 }
 

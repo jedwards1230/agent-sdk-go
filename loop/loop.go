@@ -59,6 +59,11 @@ type ToolResult struct {
 	IsError bool
 	// Diagnostics are optional advisory messages (e.g. LSP findings).
 	Diagnostics []string
+	// FullResult asks the loop to feed the model this Content in full rather
+	// than the bounded spill excerpt (the read tool's escape hatch). Output is
+	// still spilled to disk regardless; only the model-facing/journaled text
+	// changes. Streaming tools (bash) leave it false.
+	FullResult bool
 }
 
 // ToolCall is a resolved tool invocation passed to the BeforeTool/AfterTool
@@ -356,12 +361,20 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
-	if ref.Path != "" {
-		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, ref.Excerpt, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
-	} else {
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, ref.Excerpt, res.IsError, res.Diagnostics))
+	// The model (and the journal, via the event) sees the bounded excerpt by
+	// default; a FullResult tool (read) hands over its full content instead —
+	// the output is spilled to disk either way. The elision marker in an
+	// excerpt names the spill file, so the model can read the full output.
+	modelContent := ref.Excerpt
+	if res.FullResult {
+		modelContent = res.Content
 	}
-	return provider.ToolResultBlock(call.ID, ref.Excerpt, res.IsError)
+	if ref.Path != "" {
+		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
+	} else {
+		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, modelContent, res.IsError, res.Diagnostics))
+	}
+	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
 }
 
 // execTool resolves and runs call through the registry and the AfterTool hook,

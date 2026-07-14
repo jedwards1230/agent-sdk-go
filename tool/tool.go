@@ -47,6 +47,14 @@ type Result struct {
 	// model should see and correct. It is distinct from a non-nil error
 	// return, which signals an invalid or interrupted call (see [Tool.Run]).
 	IsError bool
+	// FullResult asks the loop to hand the model this Content in full rather
+	// than the bounded spill excerpt. It is the escape hatch for a tool whose
+	// output is bounded by the operation the model explicitly asked for — the
+	// read tool sets it so an explicit file read is never truncated to
+	// head+tail. The output is still spilled to disk for durability; only the
+	// model-facing/journaled text changes. Streaming tools with unbounded
+	// output (bash) must leave it false — that is the memory-safety path.
+	FullResult bool
 	// Metadata is structured, machine-readable detail about the run.
 	Metadata Metadata
 }

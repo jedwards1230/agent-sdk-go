@@ -189,7 +189,16 @@ func (w *Writer) excerpt() (string, bool) {
 		return string(w.head) + string(tail[len(tail)-need:]), false
 	}
 	omitted := w.n - int64(headBytes) - int64(tailBytes)
-	return string(w.head) + fmt.Sprintf("\n… [%d bytes elided] …\n", omitted) + string(tail), true
+	var marker string
+	if w.relPath != "" {
+		// Name the spill file so the model knows the full output is on disk and
+		// can read it back (the path is the same root-relative path the event
+		// carries).
+		marker = fmt.Sprintf("\n… [%d bytes elided — full output at %s] …\n", omitted, w.relPath)
+	} else {
+		marker = fmt.Sprintf("\n… [%d bytes elided] …\n", omitted)
+	}
+	return string(w.head) + marker + string(tail), true
 }
 
 // safeName reduces a tool call id to a safe single-path-component filename,
