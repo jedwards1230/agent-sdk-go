@@ -52,6 +52,16 @@ type Options struct {
 	// MaxIters caps model-call rounds per Prompt; <= 0 uses the loop default.
 	MaxIters int
 
+	// Guard decides how each tool call is handled before execution
+	// (run-contained / ask / deny). Nil ⇒ every tool runs uncontained, the
+	// pre-M3 default. Passed straight through to the loop; the SDK ships the
+	// seam, applications inject the policy (see loop.Guard / loop.RuleGuard).
+	Guard loop.Guard
+	// Approver awaits a human's reply when Guard returns an "ask" decision.
+	// Required whenever Guard can return ask (a nil Approver fails closed —
+	// the loop denies). Passed straight through to the loop.
+	Approver loop.Approver
+
 	// IDGen overrides the session/entry id generator. Test seam.
 	IDGen func() string
 	// Clock overrides the wall clock used to timestamp journal entries. Test
@@ -84,6 +94,8 @@ type Runner struct {
 
 	provider provider.Provider
 	tools    loop.ToolRegistry
+	guard    loop.Guard
+	approver loop.Approver
 
 	broker  *event.Broker
 	journal *session.Journal
@@ -213,6 +225,8 @@ func build(opts Options, store *session.FileStore, journal *session.Journal, pro
 		maxIters:    opts.MaxIters,
 		provider:    prov,
 		tools:       tools,
+		guard:       opts.Guard,
+		approver:    opts.Approver,
 		broker:      broker,
 		journal:     journal,
 		store:       store,
@@ -295,6 +309,8 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 		MaxIters:    r.maxIters,
 		SpillDir:    spillDir,
 		SpillRelDir: spillRelDir,
+		Guard:       r.guard,
+		Approver:    r.approver,
 	}
 	// The journal folds back to provider messages directly (verbatim content
 	// blocks), so the loop's input is the folded context as-is.
