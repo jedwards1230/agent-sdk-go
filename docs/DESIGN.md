@@ -269,14 +269,40 @@ is reported out-of-band through the Go return value as a `*SchemaError` (with th
 
 ## LSP (M3)
 
-- **Manager**: embedded server registry (~370 servers, nvim-lspconfig-shaped
-  dataset) with lazy per-file-event startup — filetype + root-marker + PATH
-  gating, a generic-command blocklist, and failed-lookup retry damping.
-- **Diagnostics injected into tool results** (edit/write/view): current-file
-  vs project split, errors first, truncated at 10, after a two-phase settle
-  debounce (bail-fast 1s, then a 300ms version-stability window).
-- Tools: `lsp_diagnostics` · `lsp_references` (grep→LSP hybrid) ·
-  `lsp_restart`. One generic prompt line, not per-tool coaching.
+`lsp/` is a stdlib-only leaf shipping the registry + diagnostics seam;
+everything below "Future" is a later consuming layer built on top of it, not
+part of this package.
+
+- **Registry** (`lsp.Registry`): a small, hand-curated language → launch-command
+  table (gopls, typescript-language-server, pyright, rust-analyzer, clangd —
+  not the ~370-server nvim-lspconfig dataset), resolved against PATH.
+  `Resolve` distinguishes "no server registered for this language"
+  (`ErrNotRegistered`) from "registered but not installed" (`ErrNotOnPath`)
+  via `errors.Is`.
+- **Client** (`lsp.Client`): a hand-rolled JSON-RPC-over-stdio client
+  (Content-Length framing + JSON-RPC 2.0) — the LSP base protocol is a few
+  dozen lines, so hand-rolling it keeps the package dependency-free rather
+  than pulling in a jsonrpc library for a trivial amount of code. One
+  background goroutine reads framed messages, routing responses to pending
+  calls and `textDocument/publishDiagnostics` notifications to the
+  diagnostics seam. `Start` spawns a real server via `os/exec`; that path
+  isn't exercised in CI (no LSP servers installed there) — tests script a
+  fake server over an in-memory `io.Pipe` Transport instead.
+- **Diagnostics seam** (`lsp.Publisher`): the client hands every
+  `publishDiagnostics` notification to a `Publisher` as a normalized `Batch`.
+  The SDK defines ONLY this interface — deciding how (or whether) diagnostics
+  reach a model or UI is the consuming application's job, exactly like the
+  loop package's `Container` seam. `lsp` never imports `event/`;
+  `Batch.Strings()` renders each diagnostic as a one-line string so a
+  consumer can assign the result straight onto
+  `event.ToolCallFinished.Diagnostics` / `loop.ToolResult.Diagnostics` (both
+  already exist) without `lsp` taking a reverse dependency on either.
+
+**Future (not shipped by `lsp/`)**: an embedded ~370-server registry
+(nvim-lspconfig-shaped dataset) with lazy per-file-event startup, diagnostics
+injected into tool results (current-file vs project split, errors first,
+settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
+tools built on top of the `Registry` + `Publisher` seam above.
 
 ## Bulk-payload spill (M3)
 

@@ -51,8 +51,19 @@ are **M4/M5, not M3**.
       in DESIGN.md.
 - [x] **Headless exec adapter.** One-shot drivable session emitting JSONL events
       on stdout, with output-schema support (the app's `exec` verb consumes this).
-- [ ] **LSP package.** Server registry + diagnostics seam; the loop surfaces
-      diagnostics through the event stream.
+- [x] **LSP package.** `lsp/` ships a curated `Registry` (language → launch
+      command, resolved on PATH) and a stdlib-only JSON-RPC-over-stdio
+      `Client` speaking the LSP base protocol, wired to a neutral `Publisher`
+      seam: the client hands every `textDocument/publishDiagnostics`
+      notification to `Publisher.Publish` as a normalized `Batch`. `lsp`
+      never imports `event/` — `Batch.Strings()` renders diagnostics as
+      `[]string` for the consumer to assign onto
+      `event.ToolCallFinished.Diagnostics` / `loop.ToolResult.Diagnostics`
+      (both already exist) unchanged. Faked-transport tested (an in-memory
+      `io.Pipe` Transport driving a scripted fake server) — no real language
+      server runs in CI. The embedded ~370-server dataset, a lazy
+      per-file-event manager, and `lsp_*` tools remain a later consuming
+      layer, not shipped here. (`lsp/`, design: DESIGN.md "LSP")
 - [ ] **OTel seams.** Assert context propagation through every call path; expose
       optional `*slog.Logger` injection points; keep the Event/Op stream as the
       span source. The SDK takes **no** otel dependency — the application owns
