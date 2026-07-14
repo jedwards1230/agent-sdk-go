@@ -28,7 +28,9 @@ func FromCancel(n CancelNotification) event.TurnInterrupt {
 // FromNewSession projects a session/new request to a [event.SessionNew] op.
 // Agent is left empty: ACP's session/new has no agent-selection field, so the
 // daemon fills it in from its own routing (e.g. the ACP connection's bound
-// agent) before dispatching the op.
+// agent) before dispatching the op. Model is not projected: [event.SessionNew]
+// has no model field yet, so a consuming application reads req.Model directly
+// off the decoded request if it wants to honor a per-session model.
 func FromNewSession(req NewSessionRequest) event.SessionNew {
 	return event.SessionNew{Cwd: req.Cwd}
 }

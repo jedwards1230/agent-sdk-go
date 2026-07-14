@@ -42,6 +42,16 @@ func TestDecodeOp(t *testing.T) {
 			want:   event.SessionNew{Cwd: "/work"},
 		},
 		{
+			// event.SessionNew has no model field yet, so a model in the
+			// request does not change the projected op; see
+			// TestNewSessionRequestUnmarshal for the field itself round-tripping.
+			name:   "session/new with model -> SessionNew unchanged",
+			method: MethodSessionNew,
+			params: `{"cwd":"/work","model":"claude-sonnet-5"}`,
+			wantOK: true,
+			want:   event.SessionNew{Cwd: "/work"},
+		},
+		{
 			name:   "session/load -> SessionResume",
 			method: MethodSessionLoad,
 			params: `{"sessionId":"s-3","cwd":"/work"}`,
