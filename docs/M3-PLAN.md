@@ -49,7 +49,7 @@ are **M4/M5, not M3**.
       deny resolves without a preceding request (no human asked); every
       fail-closed path (nil approver, await error, container error) is explicit
       in DESIGN.md.
-- [ ] **Headless exec adapter.** One-shot drivable session emitting JSONL events
+- [x] **Headless exec adapter.** One-shot drivable session emitting JSONL events
       on stdout, with output-schema support (the app's `exec` verb consumes this).
 - [ ] **LSP package.** Server registry + diagnostics seam; the loop surfaces
       diagnostics through the event stream.
