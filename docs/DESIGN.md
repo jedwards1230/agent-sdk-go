@@ -285,7 +285,10 @@ part of this package.
   than pulling in a jsonrpc library for a trivial amount of code. One
   background goroutine reads framed messages, routing responses to pending
   calls and `textDocument/publishDiagnostics` notifications to the
-  diagnostics seam. `Start` spawns a real server via `os/exec`; that path
+  diagnostics seam. That goroutine is the SDK's one otherwise-silent spot, so
+  `NewClient`/`Start` accept an optional `lsp.WithLogger(*slog.Logger)` (nil ⇒
+  discard) surfacing its three invisible paths (see "Instrumentation seams").
+  `Start` spawns a real server via `os/exec`; that path
   isn't exercised in CI (no LSP servers installed there) — tests script a
   fake server over an in-memory `io.Pipe` Transport instead.
 - **Diagnostics seam** (`lsp.Publisher`): the client hands every
@@ -422,29 +425,86 @@ internal design notes; this table is the settled, repo-facing summary.
 - **Observability**: no phone-home, ever. Local structured logs; optional
   OTLP export, off by default.
 
-## Observability seams (SDK stays dependency-light)
+## Instrumentation seams (SDK stays dependency-light)
 
 The SDK takes **no OpenTelemetry dependency** and emits no telemetry on its own
 initiative — instrumentation lives in the embedding app (the application owns
-the otel dep + exporters). What the SDK owes an embedder is *seams*, not an
+the otel dep + exporters). `go list -deps ./...` names no `otel` package; a new
+import of one is a bug. What the SDK owes an embedder is *seams*, not an
 implementation:
 
-- **Context propagation is already end-to-end.** Every call path — loop,
-  provider, `session`, `runner`, tools — threads `context.Context` through
-  unbroken (`runner.New`/`Resume`/`Prompt(ctx, …)`, `loop.Run(ctx, …)` down
-  through each `callModel`/`runTools` call). An app can therefore open a span on
-  a
-  turn and have it flow through the provider call and every tool execution
-  without the SDK knowing tracing exists. This is an invariant, not an
-  aspiration: a new code path that drops `ctx` is a bug.
+- **Context propagation is end-to-end.** Every call path — loop, provider,
+  `session`, `runner`, tools, guard, approver — threads `context.Context`
+  through unbroken (`runner.New`/`Resume`/`Prompt(ctx, …)` →
+  `loop.Run(ctx, …)` → `callModel`/`runTools` → the provider `Stream(ctx, …)`,
+  `Guard.Evaluate(ctx, …)`, `Approver.Await(ctx, …)`, and each tool's
+  `Run(ctx, …)`). An app can open a span on a turn and have it flow through the
+  provider call and every tool execution without the SDK knowing tracing
+  exists. This is an invariant, not an aspiration: a new code path that drops
+  `ctx` is a bug. It is proven by `runner/ctxprop_test.go`, which plants a value
+  in the ctx handed to `Prompt` and asserts it is observed at all four seams
+  (provider, guard, approver, tool).
 - **Optional `*slog.Logger` injection where the SDK is otherwise silent.** The
   SDK is silent by default; where SDK-internal diagnostics earn their keep, the
   seam is an optional `*slog.Logger` the embedder passes in (nil ⇒ discard, as
   the daemon already does for its own logger). The SDK never logs unprompted and
-  never phones home.
-- **The Event/Op stream is the instrumentation source.** The typed two-tier
-  stream in `event/` is the natural span/metric source: `*.started`/`*.finished`
-  events map to span open/close, `message`/`tool.call` deltas to span events,
-  and settled usage/cost to metrics — all in the app, without SDK involvement.
-  An embedding application wraps the stream with OTel spans exactly this way; a
-  second embedder would instrument the same seam the same way.
+  never phones home. Two such seams exist today: `session.WithLogger` (torn-write
+  warnings) and `lsp.WithLogger` (the LSP read loop's three otherwise-invisible
+  paths — a malformed frame or publishDiagnostics notification dropped, and the
+  read loop exiting on a transport death no in-flight call observed; a deliberate
+  `Close` logs at debug so intentional shutdown is not noise). The loop needs
+  none — every error and degraded path it hits is already surfaced on the stream
+  as a `session.error` event (stream failures, spill open/close failures, the
+  iteration-cap stop), not swallowed; likewise broker drops are exposed as
+  counters. Add a logger option only when a genuine diagnostic would otherwise
+  vanish with no event and no counter — not as blanket instrumentation.
+
+### The Event/Op stream is the span/metric source
+
+The typed two-tier stream in `event/` is the natural span/metric source, and an
+embedder maps it to spans **entirely in the app** — the SDK never sees a span.
+The mapping and the ordering that makes open/close pairing safe:
+
+| Span | Opened by | Closed by | Correlation key |
+|---|---|---|---|
+| run / prompt | app, around its own `Prompt(ctx)` call | the terminal `turn.finished` (stop ≠ `tool_use`, or a `max_turns` terminal) | app-owned — no event needed |
+| turn = model/provider call | `turn.started` | `turn.finished` | "currently-open turn" (turns never overlap) |
+| tool | `tool.call.started{id}` | `tool.call.finished{id}` | `id` |
+| permission | `permission.requested{id}` | `permission.resolved{id}` | `id` (same as the tool call) |
+
+- **A "turn" brackets exactly one model call.** Per loop iteration the emit
+  order is `turn.started` → `message.*` / `tool.call.started` (during the
+  provider stream) → **`turn.finished`** → (if tools were requested)
+  `permission.*` → `tool.call.finished`. So `turn.started`/`turn.finished`
+  bracket the provider stream and *nothing else* — the turn span **is** the
+  provider-call span (there is no separate provider event to open a distinct
+  child from). Tool execution runs **after** `turn.finished`, between turns.
+- **Tool spans are siblings under the run span, not children of the turn span.**
+  Because `tool.call.finished` (and the `permission.*` pair) publish *after* the
+  enclosing `turn.finished`, a tool span cannot nest inside the turn span — it
+  would outlive it. Nest tool spans under the app-owned run span, keyed by call
+  `id`; the run span alternates turn(model-call) spans and tool spans. (Naively
+  nesting a tool under "the currently-open turn" is the trap this ordering
+  guards against.)
+- **Pairing is safe without new wire fields.** Tool and permission spans pair on
+  the call `id` they already carry. Turn spans pair by position: the loop makes
+  one model call at a time (turns never overlap) and every lifecycle/terminal
+  event is must-deliver and per-session `seq`-ordered, so "open the turn on
+  `turn.started`, close it on the next `turn.finished`" is unambiguous. The one
+  edge case is the iteration-cap terminal — a `turn.finished{max_turns}` with
+  **no** matching `turn.started` (documented on `event.TurnFinished`); a pairing
+  consumer must tolerate that unmatched terminal. No `turn_id` on tool events is
+  needed: tools nest under the run span by `id`, not under a turn. (This was
+  evaluated against the "does a span-source event lack a correlation field?"
+  bar and found sufficient — no wire field was added.)
+- **Metrics** come from the same stream: `turn.finished{usage, cost}` →
+  token/cost counters, `turn.*`/`tool.call.*`/`session.*` counts →
+  turn/tool/session/error metrics.
+- **Redaction is the app's job at the mapping boundary.** The stream carries raw
+  payloads an app must **not** copy into span attributes: `tool.call.started`
+  carries `input` (tool params) and `message.*` carry model text. Instrument
+  with ids, names, counts, durations, costs, verdicts — never prompt text, tool
+  params, or tool results.
+
+A second embedder instruments the same seam the same way — the mapping above is
+the contract, not one app's convention.
