@@ -274,7 +274,7 @@ func (r *Runner) flushAssistant(acc *turnAcc, includeToolUse bool) {
 		return
 	}
 	msg := provider.Message{Role: provider.RoleAssistant, Content: blocks}
-	entry := session.NewMessageEntry(msg, session.WithEntryModel(r.model), session.WithEntryUsage(acc.usage))
+	entry := session.NewMessageEntry(msg, session.WithEntryModel(r.currentModel()), session.WithEntryUsage(acc.usage))
 	if _, err := r.journal.Append(entry); err != nil {
 		r.setJournalWriteErr(err)
 	}
@@ -293,7 +293,7 @@ func (r *Runner) flushRound(acc *turnAcc) {
 		res := acc.results[c.id]
 		blocks = append(blocks, provider.ToolResultBlock(c.id, res.content, res.isError))
 	}
-	entry := session.NewToolRoundEntry(blocks, session.WithEntryModel(r.model))
+	entry := session.NewToolRoundEntry(blocks, session.WithEntryModel(r.currentModel()))
 	if _, err := r.journal.Append(entry); err != nil {
 		r.setJournalWriteErr(err)
 	}
