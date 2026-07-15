@@ -1,0 +1,118 @@
+# Release agent-sdk-go on push to main. Opt-in via a semver:* label on the
+# merged PR (no label -> no release). The detect job reads the label, then the
+# shared jedwards1230/release-workflows/ai-release.yml computes the version/tag
+# and AI release notes and creates the GitHub Release directly.
+#
+# agent-sdk-go is a pure Go library (consumed via `go get`), so there are no
+# binaries, images, or charts to build -- the git tag + release notes are the
+# whole deliverable. This is the single-file, push-triggered shape (my-wiki /
+# anyctl / gpu-arbiter): a push-triggered workflow calling the remote reusable
+# directly, which avoids the local-reusable-calls-remote-reusable startup
+# validation failure.
+name: Release
+
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('Release: {0}{1}', inputs.dry_run && 'dry-run ' || '', inputs.bump_type)
+      || format('Release: {0}', github.event.head_commit.message || github.sha)
+  }}
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: "Version bump type"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: "Compute version + preview notes without tagging or publishing"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  # ai-release.yml@v1 reads merged PRs for the changelog, and the detect job
+  # below runs `gh pr list` -- both need pull-requests:read. Without it the
+  # reusable call fails GitHub's startup validation ("requesting
+  # 'pull-requests: read', but only allowed 'pull-requests: none'"). A
+  # restricted permissions block defaults every unlisted scope to none.
+  pull-requests: read
+
+jobs:
+  detect:
+    name: Detect bump type
+    runs-on: ubuntu-latest
+    outputs:
+      bump_type: ${{ steps.bump.outputs.type }}
+      release: ${{ steps.bump.outputs.release }}
+      dry_run: ${{ steps.bump.outputs.dry_run }}
+    steps:
+      - name: Determine bump type
+        id: bump
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Resolve TYPE / RELEASE / DRY into shell vars, then write all three
+          # outputs in one grouped redirect at the end (shellcheck SC2129).
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TYPE="${{ inputs.bump_type }}"; RELEASE="true"; DRY="${{ inputs.dry_run }}"
+          else
+            # push event: opt-in via the merged PR's semver:* label. No label -> no release.
+            # Retry -- the GitHub API may not have the merge commit indexed the
+            # instant the push event fires.
+            LABELS=""
+            for attempt in 1 2 3; do
+              LABELS=$(gh pr list --state merged --base main --limit 100 \
+                --json labels,mergeCommit \
+                | jq -r --arg sha "$GITHUB_SHA" \
+                  '.[] | select(.mergeCommit.oid == $sha) | .labels[].name' 2>/dev/null || echo "")
+              [ -n "$LABELS" ] && break
+              echo "Attempt ${attempt}: no labels for ${GITHUB_SHA}, retrying in 5s..."
+              sleep 5
+            done
+            echo "Labels: ${LABELS:-<none>}"
+
+            DRY="false"
+            if echo "$LABELS" | grep -q 'semver:major'; then
+              TYPE="major"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:minor'; then
+              TYPE="minor"; RELEASE="true"
+            elif echo "$LABELS" | grep -q 'semver:patch'; then
+              TYPE="patch"; RELEASE="true"
+            else
+              echo "::notice::No semver:* label -- skipping release."
+              TYPE="none"; RELEASE="false"
+            fi
+          fi
+
+          {
+            echo "type=$TYPE"
+            echo "release=$RELEASE"
+            echo "dry_run=$DRY"
+          } >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Tag & Release
+    needs: [detect]
+    if: needs.detect.outputs.release == 'true'
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@v1
+    with:
+      service_name: agent-sdk-go
+      service_description: "a Go framework for building coding agents on a typed Event/Op contract"
+      bump_type: ${{ needs.detect.outputs.bump_type }}
+      create_release: true
+      dry_run: ${{ needs.detect.outputs.dry_run == 'true' }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
