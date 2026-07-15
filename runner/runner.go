@@ -300,7 +300,7 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	spillDir, spillRelDir := r.spillCallsDir()
 	cfg := loop.Config{
 		Provider:    r.provider,
-		Model:       r.model,
+		Model:       r.currentModel(),
 		System:      r.system,
 		Params:      r.params,
 		Tools:       r.tools,
@@ -394,6 +394,57 @@ func (r *Runner) Emit(e event.Event) { r.broker.Publish(e) }
 // priced against the embedded provider model registry. An unknown (or faux)
 // model still has its tokens summed, with a zero priced cost.
 func (r *Runner) Cost() session.CostReport { return r.journal.Cost(session.RegistryPricing{}) }
+
+// currentModel returns the model this runner currently uses, synchronized
+// against [SetModel]. Every read of the model — Prompt's loop.Config and
+// consume's journaled entries — goes through this accessor rather than the
+// field directly, so a concurrent SetModel can never race with a Prompt in
+// flight or with the consume goroutine journaling that turn's entries.
+func (r *Runner) currentModel() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.model
+}
+
+// SetModel changes the model this runner uses for its next (and subsequent)
+// Prompt turns, without rebuilding the session. It is the mechanism a caller
+// uses to switch models mid-session — e.g. in response to a user command —
+// while keeping the same journal, provider client, and conversation history.
+//
+// The swap is same-provider only. The Runner's provider client
+// ([providers.Build]) is bound to one backend family (anthropic, openai, …)
+// at construction; the per-call model id flows through as [provider.Request]
+// .Model, so switching to another model in that same family works with the
+// existing client. Switching across families would hand the bound client a
+// model id it cannot serve, so SetModel rejects it: model must be a
+// registered id ([provider.Lookup]) whose Provider matches the runner's
+// current model's Provider. A caller that needs a different provider family
+// starts a new session (a new Runner, built with the new model, which
+// resolves its own provider and credential) instead of mutating this one.
+//
+// Concurrency: the field write lands under the same lock [currentModel]
+// reads through, so this is race-free to call concurrently with Prompt. A
+// turn already in flight when SetModel is called completes on the model it
+// started with (Prompt reads the model once, at the top of the turn); only
+// the NEXT Prompt observes the change. Calling SetModel while a turn is in
+// flight is safe but the exact turn boundary at which the new model first
+// applies is unspecified from the caller's point of view — a caller wanting
+// deterministic behavior calls SetModel between turns (i.e. after a Prompt
+// call returns).
+func (r *Runner) SetModel(model string) error {
+	next, ok := provider.Lookup(model)
+	if !ok {
+		return fmt.Errorf("runner: unknown model %q", model)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cur, ok := provider.Lookup(r.model); ok && cur.Provider != next.Provider {
+		return fmt.Errorf("runner: cannot change model from %q (%s) to %q (%s): different provider; start a new session for a different provider instead", r.model, cur.Provider, model, next.Provider)
+	}
+	r.model = model
+	return nil
+}
 
 // setJournalWriteErr records the first journal write failure the consumer
 // goroutine observes; later failures are dropped (the first is the one that
