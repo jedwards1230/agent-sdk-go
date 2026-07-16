@@ -32,8 +32,8 @@ const defaultSubBuffer = 256
 const defaultReplay = 256
 
 // Options configures a Runner. Model, Cwd, and (for a fresh session) Root are
-// the only fields a caller normally sets; Provider, Tools, IDGen, and Clock
-// are test seams.
+// the only fields a caller normally sets; Provider, IDGen, and Clock are test
+// seams.
 type Options struct {
 	// Root is the session store's root directory (holds sessions/ and, for a
 	// real provider, auth.json). Required unless Store is set: the SDK invents
@@ -71,16 +71,27 @@ type Options struct {
 	// Provider, when set, is used instead of building a real provider from
 	// Model via auth + provider.Lookup. Test seam.
 	Provider provider.Provider
-	// Tools, when set, is used instead of the builtin tool set rooted at Cwd.
-	// Test seam.
-	Tools loop.ToolRegistry
 
-	// Store, when set, is used instead of building a store from Root. This is
-	// the seam a multi-session owner (e.g. a supervisor) uses to share one
-	// *session.FileStore across every Runner it drives: the Runner does NOT
-	// close an injected Store in Close — the caller owns its lifecycle. Tests
-	// use it too, to share a store across a Runner and out-of-band assertions.
-	Store *session.FileStore
+	// Tools, when set, fully REPLACES the builtin tool set rooted at Cwd — the
+	// runner registers exactly these tools and nothing else. Test seam, and
+	// also an embedder's escape hatch for total control over the tool surface.
+	// Mutually exclusive with ExtraTools (see resolveTools).
+	Tools loop.ToolRegistry
+	// ExtraTools, when set, is registered ADDITIVELY alongside the builtin
+	// tool set rooted at Cwd — the front door for an embedder's own
+	// domain-specific tools without giving up bash/read/edit/write/grep/glob/ls.
+	// A name colliding with a builtin, or with another ExtraTools entry, is a
+	// registration error surfaced by New/Resume. Mutually exclusive with Tools.
+	ExtraTools []tool.Tool
+
+	// Store, when set, is used instead of building a disk [session.FileStore]
+	// from Root. This is the seam a multi-session owner (e.g. a supervisor)
+	// uses to share one store across every Runner it drives: the Runner does
+	// NOT close an injected Store in Close — the caller owns its lifecycle.
+	// Tests use it too, to share a store across a Runner and out-of-band
+	// assertions. An embedder wanting an ephemeral session that writes nothing
+	// to disk passes [session.NewMemStore]().
+	Store session.Store
 }
 
 // Runner drives one session: it owns the provider, tool registry, event
@@ -99,7 +110,7 @@ type Runner struct {
 
 	broker  *event.Broker
 	journal *session.Journal
-	store   *session.FileStore
+	store   session.Store
 	// ownsStore is true when this Runner built its own store (Options.Store
 	// was nil) and so must close it in Close; false when the store was
 	// injected and its lifecycle belongs to the caller.
@@ -125,6 +136,10 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
+	tools, err := resolveTools(opts)
+	if err != nil {
+		return nil, err
+	}
 	store, err := newStore(opts)
 	if err != nil {
 		return nil, err
@@ -147,7 +162,7 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 		}
 		return nil, fmt.Errorf("runner: append session metadata: %w", err)
 	}
-	return build(opts, store, journal, prov, false), nil
+	return build(opts, store, journal, prov, tools, false), nil
 }
 
 // Resume builds a Runner around the existing journal for id, publishing
@@ -155,6 +170,10 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 // journal is opened so a credential misconfiguration fails before session.resumed.
 func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 	prov, err := resolveProvider(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	tools, err := resolveTools(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +188,7 @@ func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 		}
 		return nil, fmt.Errorf("runner: open session %s: %w", id, err)
 	}
-	return build(opts, store, journal, prov, true), nil
+	return build(opts, store, journal, prov, tools, true), nil
 }
 
 // resolveProvider returns the test-injected provider when set, else builds the
@@ -182,10 +201,33 @@ func resolveProvider(ctx context.Context, opts Options) (provider.Provider, erro
 	return newProvider(ctx, opts.Model, opts.Root)
 }
 
+// resolveTools builds the loop tool registry from opts: Tools (when set) is a
+// full replacement; otherwise the builtins rooted at Cwd plus each ExtraTools,
+// where a name colliding with a builtin (or another custom tool) is a
+// registration error rather than a silent override. Tools and ExtraTools are
+// mutually exclusive — a full replacement already includes whatever the caller
+// wants, so pairing it with additive tools is a configuration error.
+func resolveTools(opts Options) (loop.ToolRegistry, error) {
+	if opts.Tools != nil {
+		if len(opts.ExtraTools) > 0 {
+			return nil, fmt.Errorf("runner: Options.Tools (full replacement) and Options.ExtraTools (additive) are mutually exclusive")
+		}
+		return opts.Tools, nil
+	}
+	reg := tool.NewRegistry(tool.Builtins(opts.Cwd)...)
+	for _, t := range opts.ExtraTools {
+		if err := reg.Register(t); err != nil {
+			return nil, fmt.Errorf("runner: register custom tool: %w", err)
+		}
+	}
+	return loop.FromRegistry(reg), nil
+}
+
 // newStore returns the injected store when opts.Store is set (the caller
-// owns its lifecycle — see Options.Store), else builds one from opts, wiring
-// the deterministic id generator / clock test seams when set.
-func newStore(opts Options) (*session.FileStore, error) {
+// owns its lifecycle — see Options.Store), else builds a disk
+// [session.FileStore] from opts, wiring the deterministic id generator /
+// clock test seams when set.
+func newStore(opts Options) (session.Store, error) {
 	if opts.Store != nil {
 		return opts.Store, nil
 	}
@@ -206,15 +248,10 @@ func newStore(opts Options) (*session.FileStore, error) {
 	return store, nil
 }
 
-// build assembles a Runner around an already-opened journal and a resolved
-// provider: it wires the tool registry, starts the broker and its journaling
-// consumer, and (when resumed) publishes session.resumed.
-func build(opts Options, store *session.FileStore, journal *session.Journal, prov provider.Provider, resumed bool) *Runner {
-	tools := opts.Tools
-	if tools == nil {
-		tools = loop.FromRegistry(tool.NewRegistry(tool.Builtins(opts.Cwd)...))
-	}
-
+// build assembles a Runner around an already-opened journal, a resolved
+// provider, and a resolved tool registry: it starts the broker and its
+// journaling consumer, and (when resumed) publishes session.resumed.
+func build(opts Options, store session.Store, journal *session.Journal, prov provider.Provider, tools loop.ToolRegistry, resumed bool) *Runner {
 	broker := event.NewBroker(event.WithReplay(defaultReplay))
 	journalSub := broker.Subscribe(event.FilterMustDeliver, defaultSubBuffer)
 

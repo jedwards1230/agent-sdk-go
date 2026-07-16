@@ -148,6 +148,11 @@ not SDK milestones:
 - **Fleet/multi-machine is an application concern.** The SDK's only
   accommodations are already tenets: serializable transport-agnostic contract,
   globally-unique session IDs.
+- **Journals default to on-disk JSONL** (the auditability tenet);
+  `session.MemStore` is an explicit embedder opt-in for an ephemeral
+  fire-and-forget session — same fold/resume within the process, nothing
+  persisted. Code-level custom tools compose additively with builtins via
+  `runner.Options.ExtraTools`.
 
 ## Non-goals
 

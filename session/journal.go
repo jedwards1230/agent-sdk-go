@@ -4,13 +4,22 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
+
+// journalWriter is the append sink a Journal fsyncs each entry to. *os.File is
+// the on-disk implementation used by FileStore; an in-memory writer (memWriter,
+// used by MemStore) discards writes so an ephemeral session persists nothing.
+type journalWriter interface {
+	io.Writer
+	Sync() error
+	Close() error
+}
 
 // ErrEntryNotFound is returned by [Journal.Fork] when the requested fork
 // point does not exist in the journal.
@@ -37,7 +46,7 @@ type Journal struct {
 	mu      sync.Mutex
 	entries []Entry
 	byID    map[string]int
-	w       *os.File // append handle; nil once closed
+	w       journalWriter // append handle; nil once closed
 
 	idGen func() string
 	clock func() time.Time
@@ -46,7 +55,7 @@ type Journal struct {
 // newJournal constructs a Journal bound to path with pre-loaded entries
 // (from [readJournal], possibly empty) and a writable append handle.
 // Unexported: built only by a [Store]'s Create/Open.
-func newJournal(id, projectSlug, path string, entries []Entry, w *os.File, idGen func() string, clock func() time.Time) *Journal {
+func newJournal(id, projectSlug, path string, entries []Entry, w journalWriter, idGen func() string, clock func() time.Time) *Journal {
 	byID := make(map[string]int, len(entries))
 	for i, e := range entries {
 		byID[e.ID] = i
@@ -224,6 +233,18 @@ func (j *Journal) Close() error {
 		return fmt.Errorf("session: close journal %s: %w", j.id, err)
 	}
 	return nil
+}
+
+// reopen re-arms a Closed journal with a fresh append sink so an in-memory
+// store can resume it within the process. It is a no-op on a journal that is
+// still open. Only [MemStore.Open] uses it; [FileStore] resumes by rebuilding
+// a *Journal from disk instead.
+func (j *Journal) reopen(w journalWriter) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.w == nil {
+		j.w = w
+	}
 }
 
 // fold implements the pure, lock-free half of [Journal.Fold] over a snapshot
