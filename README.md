@@ -62,6 +62,17 @@ harness the golden-file tests use. Swap in `provider: anthropic` or
 `runner` package is the batteries-included alternative to hand-wiring
 loop + session yourself.
 
+An embedder's own tools compose additively with the builtins via
+`runner.Options.ExtraTools` — no need to replace bash/read/edit/etc. just to
+add one domain-specific tool:
+
+```go
+r, err := runner.New(ctx, runner.Options{
+    Cwd: cwd, Root: root, Model: "claude-sonnet-5",
+    ExtraTools: []tool.Tool{myTool}, // builtins + myTool
+})
+```
+
 ## Packages
 
 | Package | Role |
@@ -72,14 +83,17 @@ loop + session yourself.
 | `auth/` | OAuth flows + on-disk token store (`auth.json`, mode 0600) for subscription auth |
 | `loop/` | The agent loop: model calls, tool execution, hooks |
 | `tool/` | Builtin tool registry: bash/read/edit/write/grep/glob/ls |
-| `session/` | Session identity (UUIDv7), turn execution, event emission |
+| `session/` | Session identity (UUIDv7), turn execution, event emission · pluggable journal `Store`: `FileStore` (on-disk JSONL, default) and `MemStore` (in-memory, opt-in) |
 | `compose/` | Agent manifest (YAML) → wired session |
-| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`) assembling provider + tools + broker + loop + journal |
+| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`) assembling provider + tools + broker + loop + journal; `Options.ExtraTools` adds custom tools alongside the builtins, `Options.Store` swaps the journal store |
 | `acp/` | Clean-room Agent Client Protocol adapter (stdlib-only), a pure Event/Op projection; `session/new` accepts an optional `model` field |
 | `permission/` | Format-agnostic rule engine (`Rule`/`Engine`): deny > ask > allow, unmatched ⇒ ask, runtime grants |
 | `lsp/` | Server registry + JSON-RPC-over-stdio client + diagnostics seam |
 | `spill/` | Streaming per-tool-call output sink (bounded excerpt + durable on-disk file) |
 | `exec/` | Headless one-shot exec adapter (JSONL events + output-schema validation) |
+
+Journals default to on-disk JSONL for auditability; `session.MemStore` is the
+opt-in for an ephemeral session that leaves no trace.
 
 Planned: `skill/`, `plugin/`, `mcp/` (M4).
 

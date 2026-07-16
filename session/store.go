@@ -33,6 +33,10 @@ type Store interface {
 	List(ctx context.Context, projectSlug string) ([]string, error)
 	// Close releases any resources the store holds (e.g. its journal cache).
 	Close() error
+	// Root returns the store's root directory — the base that portable,
+	// root-relative tool-output spill paths are resolved against. An in-memory
+	// store that persists nothing returns "".
+	Root() string
 }
 
 // ErrInvalidSlug indicates a project slug cannot safely be used as a single
