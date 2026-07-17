@@ -5,7 +5,43 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
+	"github.com/jedwards1230/agent-sdk-go/provider"
 )
+
+// TestTurnFinishedContextWindow asserts the additive ContextWindow field
+// serializes as "context_window" when set and, being omitempty, leaves the
+// payload unchanged (no key) when zero.
+func TestTurnFinishedContextWindow(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		ev := event.NewTurnFinished(sid, "end_turn", provider.Usage{})
+		ev.ContextWindow = 200_000
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got, want := m["context_window"], float64(200_000); got != want {
+			t.Errorf("context_window = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("zero omitted", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewTurnFinished(sid, "end_turn", provider.Usage{}))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if _, ok := m["context_window"]; ok {
+			t.Errorf("context_window present for zero value: %s", raw)
+		}
+	})
+}
 
 // TestMessageUserRoundTrip asserts MessageUser is just another MessageKind
 // value: it round-trips through the MessageStarted/MessageDelta/MessageFinished

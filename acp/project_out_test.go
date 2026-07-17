@@ -9,6 +9,13 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
+// turnFinishedWithWindow stamps a model context-window size onto a TurnFinished,
+// as the loop/session emitters do via provider.Lookup.
+func turnFinishedWithWindow(e event.TurnFinished, window int) event.TurnFinished {
+	e.ContextWindow = window
+	return e
+}
+
 func TestToSessionUpdate(t *testing.T) {
 	const sid = "sess-1"
 
@@ -91,6 +98,32 @@ func TestToSessionUpdate(t *testing.T) {
 		{
 			name:   "turn started has no projection",
 			event:  event.NewTurnStarted(sid),
+			wantOK: false,
+		},
+		{
+			name: "turn finished with window and cost -> usage_update",
+			event: turnFinishedWithWindow(
+				event.NewTurnFinishedCost(sid, "end_turn",
+					provider.Usage{InputTokens: 100, CacheReadTokens: 20, OutputTokens: 30},
+					&provider.Cost{USD: 0.42}),
+				200_000),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"usage_update",` +
+				`"used":150,"size":200000,"cost":{"amount":0.42,"currency":"USD"}}}`,
+		},
+		{
+			name: "turn finished with window and no cost omits cost",
+			event: turnFinishedWithWindow(
+				event.NewTurnFinished(sid, "end_turn",
+					provider.Usage{InputTokens: 100, OutputTokens: 30}),
+				200_000),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"usage_update",` +
+				`"used":130,"size":200000}}`,
+		},
+		{
+			name:   "turn finished with zero context window has no projection",
+			event:  event.NewTurnFinished(sid, "end_turn", provider.Usage{InputTokens: 100, OutputTokens: 30}),
 			wantOK: false,
 		},
 		{
