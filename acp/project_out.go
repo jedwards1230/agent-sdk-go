@@ -22,9 +22,14 @@ import "github.com/jedwards1230/agent-sdk-go/event"
 // An [event.TurnFinished] projects to a usage_update carrying the tokens now in
 // context, the model's total context-window size, and (when priced) the turn's
 // cost — but ONLY when the model's context window is known
-// (ev.ContextWindow > 0). A turn from an unregistered/faux model (window 0) has
-// no window to report, so it yields ok=false. This is additive: TurnFinished
-// still independently drives [ToPromptResponse].
+// (ev.ContextWindow > 0) AND the turn captured genuine usage (used > 0). A turn
+// from an unregistered/faux model (window 0) has no window to report; a turn
+// that terminated without real usage (max-turns cap, fail-closed, a partial or
+// zero usage carried through the loop's error paths) still stamps the window but
+// has no tokens to report — reporting used:0 alongside a full context window
+// would make a client's meter read "0 / 200k" precisely when context is full or
+// truncated. Both cases yield ok=false. This is additive: TurnFinished still
+// independently drives [ToPromptResponse].
 func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool) {
 	switch ev := e.(type) {
 	case event.MessageDelta:
@@ -95,14 +100,23 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 		// ≈ the tokens now occupying the context. Clamp a (never-expected)
 		// negative sum to 0 before the uint64 conversion.
 		used := ev.Usage.InputTokens + ev.Usage.CacheReadTokens + ev.Usage.OutputTokens
-		if used < 0 {
-			used = 0
+		if used <= 0 {
+			// No genuine usage captured. A real turn always consumes input
+			// tokens, so used<=0 means this TurnFinished came from a path that
+			// stamped the context window onto an empty/partial Usage (max-turns
+			// cap, fail-closed, or a zeroed loop error path). Skip rather than
+			// project a misleading used:0 against a full window.
+			return SessionNotification{}, false
 		}
 		update := UsageUpdate{
 			Used: uint64(used),
 			Size: uint64(ev.ContextWindow),
 		}
 		if ev.Cost != nil {
+			// NOTE: the UsageUpdate schema documents cost as "cumulative session
+			// cost", but this maps the per-turn cost (ev.Cost.USD). The
+			// divergence is known and intentional for now; surfacing a running
+			// session total is a separate follow-up.
 			update.Cost = &Cost{Amount: ev.Cost.USD, Currency: "USD"}
 		}
 		return SessionNotification{SessionID: sessionID, Update: update}, true
