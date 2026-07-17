@@ -127,6 +127,16 @@ func TestToSessionUpdate(t *testing.T) {
 			wantOK: false,
 		},
 		{
+			// Max-turns cap / fail-closed paths stamp the context window onto a
+			// zero-value Usage. A used:0 usage_update against a full window would
+			// misreport "0 / 200k", so the projection skips instead.
+			name: "turn finished with window but zero usage has no projection",
+			event: turnFinishedWithWindow(
+				event.NewTurnFinished(sid, "max_turns", provider.Usage{}),
+				200_000),
+			wantOK: false,
+		},
+		{
 			name:   "session created has no projection",
 			event:  event.NewSessionCreated(sid),
 			wantOK: false,
