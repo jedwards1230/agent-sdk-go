@@ -284,10 +284,16 @@ type TurnFinished struct {
 	// Cost is the turn's priced cost, or nil when the model is not in the
 	// pricing registry (e.g. the faux provider).
 	Cost *provider.Cost
+	// ContextWindow is the model's total context-window size in tokens, or 0
+	// when unknown (an unregistered model, or no model). It is sourced from the
+	// model registry (provider.Lookup) at emit time, alongside pricing; a
+	// consumer projecting context-usage state reads it here.
+	ContextWindow int
 }
 
 // NewTurnFinished builds a turn.finished event without a cost. Use
-// [NewTurnFinishedCost] to attach a priced cost.
+// [NewTurnFinishedCost] to attach a priced cost, or set ContextWindow directly
+// on the returned value to carry the model's context-window size.
 func NewTurnFinished(session, stopReason string, usage provider.Usage) TurnFinished {
 	return TurnFinished{meta: meta{session: session}, StopReason: stopReason, Usage: usage}
 }
@@ -304,14 +310,17 @@ func (TurnFinished) Kind() string { return KindTurnFinished }
 // Tier returns TierMustDeliver.
 func (TurnFinished) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {stop_reason, usage, cost?}.
+// MarshalJSON encodes the envelope plus {stop_reason, usage, cost?,
+// context_window?}. context_window is omitempty so a zero value (unknown /
+// unregistered model) leaves the payload identical to a turn with no window.
 func (e TurnFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
-		StopReason string         `json:"stop_reason"`
-		Usage      provider.Usage `json:"usage"`
-		Cost       *provider.Cost `json:"cost,omitempty"`
-	}{baseEnvelope(e), e.StopReason, e.Usage, e.Cost})
+		StopReason    string         `json:"stop_reason"`
+		Usage         provider.Usage `json:"usage"`
+		Cost          *provider.Cost `json:"cost,omitempty"`
+		ContextWindow int            `json:"context_window,omitempty"`
+	}{baseEnvelope(e), e.StopReason, e.Usage, e.Cost, e.ContextWindow})
 }
 
 func (e TurnFinished) withMeta(seq uint64, ts time.Time) Event {

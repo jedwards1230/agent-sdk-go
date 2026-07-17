@@ -228,6 +228,10 @@ func (s *Session) Prompt(ctx context.Context, text string) error {
 		s.broker.Publish(event.NewSessionError(s.id, "provider stream ended without a finished event", false))
 		stop = string(provider.StopError)
 	}
-	s.broker.Publish(event.NewTurnFinished(s.id, stop, usage))
+	tf := event.NewTurnFinished(s.id, stop, usage)
+	if info, ok := provider.Lookup(s.model); ok {
+		tf.ContextWindow = info.ContextWindow
+	}
+	s.broker.Publish(tf)
 	return nil
 }

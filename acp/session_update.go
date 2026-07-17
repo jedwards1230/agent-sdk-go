@@ -85,3 +85,46 @@ func (AgentThoughtChunk) Kind() string { return "agent_thought_chunk" }
 func (c AgentThoughtChunk) MarshalJSON() ([]byte, error) {
 	return contentChunk{kind: c.Kind(), Content: c.Content}.marshal()
 }
+
+// Cost is a priced monetary amount in a single ISO 4217 currency, as carried by
+// a [UsageUpdate]. It is the ACP v1 Cost object.
+type Cost struct {
+	// Amount is the cost's value in the currency's major unit.
+	Amount float64
+	// Currency is the ISO 4217 currency code (e.g. "USD").
+	Currency string
+}
+
+// MarshalJSON encodes {"amount":...,"currency":...}.
+func (c Cost) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Amount   float64 `json:"amount"`
+		Currency string  `json:"currency"`
+	}{c.Amount, c.Currency})
+}
+
+// UsageUpdate reports a session's current context-window usage as a
+// session/update variant: how many tokens currently occupy the context out of
+// the model's total window, and optionally the turn's cost.
+type UsageUpdate struct {
+	// Used is the number of tokens currently in context.
+	Used uint64
+	// Size is the model's total context-window size in tokens.
+	Size uint64
+	// Cost is the priced cost, or nil when unpriced.
+	Cost *Cost
+}
+
+// Kind returns "usage_update".
+func (UsageUpdate) Kind() string { return "usage_update" }
+
+// MarshalJSON encodes the tagged usage_update session/update payload
+// {"sessionUpdate":"usage_update","used":...,"size":...,"cost"?:...}.
+func (u UsageUpdate) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		SessionUpdate string `json:"sessionUpdate"`
+		Used          uint64 `json:"used"`
+		Size          uint64 `json:"size"`
+		Cost          *Cost  `json:"cost,omitempty"`
+	}{u.Kind(), u.Used, u.Size, u.Cost})
+}

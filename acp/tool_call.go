@@ -31,10 +31,10 @@ const (
 )
 
 // ToolCallContent is a tagged union of tool call output kinds. This package
-// fully models only the "content" variant (a wrapped [ContentBlock]), which is
-// the one the outbound projection emits; ACP v1 additionally defines "diff"
-// and "terminal" variants that carry a patch or an embedded terminal
-// reference, unmodeled here.
+// models the three ACP v1 variants: "content" (a wrapped [ContentBlock], the
+// one the outbound projection emits), "diff" (a file patch), and "terminal" (an
+// embedded terminal reference). These are emit-side types; the package does not
+// unmarshal a ToolCallContent union.
 type ToolCallContent interface {
 	// Type returns the variant's "type" discriminator.
 	Type() string
@@ -58,6 +58,49 @@ func (c ToolCallContentBlock) MarshalJSON() ([]byte, error) {
 		Type    string       `json:"type"`
 		Content ContentBlock `json:"content"`
 	}{c.Type(), c.Content})
+}
+
+// ToolCallContentDiff is a file patch produced by a tool call. It is the ACP
+// "diff" variant.
+type ToolCallContentDiff struct {
+	// Path is the path of the file being changed.
+	Path string
+	// OldText is the file's prior content, or empty when the file is new
+	// (omitted from the wire payload).
+	OldText string
+	// NewText is the file's resulting content.
+	NewText string
+}
+
+// Type returns "diff".
+func (ToolCallContentDiff) Type() string { return "diff" }
+
+// MarshalJSON encodes {"type":"diff","path":...,"oldText"?:...,"newText":...}.
+func (c ToolCallContentDiff) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type    string `json:"type"`
+		Path    string `json:"path"`
+		OldText string `json:"oldText,omitempty"`
+		NewText string `json:"newText"`
+	}{c.Type(), c.Path, c.OldText, c.NewText})
+}
+
+// ToolCallContentTerminal references an embedded terminal a tool call is driving.
+// It is the ACP "terminal" variant.
+type ToolCallContentTerminal struct {
+	// TerminalID identifies the embedded terminal.
+	TerminalID string
+}
+
+// Type returns "terminal".
+func (ToolCallContentTerminal) Type() string { return "terminal" }
+
+// MarshalJSON encodes {"type":"terminal","terminalId":...}.
+func (c ToolCallContentTerminal) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Type       string `json:"type"`
+		TerminalID string `json:"terminalId"`
+	}{c.Type(), c.TerminalID})
 }
 
 // ToolCall announces a new tool invocation as a session/update payload. Build

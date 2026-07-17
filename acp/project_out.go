@@ -18,6 +18,13 @@ import "github.com/jedwards1230/agent-sdk-go/event"
 //     one per delta.
 //   - session.* / turn.started / permission.*: outside the session/update
 //     surface (permission.* projects via [ToRequestPermission] instead).
+//
+// An [event.TurnFinished] projects to a usage_update carrying the tokens now in
+// context, the model's total context-window size, and (when priced) the turn's
+// cost — but ONLY when the model's context window is known
+// (ev.ContextWindow > 0). A turn from an unregistered/faux model (window 0) has
+// no window to report, so it yields ok=false. This is additive: TurnFinished
+// still independently drives [ToPromptResponse].
 func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool) {
 	switch ev := e.(type) {
 	case event.MessageDelta:
@@ -77,6 +84,28 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 			SessionID: sessionID,
 			Update:    ToolCallUpdated{ToolCallID: ev.ID, Fields: fields},
 		}, true
+
+	case event.TurnFinished:
+		// A faux/unregistered-model turn has no known context window; there is
+		// nothing to report, so skip it.
+		if ev.ContextWindow <= 0 {
+			return SessionNotification{}, false
+		}
+		// used = the full prompt (input + cache-read) plus the generated output
+		// ≈ the tokens now occupying the context. Clamp a (never-expected)
+		// negative sum to 0 before the uint64 conversion.
+		used := ev.Usage.InputTokens + ev.Usage.CacheReadTokens + ev.Usage.OutputTokens
+		if used < 0 {
+			used = 0
+		}
+		update := UsageUpdate{
+			Used: uint64(used),
+			Size: uint64(ev.ContextWindow),
+		}
+		if ev.Cost != nil {
+			update.Cost = &Cost{Amount: ev.Cost.USD, Currency: "USD"}
+		}
+		return SessionNotification{SessionID: sessionID, Update: update}, true
 
 	default:
 		return SessionNotification{}, false

@@ -305,13 +305,19 @@ func (r *runner) callModel(ctx context.Context, msgs []provider.Message) (provid
 	return assistant, conv.calls, conv.usage, stop, nil
 }
 
-// turnFinished builds a turn.finished event, pricing the usage when the model is
-// in the registry.
+// turnFinished builds a turn.finished event, pricing the usage and stamping the
+// model's context-window size when the model is in the registry.
 func (r *runner) turnFinished(stop provider.StopReason, usage provider.Usage) event.TurnFinished {
+	var ev event.TurnFinished
 	if cost, ok := provider.CostOf(r.cfg.Model, usage); ok {
-		return event.NewTurnFinishedCost(r.cfg.SessionID, string(stop), usage, &cost)
+		ev = event.NewTurnFinishedCost(r.cfg.SessionID, string(stop), usage, &cost)
+	} else {
+		ev = event.NewTurnFinished(r.cfg.SessionID, string(stop), usage)
 	}
-	return event.NewTurnFinished(r.cfg.SessionID, string(stop), usage)
+	if info, ok := provider.Lookup(r.cfg.Model); ok {
+		ev.ContextWindow = info.ContextWindow
+	}
+	return ev
 }
 
 // runTools executes each requested tool call (through the hooks), spilling its
