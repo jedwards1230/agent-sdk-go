@@ -123,6 +123,38 @@ func TestSetConfigOptionRequestUnmarshalMissingRequired(t *testing.T) {
 	}
 }
 
+func TestSetConfigOptionRequestUnmarshalMalformedValue(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "number value in select branch errors",
+			data: `{"sessionId":"s","configId":"model","value":123}`,
+		},
+		{
+			name: "object value in select branch errors",
+			data: `{"sessionId":"s","configId":"model","value":{"nested":true}}`,
+		},
+		{
+			name: "non-bool value in boolean branch errors",
+			data: `{"sessionId":"s","configId":"brave_mode","type":"boolean","value":"notabool"}`,
+		},
+		{
+			name: "number value in boolean branch errors",
+			data: `{"sessionId":"s","configId":"brave_mode","type":"boolean","value":123}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var req acp.SetConfigOptionRequest
+			if err := json.Unmarshal([]byte(tc.data), &req); err == nil {
+				t.Fatalf("Unmarshal(%s): want decode error, got nil (req = %+v)", tc.data, req)
+			}
+		})
+	}
+}
+
 func TestSetConfigOptionRequestRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -322,6 +354,22 @@ func TestSetConfigOptionResponseUnmarshalSkipsInvalid(t *testing.T) {
 			wantIDs: []string{"brave_mode", "model"},
 		},
 		{
+			name: "malformed currentValue entry is dropped, known kept",
+			data: `{"configOptions":[` +
+				`{"id":"brave_mode","name":"Brave Mode","type":"boolean","currentValue":"notabool"},` +
+				`{"id":"model","name":"Model","type":"select","currentValue":"m1","options":[]}` +
+				`]}`,
+			wantIDs: []string{"model"},
+		},
+		{
+			name: "non-object entry is dropped, known kept",
+			data: `{"configOptions":[` +
+				`123,` +
+				`{"id":"model","name":"Model","type":"select","currentValue":"m1","options":[]}` +
+				`]}`,
+			wantIDs: []string{"model"},
+		},
+		{
 			name:    "empty options decodes to empty slice",
 			data:    `{"configOptions":[]}`,
 			wantIDs: []string{},
@@ -345,6 +393,34 @@ func TestSetConfigOptionResponseUnmarshalSkipsInvalid(t *testing.T) {
 					t.Errorf("ids = %v, want %v", gotIDs, tc.wantIDs)
 					break
 				}
+			}
+		})
+	}
+}
+
+func TestSetConfigOptionResponseUnmarshalMalformed(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "configOptions not an array errors",
+			data: `{"configOptions":"notanarray"}`,
+		},
+		{
+			name: "configOptions is an object errors",
+			data: `{"configOptions":{"id":"x"}}`,
+		},
+		{
+			name: "truncated json errors",
+			data: `{"configOptions":[`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp acp.SetConfigOptionResponse
+			if err := json.Unmarshal([]byte(tc.data), &resp); err == nil {
+				t.Fatalf("Unmarshal(%s): want decode error, got nil (resp = %+v)", tc.data, resp)
 			}
 		})
 	}
