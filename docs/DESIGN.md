@@ -401,6 +401,9 @@ consume it unchanged, and only as a mapping, never a built-in behavior.
 - **Outbound** (`event.Event` → `session/update`): `ToSessionUpdate` projects
   message/tool-call/permission events to ACP notifications; content blocks
   (`content_block.go`) and tool-call content (`tool_call.go`) carry the payload.
+  It also projects the one session-metadata event, `session.info`
+  (`event.SessionInfoUpdated`), to a `session_info_update` carrying the session
+  `title` (+ `updatedAt` from the event's publish timestamp).
 - **Inbound** (JSON-RPC method + params → `event.Op`): `DecodeOp` routes the
   four op-bearing methods — `session/prompt`→`PromptSend`, `session/cancel`→
   `TurnInterrupt`, `session/new`→`SessionNew`, `session/load`→`SessionResume`
@@ -455,9 +458,12 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
 - **Model discovery types** — the types backing gofer's native list-models
   endpoint that feeds the `session/new` model picker (migrate to `providers/
   list` only once that spec surface stabilizes).
-- **Capability modeling for the stretch set** — `session_info_update` (needs
-  session titles), `plan` (needs a plan concept), and the
-  `available_commands_update`/`current_mode_update`/`config_option_update`
+- **Capability modeling for the stretch set** — `session_info_update` **ships**:
+  `session.Session` carries an embedder-set `title` (`SetTitle`/`Title`), a
+  `SetTitle` change emits the must-deliver `session.info` event, and
+  `ToSessionUpdate` projects it to a `session_info_update`. Title *generation*
+  stays in the embedder (gofer). Still stretch: `plan` (needs a plan concept)
+  and the `available_commands_update`/`current_mode_update`/`config_option_update`
   registries — modeled as they acquire a stable spec surface and a producer.
 
 ## Session tree & spawn seam (design-ahead, M5)

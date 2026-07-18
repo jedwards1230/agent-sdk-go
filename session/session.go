@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,20 @@ type Session struct {
 	provider  provider.Provider
 	broker    *event.Broker
 	subBuffer int
+
+	// titleWriteMu serializes the whole SetTitle sequence (compare → set →
+	// publish) so concurrent writers publish in change-order: the event a
+	// writer publishes always reflects the field value it just wrote, and the
+	// last-delivered session.info title matches the final Title(). Only writers
+	// take it — Title() readers do not — so a backpressured publish under it
+	// never blocks a reader.
+	titleWriteMu sync.Mutex
+	// mu guards title, the session's only mutable metadata, for readers.
+	// SetTitle may be called from a goroutine other than the one driving
+	// Prompt, so the field is synchronized independently of the single-turn
+	// Prompt guarantee.
+	mu    sync.Mutex
+	title string
 }
 
 // config holds constructor options.
@@ -114,6 +129,46 @@ func (s *Session) ID() string { return s.id }
 
 // Model returns the model bound to the session.
 func (s *Session) Model() string { return s.model }
+
+// Title returns the session's current human-readable title, or "" if none has
+// been set. The title is embedder-supplied metadata (see [Session.SetTitle]);
+// the SDK never generates it.
+func (s *Session) Title() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.title
+}
+
+// SetTitle updates the session's human-readable title and, when the value
+// actually changes, publishes a must-deliver session.info event so subscribers
+// (e.g. an ACP client) observe the new title live. Setting the title to its
+// current value is a no-op: no spurious event is emitted, and a session whose
+// title is never set emits none at all.
+//
+// Title generation is application business logic. An embedder derives a title
+// from the first user prompt, an LLM summary, or a user rename and calls
+// SetTitle; the SDK only carries the value and broadcasts the change.
+func (s *Session) SetTitle(title string) {
+	// titleWriteMu makes the whole compare → set → publish sequence atomic
+	// against other writers: a concurrent SetTitle can neither slip its field
+	// write between this one's compare and set, nor race this one's Publish for
+	// the broker seq. So publishes land in the same order the field changes,
+	// and the last-delivered session.info always agrees with Title().
+	s.titleWriteMu.Lock()
+	defer s.titleWriteMu.Unlock()
+
+	s.mu.Lock()
+	if title == s.title {
+		s.mu.Unlock()
+		return
+	}
+	s.title = title
+	s.mu.Unlock()
+	// Publish under titleWriteMu (ordering) but NOT under s.mu: a must-deliver
+	// publish can block on backpressure, and holding s.mu across it would
+	// serialize Title() readers against that blocking. Readers take only s.mu.
+	s.broker.Publish(event.NewSessionInfoUpdated(s.id, title))
+}
 
 // Subscribe returns a subscription for events matching filter. session.created
 // and other retained must-deliver events are replayed to late subscribers.

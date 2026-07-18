@@ -3,6 +3,7 @@ package acp_test
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -166,6 +167,15 @@ func TestToSessionUpdate(t *testing.T) {
 			event:  event.NewSessionCreated(sid),
 			wantOK: false,
 		},
+		{
+			// A bare (unpublished) event has a zero Time, so updatedAt is omitted;
+			// TestToSessionUpdateSessionInfoTimestamp covers the stamped case.
+			name:   "session info updated -> session_info_update",
+			event:  event.NewSessionInfoUpdated(sid, "Debug authentication timeout"),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"session_info_update",` +
+				`"title":"Debug authentication timeout"}}`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,6 +193,31 @@ func TestToSessionUpdate(t *testing.T) {
 			assertJSONEqual(t, data, tc.wantJSON)
 		})
 	}
+}
+
+// TestToSessionUpdateSessionInfoTimestamp asserts a session.info that has been
+// through a broker projects updatedAt from the event's publish timestamp.
+func TestToSessionUpdateSessionInfoTimestamp(t *testing.T) {
+	fixed := time.Date(2025, 1, 15, 12, 34, 56, 0, time.UTC)
+	b := event.NewBroker(event.WithClock(func() time.Time { return fixed }))
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 8)
+	defer sub.Close()
+
+	b.Publish(event.NewSessionInfoUpdated("sess-1", "Debug authentication timeout"))
+	ev := <-sub.C
+
+	got, ok := acp.ToSessionUpdate("sess-1", ev)
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	data, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"sessionId":"sess-1","update":{"sessionUpdate":"session_info_update",` +
+		`"title":"Debug authentication timeout","updatedAt":"2025-01-15T12:34:56Z"}}`
+	assertJSONEqual(t, data, want)
 }
 
 func TestToSessionUpdateToolCallFinishedError(t *testing.T) {

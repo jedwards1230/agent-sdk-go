@@ -210,6 +210,44 @@ func (e SessionArchived) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
+// SessionInfoUpdated is emitted when a session's mutable metadata changes —
+// currently its human-readable title. It is the seam an embedder uses to push
+// a session title to clients live (it projects to an ACP session_info_update).
+//
+// The title itself is application business logic: the embedder derives it from
+// the first user prompt, an LLM summary, or a user rename, then calls
+// [session.Session.SetTitle]. The SDK only carries and broadcasts the value —
+// it never generates one.
+type SessionInfoUpdated struct {
+	meta
+	Title string
+}
+
+// NewSessionInfoUpdated builds a session.info event carrying the session's new
+// title.
+func NewSessionInfoUpdated(session, title string) SessionInfoUpdated {
+	return SessionInfoUpdated{meta: meta{session: session}, Title: title}
+}
+
+// Kind returns KindSessionInfo.
+func (SessionInfoUpdated) Kind() string { return KindSessionInfo }
+
+// Tier returns TierMustDeliver.
+func (SessionInfoUpdated) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {title}.
+func (e SessionInfoUpdated) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		Title string `json:"title"`
+	}{baseEnvelope(e), e.Title})
+}
+
+func (e SessionInfoUpdated) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
 // SessionError reports an error within a session. Fatal marks errors that end
 // the session.
 type SessionError struct {

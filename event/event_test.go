@@ -8,6 +8,39 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
+// TestSessionInfoUpdatedMarshal asserts the additive session.info event carries
+// its title on the wire, is must-deliver, and reports the right kind.
+func TestSessionInfoUpdatedMarshal(t *testing.T) {
+	ev := event.NewSessionInfoUpdated(sid, "Debug auth timeout")
+	if ev.Kind() != event.KindSessionInfo {
+		t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionInfo)
+	}
+	if ev.Tier() != event.TierMustDeliver {
+		t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+	}
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m struct {
+		Type      string `json:"type"`
+		SessionID string `json:"session_id"`
+		Title     string `json:"title"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m.Type != event.KindSessionInfo {
+		t.Errorf("type = %q, want %q", m.Type, event.KindSessionInfo)
+	}
+	if m.SessionID != sid {
+		t.Errorf("session_id = %q, want %q", m.SessionID, sid)
+	}
+	if m.Title != "Debug auth timeout" {
+		t.Errorf("title = %q, want %q", m.Title, "Debug auth timeout")
+	}
+}
+
 // TestTurnFinishedContextWindow asserts the additive ContextWindow field
 // serializes as "context_window" when set and, being omitempty, leaves the
 // payload unchanged (no key) when zero.

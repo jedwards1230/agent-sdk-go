@@ -1,6 +1,10 @@
 package acp
 
-import "github.com/jedwards1230/agent-sdk-go/event"
+import (
+	"time"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+)
 
 // ToSessionUpdate projects one [event.Event] to a session/update notification.
 // ok is false when the event has no ACP projection:
@@ -16,8 +20,11 @@ import "github.com/jedwards1230/agent-sdk-go/event"
 //     a tool_call_update; a daemon that wants to stream tool output can emit
 //     tool_call_update updates itself, but this projection does not synthesize
 //     one per delta.
-//   - session.* / turn.started / permission.*: outside the session/update
-//     surface (permission.* projects via [ToRequestPermission] instead).
+//   - session lifecycle (session.created/resumed/…) / turn.started /
+//     permission.*: outside the session/update surface (permission.* projects
+//     via [ToRequestPermission] instead). session.info is the one session.*
+//     event that DOES project — to a session_info_update carrying the new
+//     title (below).
 //
 // An [event.TurnFinished] projects to a usage_update carrying the tokens now in
 // context, the model's total context-window size, and (when priced) the turn's
@@ -134,6 +141,17 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 			// divergence is known and intentional for now; surfacing a running
 			// session total is a separate follow-up.
 			update.Cost = &Cost{Amount: ev.Cost.USD, Currency: "USD"}
+		}
+		return SessionNotification{SessionID: sessionID, Update: update}, true
+
+	case event.SessionInfoUpdated:
+		// session.info carries the session's new title. updatedAt is the event's
+		// own publish timestamp — the natural "changed at" the broker already
+		// stamps — omitted when the event has not been through a broker (a zero
+		// time).
+		update := SessionInfoUpdate{Title: ev.Title}
+		if t := ev.Time(); !t.IsZero() {
+			update.UpdatedAt = t.UTC().Format(time.RFC3339Nano)
 		}
 		return SessionNotification{SessionID: sessionID, Update: update}, true
 
