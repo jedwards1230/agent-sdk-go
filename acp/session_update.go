@@ -96,6 +96,52 @@ func (u SessionInfoUpdate) MarshalJSON() ([]byte, error) {
 	}{u.Kind(), u.Title, u.UpdatedAt})
 }
 
+// PlanEntry is one item in an agent's task plan: what the step is, its priority,
+// and its status. It is the ACP v1 PlanEntry object carried by a [Plan] update;
+// all three fields are required by the schema.
+type PlanEntry struct {
+	// Content is the human-readable description of the task.
+	Content string
+	// Priority is one of "high", "medium", "low".
+	Priority string
+	// Status is one of "pending", "in_progress", "completed".
+	Status string
+}
+
+// MarshalJSON encodes {content, priority, status}.
+func (e PlanEntry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Content  string `json:"content"`
+		Priority string `json:"priority"`
+		Status   string `json:"status"`
+	}{e.Content, e.Priority, e.Status})
+}
+
+// Plan is the `plan` session/update variant: the agent's current task plan as an
+// ordered checklist of entries. The agent advertises the full plan on each
+// update (not a delta), so a client renders it as a live to-do list. An empty
+// plan marshals to an empty entries array — a valid "plan cleared" state, not an
+// absent field.
+type Plan struct {
+	// Entries is the full current plan, in order.
+	Entries []PlanEntry
+}
+
+// Kind returns "plan".
+func (Plan) Kind() string { return "plan" }
+
+// MarshalJSON encodes the tagged plan session/update payload.
+func (p Plan) MarshalJSON() ([]byte, error) {
+	entries := p.Entries
+	if entries == nil {
+		entries = []PlanEntry{}
+	}
+	return json.Marshal(struct {
+		SessionUpdate string      `json:"sessionUpdate"`
+		Entries       []PlanEntry `json:"entries"`
+	}{p.Kind(), entries})
+}
+
 // AgentThoughtChunk carries an incremental chunk of agent reasoning.
 type AgentThoughtChunk struct {
 	// Content is the chunk's content block.

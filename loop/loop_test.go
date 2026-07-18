@@ -247,6 +247,82 @@ func TestToolCallFinishedCarriesEdits(t *testing.T) {
 	}
 }
 
+// drainPlan collects every plan event queued on sub.
+func drainPlan(sub *event.Subscription) []event.PlanUpdated {
+	var out []event.PlanUpdated
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				return out
+			}
+			if pu, is := e.(event.PlanUpdated); is {
+				out = append(out, pu)
+			}
+		default:
+			return out
+		}
+	}
+}
+
+// TestPlanToolEmitsPlanEvent proves a tool that returns a plan snapshot on its
+// result drives a distinct must-deliver plan event carrying the entries, while
+// its tool.call.finished still fires as usual.
+func TestPlanToolEmitsPlanEvent(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	plan := []event.PlanEntry{
+		{Content: "Read the code", Priority: "high", Status: "completed"},
+		{Content: "Write the fix", Priority: "medium", Status: "in_progress"},
+	}
+	tool := &fakeTool{name: "update_plan", result: loop.ToolResult{Content: "Plan updated: 2 entries.", Plan: plan}}
+	cfg := baseConfig(b, scripted(
+		toolTurn("t1", "update_plan", `{"entries":[]}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	plans := drainPlan(sub)
+	if len(plans) != 1 {
+		t.Fatalf("want 1 plan event, got %d", len(plans))
+	}
+	if plans[0].Tier() != event.TierMustDeliver {
+		t.Errorf("plan Tier = %v, want must-deliver", plans[0].Tier())
+	}
+	if !reflect.DeepEqual(plans[0].Entries, plan) {
+		t.Errorf("plan entries = %+v, want %+v", plans[0].Entries, plan)
+	}
+}
+
+// TestNonPlanToolEmitsNoPlanEvent proves an ordinary tool (nil result Plan)
+// drives no plan event — a new builtin must not perturb existing streams.
+func TestNonPlanToolEmitsNoPlanEvent(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "pong"}}
+	cfg := baseConfig(b, scripted(
+		toolTurn("t1", "echo", `{}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if plans := drainPlan(sub); len(plans) != 0 {
+		t.Fatalf("want 0 plan events for a non-plan tool, got %d", len(plans))
+	}
+}
+
 func TestUnknownToolIsError(t *testing.T) {
 	b := event.NewBroker()
 	defer b.Close()

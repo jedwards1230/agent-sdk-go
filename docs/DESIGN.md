@@ -403,7 +403,9 @@ consume it unchanged, and only as a mapping, never a built-in behavior.
   (`content_block.go`) and tool-call content (`tool_call.go`) carry the payload.
   It also projects the one session-metadata event, `session.info`
   (`event.SessionInfoUpdated`), to a `session_info_update` carrying the session
-  `title` (+ `updatedAt` from the event's publish timestamp).
+  `title` (+ `updatedAt` from the event's publish timestamp), and the `plan`
+  event (`event.PlanUpdated`) to a `plan` update carrying the agent's full
+  task-plan `entries`.
 - **Inbound** (JSON-RPC method + params → `event.Op`): `DecodeOp` routes the
   four op-bearing methods — `session/prompt`→`PromptSend`, `session/cancel`→
   `TurnInterrupt`, `session/new`→`SessionNew`, `session/load`→`SessionResume`
@@ -462,8 +464,11 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   `session.Session` carries an embedder-set `title` (`SetTitle`/`Title`), a
   `SetTitle` change emits the must-deliver `session.info` event, and
   `ToSessionUpdate` projects it to a `session_info_update`. Title *generation*
-  stays in the embedder (gofer). Still stretch: `plan` (needs a plan concept)
-  and the `available_commands_update`/`current_mode_update`/`config_option_update`
+  stays in the embedder (gofer). `plan` **ships**: the `update_plan` builtin tool
+  lets the model publish its full task plan; the loop bridges the tool result to
+  a must-deliver `plan` event (`event.PlanUpdated`), and `ToSessionUpdate`
+  projects it to a `plan` update. Still stretch: the
+  `available_commands_update`/`current_mode_update`/`config_option_update`
   registries — modeled as they acquire a stable spec surface and a producer.
 
 ## Session tree & spawn seam (design-ahead, M5)

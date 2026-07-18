@@ -75,6 +75,12 @@ type Metadata struct {
 	// structured diff and never enters the model's context. The edit and write
 	// tools set it.
 	FileChange *FileChange
+	// Plan, when non-nil, is the agent's full current task plan as an
+	// authoritative snapshot: the loop emits it as a plan event (which projects
+	// to an ACP `plan` session/update). The update_plan tool sets it; a non-nil
+	// but empty slice is a valid "plan cleared" snapshot. It never enters the
+	// model's context.
+	Plan []PlanEntry
 	// Extra holds tool-specific structured fields for clients that want them.
 	Extra map[string]any
 }

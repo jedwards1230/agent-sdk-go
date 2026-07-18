@@ -176,6 +176,24 @@ func TestToSessionUpdate(t *testing.T) {
 			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"session_info_update",` +
 				`"title":"Debug authentication timeout"}}`,
 		},
+		{
+			name: "plan -> plan session/update",
+			event: event.NewPlanUpdated(sid, []event.PlanEntry{
+				{Content: "Read the code", Priority: "high", Status: "completed"},
+				{Content: "Write the fix", Priority: "medium", Status: "in_progress"},
+			}),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"plan","entries":[` +
+				`{"content":"Read the code","priority":"high","status":"completed"},` +
+				`{"content":"Write the fix","priority":"medium","status":"in_progress"}]}}`,
+		},
+		{
+			name:   "empty plan -> plan with empty entries",
+			event:  event.NewPlanUpdated(sid, nil),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"plan",` +
+				`"entries":[]}}`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

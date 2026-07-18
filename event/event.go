@@ -248,6 +248,61 @@ func (e SessionInfoUpdated) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
+// PlanEntry is one item in an agent's task plan carried by a [PlanUpdated]
+// event: what the step is, how it is prioritized, and where it stands. It
+// projects to an ACP plan entry.
+type PlanEntry struct {
+	// Content is the human-readable description of the task.
+	Content string `json:"content"`
+	// Priority is one of "high", "medium", "low".
+	Priority string `json:"priority"`
+	// Status is one of "pending", "in_progress", "completed".
+	Status string `json:"status"`
+}
+
+// PlanUpdated is emitted when the agent publishes or revises its task plan via
+// the update_plan builtin tool. Entries is the full current plan as an
+// authoritative snapshot (each call carries the whole plan, not a delta), so a
+// client renders it as a live checklist; a non-nil but empty slice is a
+// "plan cleared" snapshot. It projects to an ACP `plan` session/update.
+//
+// The plan's content is the model's business logic (the loop bridges it from
+// the update_plan tool's result); the SDK only carries and broadcasts it.
+type PlanUpdated struct {
+	meta
+	Entries []PlanEntry
+}
+
+// NewPlanUpdated builds a plan event carrying the agent's full current plan.
+func NewPlanUpdated(session string, entries []PlanEntry) PlanUpdated {
+	return PlanUpdated{meta: meta{session: session}, Entries: entries}
+}
+
+// Kind returns KindPlan.
+func (PlanUpdated) Kind() string { return KindPlan }
+
+// Tier returns TierMustDeliver: a plan snapshot is authoritative session state.
+func (PlanUpdated) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {entries}. entries is always present
+// (an empty plan marshals to []) so a client can distinguish a cleared plan
+// from an absent field.
+func (e PlanUpdated) MarshalJSON() ([]byte, error) {
+	entries := e.Entries
+	if entries == nil {
+		entries = []PlanEntry{}
+	}
+	return json.Marshal(struct {
+		envelope
+		Entries []PlanEntry `json:"entries"`
+	}{baseEnvelope(e), entries})
+}
+
+func (e PlanUpdated) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
 // SessionError reports an error within a session. Fatal marks errors that end
 // the session.
 type SessionError struct {

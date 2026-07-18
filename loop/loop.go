@@ -63,6 +63,12 @@ type ToolResult struct {
 	// the emitted tool.call.finished event so a client can render a diff. The
 	// edit and write tools populate them; other tools leave them nil.
 	Edits []event.FileEdit
+	// Plan, when non-nil, is the agent's full current task plan: the loop emits
+	// it as its own must-deliver plan event (projecting to an ACP `plan`
+	// session/update) alongside the tool.call.finished. The update_plan tool
+	// populates it; a non-nil empty slice is a valid "plan cleared" snapshot;
+	// other tools leave it nil.
+	Plan []event.PlanEntry
 	// FullResult asks the loop to feed the model this Content in full rather
 	// than the bounded spill excerpt (the read tool's escape hatch). Output is
 	// still spilled to disk regardless; only the model-facing/journaled text
@@ -354,6 +360,19 @@ func withEdits(ev event.ToolCallFinished, edits []event.FileEdit) event.ToolCall
 	return ev
 }
 
+// publishPlan emits a must-deliver plan event when a tool returned a plan
+// snapshot (the update_plan tool), so the ACP projection can surface a live
+// checklist. plan is nil for every other tool, making this a no-op; a non-nil
+// but empty slice is a valid "plan cleared" snapshot and is published. It is
+// emitted before the call's tool.call.finished so the authoritative plan state
+// lands ahead of the tool's confirmation result.
+func (r *runner) publishPlan(plan []event.PlanEntry) {
+	if plan == nil {
+		return
+	}
+	r.broker().Publish(event.NewPlanUpdated(r.cfg.SessionID, plan))
+}
+
 // runOneTool runs one resolved tool call through a per-call spill sink and emits
 // tool.call.finished. The tool's output streams into an append-only file (bash
 // writes straight through the sink; other tools return a bounded string the loop
@@ -372,11 +391,13 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// rather than crashing the loop.
 		r.emitError("spill: "+err.Error(), false)
 		res := r.execTool(ctx, call)
+		r.publishPlan(res.Plan)
 		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
 	res := r.execTool(spill.NewContext(ctx, w), call)
+	r.publishPlan(res.Plan)
 	// A tool that streamed everything into the sink (bash) returns empty content;
 	// any returned content is a bounded string the loop records through the sink.
 	if res.Content != "" {

@@ -2,15 +2,15 @@ package tool
 
 import "testing"
 
-func TestBuiltinsReturnsSevenTools(t *testing.T) {
+func TestBuiltinsReturnsEightTools(t *testing.T) {
 	dir := t.TempDir()
 	tools := Builtins(dir)
-	if len(tools) != 7 {
-		t.Fatalf("len(Builtins) = %d, want 7", len(tools))
+	if len(tools) != 8 {
+		t.Fatalf("len(Builtins) = %d, want 8", len(tools))
 	}
 	want := map[string]bool{
 		"bash": true, "read": true, "edit": true, "write": true,
-		"grep": true, "glob": true, "ls": true,
+		"grep": true, "glob": true, "ls": true, "update_plan": true,
 	}
 	for _, tl := range tools {
 		if !want[tl.Name()] {
@@ -29,10 +29,10 @@ func TestRegisterBuiltins(t *testing.T) {
 	if err := RegisterBuiltins(r, dir); err != nil {
 		t.Fatalf("RegisterBuiltins: %v", err)
 	}
-	if r.Len() != 7 {
-		t.Fatalf("registry Len = %d, want 7", r.Len())
+	if r.Len() != 8 {
+		t.Fatalf("registry Len = %d, want 8", r.Len())
 	}
-	for _, name := range []string{"bash", "read", "edit", "write", "grep", "glob", "ls"} {
+	for _, name := range []string{"bash", "read", "edit", "write", "grep", "glob", "ls", "update_plan"} {
 		if _, ok := r.Get(name); !ok {
 			t.Fatalf("registry missing tool %q", name)
 		}
