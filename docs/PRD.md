@@ -82,6 +82,7 @@ socket, or network — same messages).
 | Event | Delivery |
 |---|---|
 | `session.created / .resumed / .forked / .compacted / .killed / .archived` | must-deliver |
+| `session.info{title}` (embedder-set title change) | must-deliver |
 | `turn.started` · `turn.finished{stop_reason, usage}` | must-deliver |
 | `message.started{kind: text\|reasoning}` | must-deliver |
 | `message.delta{kind}` | **lossy tier** |

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +38,12 @@ type Session struct {
 	provider  provider.Provider
 	broker    *event.Broker
 	subBuffer int
+
+	// mu guards title, the session's only mutable metadata. SetTitle may be
+	// called from a goroutine other than the one driving Prompt, so the field
+	// is synchronized independently of the single-turn Prompt guarantee.
+	mu    sync.Mutex
+	title string
 }
 
 // config holds constructor options.
@@ -114,6 +121,38 @@ func (s *Session) ID() string { return s.id }
 
 // Model returns the model bound to the session.
 func (s *Session) Model() string { return s.model }
+
+// Title returns the session's current human-readable title, or "" if none has
+// been set. The title is embedder-supplied metadata (see [Session.SetTitle]);
+// the SDK never generates it.
+func (s *Session) Title() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.title
+}
+
+// SetTitle updates the session's human-readable title and, when the value
+// actually changes, publishes a must-deliver session.info event so subscribers
+// (e.g. an ACP client) observe the new title live. Setting the title to its
+// current value is a no-op: no spurious event is emitted, and a session whose
+// title is never set emits none at all.
+//
+// Title generation is application business logic. An embedder derives a title
+// from the first user prompt, an LLM summary, or a user rename and calls
+// SetTitle; the SDK only carries the value and broadcasts the change.
+func (s *Session) SetTitle(title string) {
+	s.mu.Lock()
+	if title == s.title {
+		s.mu.Unlock()
+		return
+	}
+	s.title = title
+	s.mu.Unlock()
+	// Publish outside the lock: a must-deliver publish can block on
+	// backpressure, and holding s.mu across it would serialize Title() readers
+	// against that blocking.
+	s.broker.Publish(event.NewSessionInfoUpdated(s.id, title))
+}
 
 // Subscribe returns a subscription for events matching filter. session.created
 // and other retained must-deliver events are replayed to late subscribers.

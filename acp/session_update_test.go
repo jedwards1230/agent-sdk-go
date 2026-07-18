@@ -29,6 +29,20 @@ func TestSessionUpdateMarshal(t *testing.T) {
 			want:   `{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"thinking"}}`,
 		},
 		{
+			name: "session_info_update",
+			update: acp.SessionInfoUpdate{
+				Title:     "Debug authentication timeout",
+				UpdatedAt: "2025-01-15T12:34:56Z",
+			},
+			want: `{"sessionUpdate":"session_info_update","title":"Debug authentication timeout",` +
+				`"updatedAt":"2025-01-15T12:34:56Z"}`,
+		},
+		{
+			name:   "session_info_update omits empty updatedAt",
+			update: acp.SessionInfoUpdate{Title: "Fix the bug"},
+			want:   `{"sessionUpdate":"session_info_update","title":"Fix the bug"}`,
+		},
+		{
 			name: "tool_call",
 			update: acp.ToolCall{
 				ToolCallID: "tc-1",

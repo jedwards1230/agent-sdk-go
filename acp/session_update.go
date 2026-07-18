@@ -72,6 +72,30 @@ func (c AgentMessageChunk) MarshalJSON() ([]byte, error) {
 	return contentChunk{kind: c.Kind(), Content: c.Content}.marshal()
 }
 
+// SessionInfoUpdate carries a change to a session's metadata — currently its
+// human-readable title and, optionally, the time it changed. It is the
+// session_info_update session/update variant; a client updates its session
+// list/title UI in place from it (the same fields [SessionInfo] carries in a
+// session/list entry).
+type SessionInfoUpdate struct {
+	// Title is the session's new human-readable title.
+	Title string
+	// UpdatedAt is an optional ISO 8601 timestamp of when the title changed.
+	UpdatedAt string
+}
+
+// Kind returns "session_info_update".
+func (SessionInfoUpdate) Kind() string { return "session_info_update" }
+
+// MarshalJSON encodes the tagged session_info_update session/update payload.
+func (u SessionInfoUpdate) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		SessionUpdate string `json:"sessionUpdate"`
+		Title         string `json:"title"`
+		UpdatedAt     string `json:"updatedAt,omitempty"`
+	}{u.Kind(), u.Title, u.UpdatedAt})
+}
+
 // AgentThoughtChunk carries an incremental chunk of agent reasoning.
 type AgentThoughtChunk struct {
 	// Content is the chunk's content block.

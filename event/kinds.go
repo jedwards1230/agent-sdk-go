@@ -23,6 +23,7 @@ const (
 	KindSessionCompacted = "session.compacted"
 	KindSessionKilled    = "session.killed"
 	KindSessionArchived  = "session.archived"
+	KindSessionInfo      = "session.info"
 
 	KindTurnStarted  = "turn.started"
 	KindTurnFinished = "turn.finished"
