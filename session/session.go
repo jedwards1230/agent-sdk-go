@@ -39,9 +39,17 @@ type Session struct {
 	broker    *event.Broker
 	subBuffer int
 
-	// mu guards title, the session's only mutable metadata. SetTitle may be
-	// called from a goroutine other than the one driving Prompt, so the field
-	// is synchronized independently of the single-turn Prompt guarantee.
+	// titleWriteMu serializes the whole SetTitle sequence (compare → set →
+	// publish) so concurrent writers publish in change-order: the event a
+	// writer publishes always reflects the field value it just wrote, and the
+	// last-delivered session.info title matches the final Title(). Only writers
+	// take it — Title() readers do not — so a backpressured publish under it
+	// never blocks a reader.
+	titleWriteMu sync.Mutex
+	// mu guards title, the session's only mutable metadata, for readers.
+	// SetTitle may be called from a goroutine other than the one driving
+	// Prompt, so the field is synchronized independently of the single-turn
+	// Prompt guarantee.
 	mu    sync.Mutex
 	title string
 }
@@ -141,6 +149,14 @@ func (s *Session) Title() string {
 // from the first user prompt, an LLM summary, or a user rename and calls
 // SetTitle; the SDK only carries the value and broadcasts the change.
 func (s *Session) SetTitle(title string) {
+	// titleWriteMu makes the whole compare → set → publish sequence atomic
+	// against other writers: a concurrent SetTitle can neither slip its field
+	// write between this one's compare and set, nor race this one's Publish for
+	// the broker seq. So publishes land in the same order the field changes,
+	// and the last-delivered session.info always agrees with Title().
+	s.titleWriteMu.Lock()
+	defer s.titleWriteMu.Unlock()
+
 	s.mu.Lock()
 	if title == s.title {
 		s.mu.Unlock()
@@ -148,9 +164,9 @@ func (s *Session) SetTitle(title string) {
 	}
 	s.title = title
 	s.mu.Unlock()
-	// Publish outside the lock: a must-deliver publish can block on
-	// backpressure, and holding s.mu across it would serialize Title() readers
-	// against that blocking.
+	// Publish under titleWriteMu (ordering) but NOT under s.mu: a must-deliver
+	// publish can block on backpressure, and holding s.mu across it would
+	// serialize Title() readers against that blocking. Readers take only s.mu.
 	s.broker.Publish(event.NewSessionInfoUpdated(s.id, title))
 }
 

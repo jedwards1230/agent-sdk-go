@@ -1,6 +1,8 @@
 package session_test
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,6 +89,64 @@ func TestSetTitleIdempotent(t *testing.T) {
 
 	if got := nextInfo(t, sub).Title; got != "B" {
 		t.Errorf("next title = %q, want B (redundant set leaked an event)", got)
+	}
+}
+
+// TestSetTitleConcurrentNoStranding asserts that under concurrent SetTitle
+// writers the LAST delivered session.info title equals Title() — i.e. the
+// compare-and-publish is atomic per writer, so a losing writer's event can
+// never arrive after the winner's and strand the client on a stale title.
+// Run under -race, this also exercises the field lock against reads.
+func TestSetTitleConcurrentNoStranding(t *testing.T) {
+	const writers = 8
+
+	sess := newTestSession(t)
+	defer sess.Close()
+
+	sub := sess.Subscribe(event.FilterMustDeliver)
+	defer sub.Close()
+
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			sess.SetTitle(fmt.Sprintf("title-%d", n))
+		}(i)
+	}
+	// Concurrent readers, to catch a field-lock race under -race.
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range writers {
+				_ = sess.Title()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Drain every session.info emitted, then compare the last one to Title().
+	var last string
+	seen := 0
+	timeout := time.After(time.Second)
+loop:
+	for {
+		select {
+		case ev := <-sub.C:
+			if info, ok := ev.(event.SessionInfoUpdated); ok {
+				last = info.Title
+				seen++
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no session.info delivered")
+	}
+	if got := sess.Title(); got != last {
+		t.Errorf("last delivered title = %q but Title() = %q: client stranded on a stale title", last, got)
 	}
 }
 
