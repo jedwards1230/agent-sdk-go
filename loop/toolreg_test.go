@@ -3,6 +3,7 @@ package loop_test
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -57,5 +58,39 @@ func TestFromRegistry(t *testing.T) {
 	}
 	if !st.ran {
 		t.Error("adapted tool did not run")
+	}
+}
+
+// editTool returns a Result carrying a Metadata.FileChange, like the builtin
+// edit/write tools.
+type editTool struct{ change tool.FileChange }
+
+func (editTool) Name() string        { return "edit" }
+func (editTool) Description() string { return "an editing tool" }
+func (editTool) Spec() tool.Schema {
+	return tool.ObjectSchema(nil, map[string]tool.Property{"path": {Type: "string"}})
+}
+func (e editTool) Run(context.Context, json.RawMessage) (tool.Result, error) {
+	return tool.Result{Content: "edited", Metadata: tool.Metadata{FileChange: &e.change}}, nil
+}
+
+// TestFromRegistryMapsFileChange confirms the adapter lifts a tool's
+// Metadata.FileChange onto the consumer-side ToolResult.Edits.
+func TestFromRegistryMapsFileChange(t *testing.T) {
+	change := tool.FileChange{Path: "foo.go", OldText: "old", NewText: "new"}
+	reg := tool.NewRegistry(editTool{change: change})
+	adapted := loop.FromRegistry(reg)
+
+	tl, ok := adapted.Get("edit")
+	if !ok {
+		t.Fatal("Get(edit) not found")
+	}
+	res, err := tl.Run(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []event.FileEdit{{Path: "foo.go", OldText: "old", NewText: "new"}}
+	if !reflect.DeepEqual(res.Edits, want) {
+		t.Errorf("Edits = %+v, want %+v", res.Edits, want)
 	}
 }

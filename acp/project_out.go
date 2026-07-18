@@ -80,7 +80,23 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 		if len(ev.Input) > 0 {
 			fields.RawInput = ev.Input
 		}
-		if ev.Result != "" {
+		// A file-editing tool surfaces its change as a structured diff block a
+		// client renders as before/after; the plain-text Result ("edited X") is
+		// redundant with it, so the diffs replace it. A creation carries no
+		// OldText (omitted from the wire). Other tools fall back to the text
+		// Result block.
+		switch {
+		case len(ev.Edits) > 0:
+			content := make([]ToolCallContent, 0, len(ev.Edits))
+			for _, ed := range ev.Edits {
+				content = append(content, ToolCallContentDiff{
+					Path:    ed.Path,
+					OldText: ed.OldText,
+					NewText: ed.NewText,
+				})
+			}
+			fields.Content = content
+		case ev.Result != "":
 			fields.Content = []ToolCallContent{
 				ToolCallContentBlock{Content: TextBlock(ev.Result)},
 			}

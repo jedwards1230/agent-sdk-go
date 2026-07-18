@@ -54,6 +54,51 @@ func TestWriteOverwritesExisting(t *testing.T) {
 	}
 }
 
+func TestWriteFileChangeOnCreation(t *testing.T) {
+	dir := t.TempDir()
+	w := NewWrite(dir)
+	res, err := w.Run(context.Background(), json.RawMessage(`{"path":"new.txt","content":"hello"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	fc := res.Metadata.FileChange
+	if fc == nil {
+		t.Fatal("Metadata.FileChange = nil, want a change record")
+	}
+	if fc.Path != "new.txt" {
+		t.Errorf("Path = %q, want %q", fc.Path, "new.txt")
+	}
+	if fc.OldText != "" {
+		t.Errorf("OldText = %q, want empty for a creation", fc.OldText)
+	}
+	if fc.NewText != "hello" {
+		t.Errorf("NewText = %q, want %q", fc.NewText, "hello")
+	}
+}
+
+func TestWriteFileChangeCapturesPriorContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("old content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w := NewWrite(dir)
+	res, err := w.Run(context.Background(), json.RawMessage(`{"path":"f.txt","content":"new"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	fc := res.Metadata.FileChange
+	if fc == nil {
+		t.Fatal("Metadata.FileChange = nil, want a change record")
+	}
+	if fc.OldText != "old content" {
+		t.Errorf("OldText = %q, want %q", fc.OldText, "old content")
+	}
+	if fc.NewText != "new" {
+		t.Errorf("NewText = %q, want %q", fc.NewText, "new")
+	}
+}
+
 func TestWriteNonexistentRootCreatesIt(t *testing.T) {
 	// Write's contract is to create missing parent directories (see
 	// Description), so a nonexistent root is not an error case for this tool

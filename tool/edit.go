@@ -121,5 +121,12 @@ func (t *Edit) Run(ctx context.Context, input json.RawMessage) (Result, error) {
 	if replacements == 1 {
 		plural = ""
 	}
-	return Result{Content: fmt.Sprintf("edited %s (%d replacement%s)", in.Path, replacements, plural)}, nil
+	return Result{
+		Content: fmt.Sprintf("edited %s (%d replacement%s)", in.Path, replacements, plural),
+		Metadata: Metadata{FileChange: &FileChange{
+			Path:    in.Path,
+			OldText: content,
+			NewText: updated,
+		}},
+	}, nil
 }

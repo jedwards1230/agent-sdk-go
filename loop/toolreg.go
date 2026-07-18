@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/jedwards1230/agent-sdk-go/event"
 	"github.com/jedwards1230/agent-sdk-go/provider"
 	"github.com/jedwards1230/agent-sdk-go/tool"
 )
@@ -52,5 +53,9 @@ func (a toolAdapter) Run(ctx context.Context, input json.RawMessage) (ToolResult
 	}
 	// tool.Result.Metadata.Diagnostics is an M3 slot the builtins never populate;
 	// it is not surfaced here at M1.
-	return ToolResult{Content: res.Content, IsError: res.IsError, FullResult: res.FullResult}, nil
+	var edits []event.FileEdit
+	if fc := res.Metadata.FileChange; fc != nil {
+		edits = []event.FileEdit{{Path: fc.Path, OldText: fc.OldText, NewText: fc.NewText}}
+	}
+	return ToolResult{Content: res.Content, IsError: res.IsError, FullResult: res.FullResult, Edits: edits}, nil
 }

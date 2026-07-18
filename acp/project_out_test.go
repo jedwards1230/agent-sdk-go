@@ -69,6 +69,31 @@ func TestToSessionUpdate(t *testing.T) {
 				`"toolCallId":"tc-1","status":"completed"}}`,
 		},
 		{
+			name: "tool call finished with file edit -> diff block replaces text result",
+			event: event.ToolCallFinished{
+				ID:     "tc-1",
+				Input:  json.RawMessage(`{"path":"foo.go"}`),
+				Result: "edited foo.go (1 replacement)",
+				Edits:  []event.FileEdit{{Path: "foo.go", OldText: "old", NewText: "new"}},
+			},
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update",` +
+				`"toolCallId":"tc-1","status":"completed","rawInput":{"path":"foo.go"},` +
+				`"content":[{"type":"diff","path":"foo.go","oldText":"old","newText":"new"}]}}`,
+		},
+		{
+			name: "tool call finished with file creation -> diff block omits oldText",
+			event: event.ToolCallFinished{
+				ID:     "tc-1",
+				Result: "wrote 3 bytes to new.go",
+				Edits:  []event.FileEdit{{Path: "new.go", NewText: "abc"}},
+			},
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update",` +
+				`"toolCallId":"tc-1","status":"completed",` +
+				`"content":[{"type":"diff","path":"new.go","newText":"abc"}]}}`,
+		},
+		{
 			name:   "message started has no projection",
 			event:  event.NewMessageStarted(sid, event.MessageText),
 			wantOK: false,
