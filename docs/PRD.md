@@ -167,8 +167,7 @@ M0–M3 are what shipped here.
   Model discovery uses a gofer-native list-models endpoint for the `session/new`
   picker, migrating to the unstable `providers/list` only once it stabilizes.
   This is the SDK reading of the cross-repo policy; the full conformance matrix
-  is tracked at the wiki [ACP Conformance
-  Matrix](https://wiki.lilbro.cloud/home/projects/acp-conformance-matrix).
+  is tracked internally (spec ↔ SDK ↔ gofer ↔ Agmente).
 - **Journals default to on-disk JSONL** (the auditability tenet);
   `session.MemStore` is an explicit embedder opt-in for an ephemeral
   fire-and-forget session — same fold/resume within the process, nothing
