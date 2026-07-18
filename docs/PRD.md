@@ -36,7 +36,7 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
    headless, HTTP are projections. None is privileged.
 4. **Structural permissions** — approvals are protocol messages; enforcement is
    a format-agnostic rule engine over typed rules. Vendor formats (Claude Code
-   `settings.json`, native YAML) are import adapters (M4/M5).
+   `settings.json`, native YAML) are import adapters (M5/M6).
 5. **Declarative agents, code as escape hatch** — an agent is a manifest
    (provider, tools, permissions, skills, hooks); `compose.Load()` wires it.
 6. **Out-of-process extensibility** — plugins are subprocesses over JSON-RPC
@@ -61,10 +61,10 @@ session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
 runner/      batteries-included *Runner (provider+tools+broker+loop+journal)  (M2)
 permission/  rules · grants · escalation cap          (M3)
 tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
-skill/       SKILL.md, two-tier disclosure            (M4)
-plugin/      subprocess JSON-RPC host                 (M4)
+skill/       SKILL.md, two-tier disclosure            (M5)
+plugin/      subprocess JSON-RPC host                 (M5)
 lsp/         server registry · diagnostics            (M3)
-mcp/         client (official go-sdk)                 (M4)
+mcp/         client (official go-sdk)                 (M5)
 compose/     manifest → wired session
 acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```
@@ -113,17 +113,26 @@ converges to the correct state regardless of drops.
 | **M1 · one good session** ✅ shipped 2026-07-12 | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
 | **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (application) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 (v0.3.0) | Sandbox/containment seam (concrete Seatbelt/bwrap+seccomp backends are an application concern) + approval protocol events + binary containment policy (sandboxable → run contained; else → ask a human) + tool-output spill files + headless exec + LSP | a non-sandboxable tool call raises `permission.requested` and a client's reply gates execution |
-| M4 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
-| M5 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
+| **M4 · ACP v1 featureset expansion** | Cross-repo, matrix-driven ACP surface build-out — this repo owns the modeling + projection half. Session-method projection (`session/list` dispatch, resume, a modeled `set_config_option`) over the already-present `cwd`/`title` on `SessionInfo`; producers for the already-modeled rich blocks (emit `diff` from the edit tools, `terminal`) so a real tool call carries them; native list-models types feeding gofer's `session/new` model picker; capability modeling for the stretch set (`session_info_update`, `plan`, the `*_update` registries). Projection-safe subset (`usage_update` + image/audio/resource content blocks + `diff`/`terminal` tool-call content modeling) already shipped in **v0.6.0**. | gofer emits a `diff` tool-call block from an edit tool and an ACP client renders it |
+| M5 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
+| M6 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
-### Point releases (post-M3, pre-M4)
+### Point releases (post-M3)
 
-Incremental releases supporting gofer's M4 (application-layer command views),
-not SDK milestones:
+Incremental releases cut between milestones. v0.4.0/v0.5.0 supported gofer's M4
+(application-layer command views); v0.6.0 opens this repo's M4 by landing its
+projection-safe subset. **SDK milestone numbers are independent of gofer's** —
+the same cross-repo ACP featureset is gofer's *next* milestone (it has already
+shipped through its command-views milestone) but this repo's **M4**, because
+M0–M3 are what shipped here.
 
 - **v0.4.0** — ACP `session/new` gains an optional `model` field.
 - **v0.5.0** — `Runner.SetModel(model)` swaps a live session's model between
   turns (same-provider only; a different provider starts a new session).
+- **v0.6.0** — first M4 (ACP expansion) increment: `usage_update` projection +
+  image/audio/resource content blocks + `diff`/`terminal` tool-call content
+  modeled and projected (carries #52–#54). Modeling + projection only — no
+  producer emits the rich blocks yet; that lands in M4 proper.
 
 ## Settled decisions
 
@@ -148,6 +157,18 @@ not SDK milestones:
 - **Fleet/multi-machine is an application concern.** The SDK's only
   accommodations are already tenets: serializable transport-agnostic contract,
   globally-unique session IDs.
+- **Promote-if-stable, for the ACP surface (2026-07-17).** A capability projects
+  onto the standard ACP surface in `acp/` only when a *stable* spec variant
+  exists in the ACP v1 schema; where the spec surface is unstable or absent it
+  stays gofer-native (an application-layer `gofer/event` extension), never
+  invented into `acp/`. Consequences already settled: `usage_update` is promoted
+  (stable → projected in v0.6.0); `set_model` stays gofer-native (its real spec
+  surface, `providers/*`, is unstable); `gofer/event` stays native permanently.
+  Model discovery uses a gofer-native list-models endpoint for the `session/new`
+  picker, migrating to the unstable `providers/list` only once it stabilizes.
+  This is the SDK reading of the cross-repo policy; the full conformance matrix
+  is tracked at the wiki [ACP Conformance
+  Matrix](https://wiki.lilbro.cloud/home/projects/acp-conformance-matrix).
 - **Journals default to on-disk JSONL** (the auditability tenet);
   `session.MemStore` is an explicit embedder opt-in for an ephemeral
   fire-and-forget session — same fold/resume within the process, nothing

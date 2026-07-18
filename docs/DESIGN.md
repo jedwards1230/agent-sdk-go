@@ -144,8 +144,8 @@ sources    := embedded defaults < global config < project config < session grant
 The engine consumes typed `[]Rule`; vendor formats are import adapters that
 produce those rules. Claude Code `settings.json` allow/ask/deny is one such
 loader among others (native YAML is another) — the adapter lands with the
-vendor-format milestone (M4/M5), and which package hosts the CC loader is
-undecided (home TBD at M4). Grants persist with TTL behind an
+vendor-format milestone (M5/M6), and which package hosts the CC loader is
+undecided (home TBD at M5). Grants persist with TTL behind an
 anti-escalation cache: a read grant never satisfies a write ask, and dangerous
 specs never widen past exact-match.
 
@@ -155,7 +155,7 @@ format-agnostic slice: deny > ask > allow precedence, an unmatched request is
 `ask` (fail-safe), and `Grant` appends a runtime session-scoped rule. It imports
 only `event` + stdlib. The TTL / anti-escalation / dangerous-downgrade policy and
 every vendor-format loader (`settings.json`, native manifest) are **not** here
-yet — M4/M5, landing in the same `permission/` package per the decided
+yet — M5/M6, landing in the same `permission/` package per the decided
 permission-format home (2026-07-13).
 
 ## Guard / decision seam (M3)
@@ -188,7 +188,7 @@ raises an approval request. There is no third "run uncontained" outcome.
   runs a call uncontained (decided 2026-07-13). `RuleGuard` also implements
   **`Granter`** (`Grant(call)`): a remembered "always allow" reply appends a
   session-scoped allow rule to the engine via `Engine.Grant`, so an identical
-  future call skips the ask. TTL / anti-escalation live with the engine (M4/M5),
+  future call skips the ask. TTL / anti-escalation live with the engine (M5/M6),
   not here.
 - **Emit → await → reply flow** (`runner.gate` in `loop/loop.go`, called from
   `runOneTool` right after `beforeTool` and before the tool executes or spills
@@ -384,14 +384,69 @@ root-relative and is not what the model reads — the two intentionally differ. 
 keeps the read tool decoupled from the session store (it just resolves an absolute
 path via its normal path resolution).
 
-## Session tree & spawn seam (design-ahead, M4)
+## ACP v1 projection surface (M4)
+
+`acp/` is the SDK's modeling + projection half of the cross-repo ACP v1
+featureset expansion. It owns message **types** and pure **mapping functions**
+only — stdlib, no networking, no JSON-RPC framing, no goroutines. The WebSocket
+transport and method dispatch live in the consuming application (gofer); an ACP
+session is just another broker subscriber. This keeps the ACP work squarely
+inside the tenets: it is a *projection* of the one Event/Op contract, and the
+SDK still imports no application code. New capabilities are earned against the
+two gates — a type or projection belongs here only if a second ACP client would
+consume it unchanged, and only as a mapping, never a built-in behavior.
+
+**The ACP↔Event/Op boundary lives here, both directions:**
+
+- **Outbound** (`event.Event` → `session/update`): `ToSessionUpdate` projects
+  message/tool-call/permission events to ACP notifications; content blocks
+  (`content_block.go`) and tool-call content (`tool_call.go`) carry the payload.
+- **Inbound** (JSON-RPC method + params → `event.Op`): `DecodeOp` routes the
+  four op-bearing methods — `session/prompt`→`PromptSend`, `session/cancel`→
+  `TurnInterrupt`, `session/new`→`SessionNew`, `session/load`→`SessionResume`
+  (resume) — via the `From*` functions; `initialize`/`authenticate` are
+  handshakes a transport answers itself.
+
+**Shipped (v0.6.0, the projection-safe subset).** `usage_update` projection;
+the `image`/`audio`/`resource` (`EmbeddedResource`) content blocks; and the
+`diff`/`terminal` tool-call content variants. This is modeling + projection
+only — the types round-trip and project, but **no producer emits the rich
+blocks yet**, and `usage_update` is skipped for turns without real usage. The
+`session/list` request/response types (`list.go`) and `SessionInfo` (already
+carrying `cwd` and optional `title`) are modeled but not yet wired into
+dispatch.
+
+**Promote-if-stable** governs what projects onto this standard surface vs stays
+gofer-native — see the [PRD](PRD.md) settled decision. In short: a capability
+lands in `acp/` only when a stable ACP v1 spec variant exists; unstable/absent
+spec surfaces stay application-layer (`gofer/event`) and are never invented
+here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
+
+**SDK-side M4 roadmap** (modeling + projection, matrix-driven):
+
+- **Session methods** — wire `session/list` dispatch/projection over the
+  already-modeled types, model `set_config_option`, and confirm resume
+  (`session/load`) coverage. `SessionInfo.cwd`/`title` already exist; no schema
+  guess needed.
+- **Producers for the rich blocks** — emit a `diff` tool-call content block from
+  the edit tools (and `terminal` where applicable) so a real tool call carries
+  the v0.6.0-modeled shapes end-to-end, with the client rendering them.
+- **Model discovery types** — the types backing gofer's native list-models
+  endpoint that feeds the `session/new` model picker (migrate to `providers/
+  list` only once that spec surface stabilizes).
+- **Capability modeling for the stretch set** — `session_info_update` (needs
+  session titles), `plan` (needs a plan concept), and the
+  `available_commands_update`/`current_mode_update`/`config_option_update`
+  registries — modeled as they acquire a stable spec surface and a producer.
+
+## Session tree & spawn seam (design-ahead, M5)
 
 A subagent is a real session, not a sub-object: its own UUIDv7 journal, linked
 to its parent. The SDK ships the spawn seam and the linking events — the parent
 journal records a must-deliver `session.spawned{child_id, agent}`, child
 metadata carries `parent_id`, and depth (parent-chain length) is capped at 5 and
 enforced at spawn. The application wires this to its supervisor/roster (tree
-view, peek/attach into any child). Ships M4; recorded here so the session and
+view, peek/attach into any child). Ships M5; recorded here so the session and
 event contracts leave room for it now.
 
 ## Extension tiers
@@ -404,7 +459,7 @@ Three tiers, by trust and coupling:
    import (`mcp/`, vendor settings loaders). First-party and trusted, but not
    forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
-   over JSON-RPC (host lands M4). Nothing untrusted runs in-process.
+   over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
 
 The tier is set by the two-gate test: would a second app need it unchanged
 (core vs optional package), and could a seam suffice instead of a built-in?
