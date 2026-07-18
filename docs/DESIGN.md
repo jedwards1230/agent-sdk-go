@@ -333,6 +333,15 @@ and the reference is consistent with the bytes on disk.
 the `<id>.jsonl` journal and is invisible to the store's `<id>.jsonl` globs).
 Created lazily, mode `0o700`.
 
+**Session id: generated or caller-assigned.** A new session's `<id>` is a fresh
+UUIDv7 by default (globally unique, time-ordered — the property the fleet/roster
+layer relies on). `Store.CreateWithID` (surfaced as `runner.Options.SessionID`)
+lets an embedder that must know a session's id *before* it exists — e.g. a
+process-isolated worker keyed by it — supply the id instead; it is then used
+verbatim as the journal name and wire session id, so that embedder, not the SDK,
+owns the uniqueness/ordering guarantee. The id must be a safe single path
+component (no separators, not `.`/`..`); entry-id generation is unaffected.
+
 **Model-facing rule.** Durability is universal — *every* tool call spills to
 disk. What the model sees is the bounded excerpt **by default**, with one escape
 hatch: a tool may set `FullResult` on its `Result` to hand the model the full

@@ -42,13 +42,32 @@ func NewMemStore(opts ...StoreOption) *MemStore {
 
 // Create starts a new empty in-memory journal for projectSlug.
 func (s *MemStore) Create(ctx context.Context, projectSlug string) (*Journal, error) {
+	return s.create(ctx, projectSlug, "")
+}
+
+// CreateWithID starts a new empty in-memory journal for projectSlug using id
+// verbatim as the session id (or a fresh one when id is empty). See
+// [Store.CreateWithID]; a MemStore reuse of an existing id replaces the prior
+// in-memory journal (last write wins).
+func (s *MemStore) CreateWithID(ctx context.Context, projectSlug, id string) (*Journal, error) {
+	return s.create(ctx, projectSlug, id)
+}
+
+// create is the shared body of Create/CreateWithID: an empty id is generated,
+// a non-empty id is used verbatim after validation. Entry-id generation is
+// unaffected — the journal still carries s.idGen for its Append ids.
+func (s *MemStore) create(ctx context.Context, projectSlug, id string) (*Journal, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := validateSlug(projectSlug); err != nil {
 		return nil, err
 	}
-	id := s.idGen()
+	if id == "" {
+		id = s.idGen()
+	} else if err := validateID(id); err != nil {
+		return nil, err
+	}
 	// path is synthetic: <id>.jsonl with no directory, never created on disk.
 	// It keeps Journal.Path/Dir well-formed for callers that derive per-session
 	// artifact paths, without implying a real file.

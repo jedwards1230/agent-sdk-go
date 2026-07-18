@@ -43,6 +43,22 @@ type Options struct {
 	// Cwd is the working directory tools operate in, and the project the
 	// session belongs to (via session.Slugify).
 	Cwd string
+	// SessionID, when non-empty, is the id [New] gives the freshly created
+	// session verbatim, instead of a freshly generated UUIDv7 — the seam a caller
+	// that must know a session's id BEFORE the session exists (e.g. a
+	// process-isolated worker keyed by that id for its socket/lock filenames)
+	// uses to pin it, replacing the fragile alternative of a stateful IDGen whose
+	// first call happens to be the session id.
+	//
+	//   - The id becomes the journal filename, [Runner.ID] (and the
+	//     [event.SessionCreated] a frontend derives from it), and the id every
+	//     later [Resume] addresses.
+	//   - Empty (the default) generates a fresh UUIDv7 — unchanged behavior.
+	//   - Used only by New; [Resume] addresses an existing id and ignores it.
+	//   - Does not affect entry-id generation (still IDGen / the store default).
+	//   - Must be a safe single path component or New returns [session.ErrInvalidID];
+	//     a disk store additionally rejects an id whose session already exists.
+	SessionID string
 	// Model is the model identifier passed to the provider and loop.
 	Model string
 	// System is the system prompt.
@@ -144,7 +160,9 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 	if err != nil {
 		return nil, err
 	}
-	journal, err := store.Create(ctx, session.Slugify(opts.Cwd))
+	// CreateWithID with an empty SessionID is exactly Create (a fresh UUIDv7);
+	// a non-empty SessionID pins the session id verbatim (see Options.SessionID).
+	journal, err := store.CreateWithID(ctx, session.Slugify(opts.Cwd), opts.SessionID)
 	if err != nil {
 		if opts.Store == nil {
 			_ = store.Close()
