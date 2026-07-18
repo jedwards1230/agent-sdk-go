@@ -21,7 +21,11 @@ var ErrUnknownKind = errors.New("event: unknown kind")
 // MarshalJSON — back into its concrete type, and is the inverse of that
 // encoding: the type/session_id/seq/time envelope and every payload field a
 // kind carries are restored, so a value round-trips
-// (construct → MarshalJSON → Unmarshal) equal to the original. It is the shared
+// (construct → MarshalJSON → Unmarshal) equal to the original. The one exception
+// is that a nil [ConfigOptionsUpdated.Options] or [PlanUpdated.Entries]
+// marshals to [] (its MarshalJSON normalizes the absent case) and so decodes
+// back to an empty, non-nil slice rather than nil — the value re-marshals
+// identically, which is the property the wire guarantees. It is the shared
 // decoder for any cross-process consumer that reconstructs a typed event stream
 // from its wire form.
 //
