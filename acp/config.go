@@ -90,6 +90,16 @@ func (r *SetConfigOptionRequest) UnmarshalJSON(data []byte) error {
 	r.SessionID = wire.SessionID
 	r.ConfigID = wire.ConfigID
 
+	// configId and value are required by the ACP schema; reject a missing or
+	// null value (which json would otherwise decode to a silent zero value)
+	// rather than accepting an under-specified request.
+	if wire.ConfigID == "" {
+		return fmt.Errorf("acp: set_config_option request missing required configId")
+	}
+	if len(wire.Value) == 0 || string(wire.Value) == "null" {
+		return fmt.Errorf("acp: set_config_option request %q missing required value", wire.ConfigID)
+	}
+
 	switch wire.Type {
 	case "boolean":
 		var b bool
@@ -261,4 +271,31 @@ func (o *ConfigOption) UnmarshalJSON(data []byte) error {
 type SetConfigOptionResponse struct {
 	// ConfigOptions is the complete set of config options after the change.
 	ConfigOptions []ConfigOption `json:"configOptions"`
+}
+
+// UnmarshalJSON decodes a [SetConfigOptionResponse], skipping any option entry
+// it cannot parse. The ACP v1 schema annotates the response option array with
+// x-deserialize-skip-invalid-items, so a client decoding an agent's response
+// drops option kinds it does not understand (a forward-compat agent adding a
+// new option type) rather than failing the whole decode. Each entry is decoded
+// with the strict [ConfigOption.UnmarshalJSON]; entries it rejects are dropped
+// and the known ones kept.
+func (r *SetConfigOptionResponse) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		ConfigOptions []json.RawMessage `json:"configOptions"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("acp: decode SetConfigOptionResponse: %w", err)
+	}
+	opts := make([]ConfigOption, 0, len(wire.ConfigOptions))
+	for _, raw := range wire.ConfigOptions {
+		var opt ConfigOption
+		if err := json.Unmarshal(raw, &opt); err != nil {
+			// Unknown/unparseable option kind: skip it (skip-invalid-items).
+			continue
+		}
+		opts = append(opts, opt)
+	}
+	r.ConfigOptions = opts
+	return nil
 }

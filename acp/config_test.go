@@ -87,6 +87,38 @@ func TestSetConfigOptionRequestUnmarshal(t *testing.T) {
 	}
 }
 
+func TestSetConfigOptionRequestUnmarshalMissingRequired(t *testing.T) {
+	tests := []struct {
+		name string
+		data string
+	}{
+		{
+			name: "missing value errors",
+			data: `{"sessionId":"sess_1","configId":"model"}`,
+		},
+		{
+			name: "null value errors",
+			data: `{"sessionId":"sess_1","configId":"model","value":null}`,
+		},
+		{
+			name: "null boolean value errors",
+			data: `{"sessionId":"sess_1","configId":"brave_mode","type":"boolean","value":null}`,
+		},
+		{
+			name: "empty configId errors",
+			data: `{"sessionId":"sess_1","configId":"","value":"model-1"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var req acp.SetConfigOptionRequest
+			if err := json.Unmarshal([]byte(tc.data), &req); err == nil {
+				t.Fatalf("Unmarshal(%s): want error, got nil (req = %+v)", tc.data, req)
+			}
+		})
+	}
+}
+
 func TestSetConfigOptionRequestRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string
@@ -258,6 +290,57 @@ func TestSetConfigOptionResponseMarshal(t *testing.T) {
 			assertJSONEqual(t, got, tc.want)
 			if tc.name == "empty options marshal as empty array" && string(got) != tc.want {
 				t.Errorf("Marshal() = %s, want exact %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetConfigOptionResponseUnmarshalSkipsInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    string
+		wantIDs []string
+	}{
+		{
+			name: "unknown option kind is dropped, known kept",
+			data: `{"configOptions":[` +
+				`{"id":"model","name":"Model","type":"select","currentValue":"m1","options":[]},` +
+				`{"id":"future","name":"Future","type":"quantum","currentValue":"?"}` +
+				`]}`,
+			wantIDs: []string{"model"},
+		},
+		{
+			name: "all known kept in order",
+			data: `{"configOptions":[` +
+				`{"id":"brave_mode","name":"Brave Mode","type":"boolean","currentValue":true},` +
+				`{"id":"model","name":"Model","type":"select","currentValue":"m1","options":[]}` +
+				`]}`,
+			wantIDs: []string{"brave_mode", "model"},
+		},
+		{
+			name:    "empty options decodes to empty slice",
+			data:    `{"configOptions":[]}`,
+			wantIDs: []string{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var resp acp.SetConfigOptionResponse
+			if err := json.Unmarshal([]byte(tc.data), &resp); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			gotIDs := make([]string, 0, len(resp.ConfigOptions))
+			for _, opt := range resp.ConfigOptions {
+				gotIDs = append(gotIDs, opt.ID)
+			}
+			if len(gotIDs) != len(tc.wantIDs) {
+				t.Fatalf("ids = %v, want %v", gotIDs, tc.wantIDs)
+			}
+			for i, id := range tc.wantIDs {
+				if gotIDs[i] != id {
+					t.Errorf("ids = %v, want %v", gotIDs, tc.wantIDs)
+					break
+				}
 			}
 		})
 	}
