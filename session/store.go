@@ -26,14 +26,17 @@ type Store interface {
 	Create(ctx context.Context, projectSlug string) (*Journal, error)
 	// CreateWithID is Create with a caller-assigned session id instead of a
 	// freshly generated one — the seam a caller that must know a session's id
-	// before the session exists (e.g. a process-isolated worker keyed by that
-	// id for its socket/lock filenames) uses to pin it. An empty id is exactly
-	// equivalent to Create (a fresh UUIDv7 is generated). A non-empty id must be
-	// a safe single path component — it names the journal file — or
-	// [ErrInvalidID] is returned; it does not affect entry-id generation, which
-	// still uses the store's id generator. Collision on an id that already
-	// exists is store-specific: a [FileStore] rejects it (its journal file is
-	// created O_EXCL), a [MemStore] replaces the prior in-memory journal.
+	// before the session exists (e.g. a process-isolated worker keyed by that id
+	// for its socket/lock filenames) uses to pin it.
+	//
+	//   - An empty id is exactly equivalent to Create (a fresh UUIDv7 is generated).
+	//   - A non-empty id must be a safe single path component — it names the
+	//     journal file — or [ErrInvalidID] is returned.
+	//   - Pinning the id does not affect entry-id generation, which still uses
+	//     the store's id generator.
+	//   - Collision on an already-existing id is store-specific: a [FileStore]
+	//     rejects it (its journal file is created O_EXCL), a [MemStore] replaces
+	//     the prior in-memory journal.
 	CreateWithID(ctx context.Context, projectSlug, id string) (*Journal, error)
 	// Open resumes an existing session by id, rebuilding its journal from
 	// disk (torn-write safe). It scans every project dir under the store's
@@ -227,10 +230,13 @@ func validateSlug(slug string) error {
 }
 
 // validateID rejects a non-empty caller-assigned session id that cannot safely
-// be used as a single path component (it names the journal file). It is only
-// called for a non-empty id — an empty id means "generate one".
+// be used as a single path component (it names the <id>.jsonl journal file):
+// ".", "..", or an id containing a path separator ("/", or the OS separator).
+// It is only called for a non-empty id — an empty id means "generate one".
 func validateID(id string) error {
-	if id == "." || id == ".." || id != filepath.Base(id) {
+	if id == "." || id == ".." ||
+		strings.ContainsRune(id, '/') || strings.ContainsRune(id, os.PathSeparator) ||
+		id != filepath.Base(id) {
 		return fmt.Errorf("session: session id %q: %w", id, ErrInvalidID)
 	}
 	return nil

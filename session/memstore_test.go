@@ -185,7 +185,7 @@ func TestStoreCreateWithID(t *testing.T) {
 			}
 
 			// Unsafe ids (not a single path component) are rejected.
-			for _, bad := range []string{"..", ".", "a/b"} {
+			for _, bad := range []string{"..", ".", "a/b", "/"} {
 				if _, err := store.CreateWithID(ctx, "proj", bad); !errors.Is(err, session.ErrInvalidID) {
 					t.Errorf("CreateWithID(%q): err = %v, want ErrInvalidID", bad, err)
 				}
@@ -211,6 +211,45 @@ func TestStoreRoot(t *testing.T) {
 	defer func() { _ = memStore.Close() }()
 	if got := memStore.Root(); got != "" {
 		t.Errorf("MemStore.Root() = %q, want \"\"", got)
+	}
+}
+
+// TestMemStoreCreateWithIDLastWriteWins asserts the documented MemStore
+// collision behavior: reusing a pinned id replaces the prior in-memory journal
+// (last write wins) with a fresh empty one, and Open then returns the
+// replacement. (FileStore rejects the same collision — see
+// TestFileStoreCreateWithIDCollision — so the two stores deliberately differ
+// here; MemStore is the ephemeral, single-process store.)
+func TestMemStoreCreateWithIDLastWriteWins(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewMemStore(session.WithStoreIDGen(newCounterIDGen("m")))
+	defer func() { _ = store.Close() }()
+
+	first, err := store.CreateWithID(ctx, "proj", "dup")
+	if err != nil {
+		t.Fatalf("CreateWithID (first): %v", err)
+	}
+	if _, err := first.Append(session.NewMessageEntry(provider.UserText("in first"))); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	second, err := store.CreateWithID(ctx, "proj", "dup")
+	if err != nil {
+		t.Fatalf("CreateWithID (second): %v", err)
+	}
+	if second == first {
+		t.Fatal("second CreateWithID returned the same *Journal; want a fresh replacement (last write wins)")
+	}
+	if second.Len() != 0 {
+		t.Errorf("replacement Len() = %d, want 0 (a fresh empty journal)", second.Len())
+	}
+
+	opened, err := store.Open(ctx, "dup")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if opened != second {
+		t.Error("Open returned the prior journal; want the replacement (last write wins)")
 	}
 }
 

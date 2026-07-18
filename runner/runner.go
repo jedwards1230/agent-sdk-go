@@ -44,19 +44,20 @@ type Options struct {
 	// session belongs to (via session.Slugify).
 	Cwd string
 	// SessionID, when non-empty, is the id [New] gives the freshly created
-	// session verbatim — its journal filename, the [event.SessionCreated] a
-	// frontend derives from [Runner.ID], and the id every later [Resume]/
-	// session.Store.Open uses — instead of a freshly generated UUIDv7. It is the
-	// seam a caller that must know a session's id BEFORE the session exists
-	// (e.g. a process-isolated worker keyed by that id for its socket/lock
-	// filenames) uses to pin it, replacing the fragile alternative of a stateful
-	// IDGen whose first call happens to be the session id. Empty (the default)
-	// generates a fresh UUIDv7 — unchanged behavior. It is used only by New (a
-	// fresh session); Resume addresses an existing id and ignores it. It does
-	// not affect entry-id generation, which still uses IDGen / the store
-	// default. A non-empty id must be a safe single path component (it names the
-	// journal file) or New returns [session.ErrInvalidID]; a disk store
-	// additionally rejects an id whose session already exists on disk.
+	// session verbatim, instead of a freshly generated UUIDv7 — the seam a caller
+	// that must know a session's id BEFORE the session exists (e.g. a
+	// process-isolated worker keyed by that id for its socket/lock filenames)
+	// uses to pin it, replacing the fragile alternative of a stateful IDGen whose
+	// first call happens to be the session id.
+	//
+	//   - The id becomes the journal filename, [Runner.ID] (and the
+	//     [event.SessionCreated] a frontend derives from it), and the id every
+	//     later [Resume] addresses.
+	//   - Empty (the default) generates a fresh UUIDv7 — unchanged behavior.
+	//   - Used only by New; [Resume] addresses an existing id and ignores it.
+	//   - Does not affect entry-id generation (still IDGen / the store default).
+	//   - Must be a safe single path component or New returns [session.ErrInvalidID];
+	//     a disk store additionally rejects an id whose session already exists.
 	SessionID string
 	// Model is the model identifier passed to the provider and loop.
 	Model string
