@@ -57,5 +57,15 @@ func (a toolAdapter) Run(ctx context.Context, input json.RawMessage) (ToolResult
 	if fc := res.Metadata.FileChange; fc != nil {
 		edits = []event.FileEdit{{Path: fc.Path, OldText: fc.OldText, NewText: fc.NewText}}
 	}
-	return ToolResult{Content: res.Content, IsError: res.IsError, FullResult: res.FullResult, Edits: edits}, nil
+	// A plan snapshot (update_plan) rides its own must-deliver plan event, not
+	// tool.call.finished. Preserve nil vs non-nil-empty: an empty plan is a
+	// valid "plan cleared" snapshot the loop still publishes.
+	var plan []event.PlanEntry
+	if res.Metadata.Plan != nil {
+		plan = make([]event.PlanEntry, len(res.Metadata.Plan))
+		for i, e := range res.Metadata.Plan {
+			plan[i] = event.PlanEntry{Content: e.Content, Priority: e.Priority, Status: e.Status}
+		}
+	}
+	return ToolResult{Content: res.Content, IsError: res.IsError, FullResult: res.FullResult, Edits: edits, Plan: plan}, nil
 }

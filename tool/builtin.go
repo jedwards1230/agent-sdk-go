@@ -1,8 +1,8 @@
 package tool
 
 // Builtins returns the standard builtin tool set rooted at dir: bash, read,
-// edit, write, grep, glob, ls. Import the whole set with
-// NewRegistry(Builtins(dir)...).
+// edit, write, grep, glob, ls, update_plan. Import the whole set with
+// NewRegistry(Builtins(dir)...). update_plan is stateless and ignores dir.
 func Builtins(dir string) []Tool {
 	return []Tool{
 		NewBash(dir),
@@ -12,6 +12,7 @@ func Builtins(dir string) []Tool {
 		NewGrep(dir),
 		NewGlob(dir),
 		NewLS(dir),
+		NewUpdatePlan(),
 	}
 }
 

@@ -43,6 +43,21 @@ func TestSessionUpdateMarshal(t *testing.T) {
 			want:   `{"sessionUpdate":"session_info_update","title":"Fix the bug"}`,
 		},
 		{
+			name: "plan",
+			update: acp.Plan{Entries: []acp.PlanEntry{
+				{Content: "Read the code", Priority: "high", Status: "completed"},
+				{Content: "Write the fix", Priority: "medium", Status: "in_progress"},
+			}},
+			want: `{"sessionUpdate":"plan","entries":[` +
+				`{"content":"Read the code","priority":"high","status":"completed"},` +
+				`{"content":"Write the fix","priority":"medium","status":"in_progress"}]}`,
+		},
+		{
+			name:   "plan empty clears (entries [])",
+			update: acp.Plan{},
+			want:   `{"sessionUpdate":"plan","entries":[]}`,
+		},
+		{
 			name: "tool_call",
 			update: acp.ToolCall{
 				ToolCallID: "tc-1",

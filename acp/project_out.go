@@ -155,6 +155,16 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 		}
 		return SessionNotification{SessionID: sessionID, Update: update}, true
 
+	case event.PlanUpdated:
+		// plan carries the agent's full current task plan (from the update_plan
+		// tool). Project every entry so the client renders a live checklist; an
+		// empty plan projects to an empty entries array (a valid "cleared" state).
+		entries := make([]PlanEntry, len(ev.Entries))
+		for i, e := range ev.Entries {
+			entries[i] = PlanEntry{Content: e.Content, Priority: e.Priority, Status: e.Status}
+		}
+		return SessionNotification{SessionID: sessionID, Update: Plan{Entries: entries}}, true
+
 	default:
 		return SessionNotification{}, false
 	}

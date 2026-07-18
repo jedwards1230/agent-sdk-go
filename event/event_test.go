@@ -41,6 +41,63 @@ func TestSessionInfoUpdatedMarshal(t *testing.T) {
 	}
 }
 
+// TestPlanUpdatedMarshal asserts the plan event carries its entries on the wire,
+// is must-deliver, reports the right kind, and marshals an empty plan to an
+// entries array rather than null.
+func TestPlanUpdatedMarshal(t *testing.T) {
+	t.Run("with entries", func(t *testing.T) {
+		ev := event.NewPlanUpdated(sid, []event.PlanEntry{
+			{Content: "Read the code", Priority: "high", Status: "completed"},
+			{Content: "Write the fix", Priority: "medium", Status: "in_progress"},
+		})
+		if ev.Kind() != event.KindPlan {
+			t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindPlan)
+		}
+		if ev.Tier() != event.TierMustDeliver {
+			t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+		}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m struct {
+			Type      string            `json:"type"`
+			SessionID string            `json:"session_id"`
+			Entries   []event.PlanEntry `json:"entries"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if m.Type != event.KindPlan {
+			t.Errorf("type = %q, want %q", m.Type, event.KindPlan)
+		}
+		if m.SessionID != sid {
+			t.Errorf("session_id = %q, want %q", m.SessionID, sid)
+		}
+		if len(m.Entries) != 2 || m.Entries[0].Content != "Read the code" ||
+			m.Entries[0].Priority != "high" || m.Entries[0].Status != "completed" ||
+			m.Entries[1].Status != "in_progress" {
+			t.Errorf("entries = %+v, want the two round-tripped entries", m.Entries)
+		}
+	})
+
+	t.Run("empty plan marshals to []", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewPlanUpdated(sid, nil))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m struct {
+			Entries json.RawMessage `json:"entries"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if string(m.Entries) != "[]" {
+			t.Errorf("entries = %s, want []", m.Entries)
+		}
+	})
+}
+
 // TestTurnFinishedContextWindow asserts the additive ContextWindow field
 // serializes as "context_window" when set and, being omitempty, leaves the
 // payload unchanged (no key) when zero.
