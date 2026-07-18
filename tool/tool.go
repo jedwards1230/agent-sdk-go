@@ -70,8 +70,26 @@ type Metadata struct {
 	// Diagnostics is a slot the loop fills with LSP diagnostics gathered
 	// around the tool call (M3). Tools never populate it themselves.
 	Diagnostics []Diagnostic
+	// FileChange, when non-nil, records a file the tool created or modified: its
+	// path and full content before and after. It lets a client render a
+	// structured diff and never enters the model's context. The edit and write
+	// tools set it.
+	FileChange *FileChange
 	// Extra holds tool-specific structured fields for clients that want them.
 	Extra map[string]any
+}
+
+// FileChange is a structured before/after record of a single file mutation a
+// tool performed. OldText is empty when the file did not exist before (a
+// creation). It rides in [Metadata] as out-of-band detail a client may render
+// as a diff.
+type FileChange struct {
+	// Path is the file's path as the tool was asked to change it.
+	Path string
+	// OldText is the file's content before the change, empty for a creation.
+	OldText string
+	// NewText is the file's content after the change.
+	NewText string
 }
 
 // Diagnostic is a single LSP-style diagnostic. It is defined here so the

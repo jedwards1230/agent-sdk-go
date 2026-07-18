@@ -43,6 +43,53 @@ func TestTurnFinishedContextWindow(t *testing.T) {
 	})
 }
 
+// TestToolCallFinishedEdits asserts the additive Edits field serializes as an
+// "edits" array of {path, old_text?, new_text} when set — with old_text
+// omitted for a creation — and, being omitempty, leaves the payload unchanged
+// (no key) when nil.
+func TestToolCallFinishedEdits(t *testing.T) {
+	t.Run("set with creation omits old_text", func(t *testing.T) {
+		ev := event.NewToolCallFinished(sid, "tc-1", nil, "wrote new.go", false, nil)
+		ev.Edits = []event.FileEdit{{Path: "new.go", NewText: "abc"}}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m struct {
+			Edits []map[string]any `json:"edits"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(m.Edits) != 1 {
+			t.Fatalf("edits len = %d, want 1: %s", len(m.Edits), raw)
+		}
+		if got := m.Edits[0]["path"]; got != "new.go" {
+			t.Errorf("path = %v, want new.go", got)
+		}
+		if got := m.Edits[0]["new_text"]; got != "abc" {
+			t.Errorf("new_text = %v, want abc", got)
+		}
+		if _, ok := m.Edits[0]["old_text"]; ok {
+			t.Errorf("old_text present for a creation: %s", raw)
+		}
+	})
+
+	t.Run("nil omitted", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewToolCallFinished(sid, "tc-1", nil, "ok", false, nil))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if _, ok := m["edits"]; ok {
+			t.Errorf("edits present for nil value: %s", raw)
+		}
+	})
+}
+
 // TestMessageUserRoundTrip asserts MessageUser is just another MessageKind
 // value: it round-trips through the MessageStarted/MessageDelta/MessageFinished
 // JSON envelopes exactly like MessageText and MessageReasoning do, and

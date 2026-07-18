@@ -59,6 +59,10 @@ type ToolResult struct {
 	IsError bool
 	// Diagnostics are optional advisory messages (e.g. LSP findings).
 	Diagnostics []string
+	// Edits are the structured file mutations the tool performed, carried onto
+	// the emitted tool.call.finished event so a client can render a diff. The
+	// edit and write tools populate them; other tools leave them nil.
+	Edits []event.FileEdit
 	// FullResult asks the loop to feed the model this Content in full rather
 	// than the bounded spill excerpt (the read tool's escape hatch). Output is
 	// still spilled to disk regardless; only the model-facing/journaled text
@@ -341,6 +345,15 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 	return blocks
 }
 
+// withEdits stamps a tool's structured file edits onto a tool.call.finished
+// event (as ContextWindow is stamped onto turn.finished), so the ACP projection
+// can surface a diff. edits are nil for non-editing tools, leaving the event
+// unchanged.
+func withEdits(ev event.ToolCallFinished, edits []event.FileEdit) event.ToolCallFinished {
+	ev.Edits = edits
+	return ev
+}
+
 // runOneTool runs one resolved tool call through a per-call spill sink and emits
 // tool.call.finished. The tool's output streams into an append-only file (bash
 // writes straight through the sink; other tools return a bounded string the loop
@@ -359,7 +372,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// rather than crashing the loop.
 		r.emitError("spill: "+err.Error(), false)
 		res := r.execTool(ctx, call)
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
+		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -374,7 +387,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// The spill file is suspect: emit the tool's own content and drop the
 		// (possibly inconsistent) reference, but never crash the loop.
 		r.emitError("spill: close "+call.ID+": "+closeErr.Error(), false)
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics))
+		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -387,9 +400,9 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		modelContent = res.Content
 	}
 	if ref.Path != "" {
-		r.broker().Publish(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256))
+		r.broker().Publish(withEdits(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256), res.Edits))
 	} else {
-		r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics))
+		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics), res.Edits))
 	}
 	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
 }

@@ -35,6 +35,51 @@ func TestEditSingleReplace(t *testing.T) {
 	}
 }
 
+func TestEditFileChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEdit(dir)
+	res, err := e.Run(context.Background(), json.RawMessage(`{"path":"f.txt","old_string":"world","new_string":"there"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	fc := res.Metadata.FileChange
+	if fc == nil {
+		t.Fatal("Metadata.FileChange = nil, want a change record")
+	}
+	if fc.Path != "f.txt" {
+		t.Errorf("Path = %q, want %q", fc.Path, "f.txt")
+	}
+	if fc.OldText != "hello world" {
+		t.Errorf("OldText = %q, want %q", fc.OldText, "hello world")
+	}
+	if fc.NewText != "hello there" {
+		t.Errorf("NewText = %q, want %q", fc.NewText, "hello there")
+	}
+}
+
+func TestEditErrorHasNoFileChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEdit(dir)
+	res, err := e.Run(context.Background(), json.RawMessage(`{"path":"f.txt","old_string":"missing","new_string":"x"}`))
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("IsError = false, want true")
+	}
+	if res.Metadata.FileChange != nil {
+		t.Errorf("Metadata.FileChange = %+v, want nil on error", res.Metadata.FileChange)
+	}
+}
+
 func TestEditReplaceAllCount(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "f.txt")

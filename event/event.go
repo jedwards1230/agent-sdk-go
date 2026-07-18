@@ -537,6 +537,12 @@ type ToolCallFinished struct {
 	Result      string
 	IsError     bool
 	Diagnostics []string
+	// Edits are the structured file mutations the call performed, or nil when it
+	// changed no files. A file-editing tool (edit, write) populates them so a
+	// client can render a before/after diff instead of the plain-text Result.
+	// It is set on the built event at emit time (like ContextWindow on
+	// TurnFinished), not through the constructors; additive and journal-portable.
+	Edits []FileEdit
 	// SpillPath is the spill file relative to the store root, or empty when the
 	// output was not spilled to a file.
 	SpillPath string
@@ -544,6 +550,20 @@ type ToolCallFinished struct {
 	SpillBytes int64
 	// SpillSHA256 is the hex-encoded sha256 of the full spilled output.
 	SpillSHA256 string
+}
+
+// FileEdit is a structured before/after record of one file a tool mutated: the
+// file's path and its content before and after the change. OldText is empty
+// when the file was created. It is the contract basis a client renders as a
+// diff; it rides on [ToolCallFinished.Edits] and never enters the model's
+// context.
+type FileEdit struct {
+	// Path is the file's path as the tool was asked to change it.
+	Path string `json:"path"`
+	// OldText is the file's content before the change, empty for a creation.
+	OldText string `json:"old_text,omitempty"`
+	// NewText is the file's content after the change.
+	NewText string `json:"new_text"`
 }
 
 // NewToolCallFinished builds a tool.call.finished event with no spill-file
@@ -579,7 +599,9 @@ func (ToolCallFinished) Kind() string { return KindToolCallFinished }
 func (ToolCallFinished) Tier() Tier { return TierMustDeliver }
 
 // MarshalJSON encodes the envelope plus {id, input?, result, is_error?,
-// diagnostics?, spill_path?, spill_bytes?, spill_sha256?}.
+// diagnostics?, edits?, spill_path?, spill_bytes?, spill_sha256?}. edits is
+// omitempty so a call that changed no files leaves the payload identical to
+// before this field existed.
 func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
@@ -588,10 +610,11 @@ func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 		Result      string          `json:"result"`
 		IsError     bool            `json:"is_error,omitempty"`
 		Diagnostics []string        `json:"diagnostics,omitempty"`
+		Edits       []FileEdit      `json:"edits,omitempty"`
 		SpillPath   string          `json:"spill_path,omitempty"`
 		SpillBytes  int64           `json:"spill_bytes,omitempty"`
 		SpillSHA256 string          `json:"spill_sha256,omitempty"`
-	}{baseEnvelope(e), e.ID, e.Input, e.Result, e.IsError, e.Diagnostics, e.SpillPath, e.SpillBytes, e.SpillSHA256})
+	}{baseEnvelope(e), e.ID, e.Input, e.Result, e.IsError, e.Diagnostics, e.Edits, e.SpillPath, e.SpillBytes, e.SpillSHA256})
 }
 
 func (e ToolCallFinished) withMeta(seq uint64, ts time.Time) Event {

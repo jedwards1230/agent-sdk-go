@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -214,6 +215,35 @@ func TestToolCallFinishedCarriesInput(t *testing.T) {
 	}
 	if string(finished[0].Input) != `{"cmd":"ls -la"}` {
 		t.Errorf("tool.call.finished input = %s, want authoritative arguments (not {})", finished[0].Input)
+	}
+}
+
+// TestToolCallFinishedCarriesEdits asserts a tool's structured file edits are
+// stamped onto the emitted tool.call.finished event, so the ACP projection can
+// surface a diff.
+func TestToolCallFinishedCarriesEdits(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	edits := []event.FileEdit{{Path: "foo.go", OldText: "old", NewText: "new"}}
+	tool := &fakeTool{name: "edit", result: loop.ToolResult{Content: "edited foo.go", Edits: edits}}
+	cfg := baseConfig(b, scripted(
+		toolTurn("t1", "edit", `{"path":"foo.go"}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	finished := drainFinished(sub)
+	if len(finished) != 1 {
+		t.Fatalf("want 1 tool.call.finished, got %d", len(finished))
+	}
+	if got := finished[0].Edits; !reflect.DeepEqual(got, edits) {
+		t.Errorf("tool.call.finished edits = %+v, want %+v", got, edits)
 	}
 }
 

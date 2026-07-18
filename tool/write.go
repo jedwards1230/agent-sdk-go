@@ -63,6 +63,12 @@ func (t *Write) Run(ctx context.Context, input json.RawMessage) (Result, error) 
 	}
 
 	p := resolvePath(t.root, in.Path)
+	// Capture the prior content (if the file exists) so the change surfaces as a
+	// before/after diff; a read miss leaves oldText empty, marking a creation.
+	var oldText string
+	if prior, err := os.ReadFile(p); err == nil { // #nosec G304 -- path resolution is intentionally unconfined at this layer (see resolvePath)
+		oldText = string(prior)
+	}
 	if dir := filepath.Dir(p); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil { // #nosec G301 -- directories are meant to be traversable by the running user
 			return errorResult("write: creating %s: %v", dir, err), nil
@@ -72,5 +78,12 @@ func (t *Write) Run(ctx context.Context, input json.RawMessage) (Result, error) 
 		return errorResult("write: %s: %v", in.Path, err), nil
 	}
 
-	return Result{Content: fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path)}, nil
+	return Result{
+		Content: fmt.Sprintf("wrote %d bytes to %s", len(in.Content), in.Path),
+		Metadata: Metadata{FileChange: &FileChange{
+			Path:    in.Path,
+			OldText: oldText,
+			NewText: in.Content,
+		}},
+	}, nil
 }

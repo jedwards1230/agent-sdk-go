@@ -409,12 +409,19 @@ consume it unchanged, and only as a mapping, never a built-in behavior.
 
 **Shipped (v0.6.0, the projection-safe subset).** `usage_update` projection;
 the `image`/`audio`/`resource` (`EmbeddedResource`) content blocks; and the
-`diff`/`terminal` tool-call content variants. This is modeling + projection
-only — the types round-trip and project, but **no producer emits the rich
-blocks yet**, and `usage_update` is skipped for turns without real usage. The
-`session/list` request/response types (`list.go`) and `SessionInfo` (already
-carrying `cwd` and optional `title`) are modeled but not yet wired into
-dispatch.
+`diff`/`terminal` tool-call content variants. v0.6.0 was modeling + projection
+only — the types round-trip and project, but no producer emitted the rich
+blocks. The **`diff` producer now ships**: the edit and write tools attach a
+structured before/after `event.FileEdit` to `tool.call.finished`, and
+`ToSessionUpdate` projects it to a `diff` [ToolCallContent] on
+`tool_call_update` (replacing the plain-text result for an edit; a creation
+carries no `oldText`). `terminal`, and the `image`/`audio`/`resource` blocks,
+stay **modeled-but-dormant** — no builtin tool naturally produces them (no tool
+drives a terminal or yields image/audio bytes, and the read tool's authoritative
+output is deliberately line-numbered text, not a faithful raw-bytes resource).
+`usage_update` is still skipped for turns without real usage. The `session/list`
+request/response types (`list.go`) and `SessionInfo` (already carrying `cwd` and
+optional `title`) are modeled but not yet wired into dispatch.
 
 **Promote-if-stable** governs what projects onto this standard surface vs stays
 gofer-native — see the [PRD](PRD.md) settled decision. In short: a capability
@@ -428,9 +435,10 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   already-modeled types, model `set_config_option`, and confirm resume
   (`session/load`) coverage. `SessionInfo.cwd`/`title` already exist; no schema
   guess needed.
-- **Producers for the rich blocks** — emit a `diff` tool-call content block from
-  the edit tools (and `terminal` where applicable) so a real tool call carries
-  the v0.6.0-modeled shapes end-to-end, with the client rendering them.
+- **Producers for the rich blocks** — the `diff` producer ships (edit/write →
+  `event.FileEdit` → `diff` content block). `terminal` (and `image`/`audio`/
+  `resource`) stay dormant until a builtin tool naturally produces them; none
+  does today, so no producer was invented.
 - **Model discovery types** — the types backing gofer's native list-models
   endpoint that feeds the `session/new` model picker (migrate to `providers/
   list` only once that spec surface stabilizes).

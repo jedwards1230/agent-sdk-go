@@ -133,6 +133,11 @@ M0–M3 are what shipped here.
   image/audio/resource content blocks + `diff`/`terminal` tool-call content
   modeled and projected (carries #52–#54). Modeling + projection only — no
   producer emits the rich blocks yet; that lands in M4 proper.
+- **`diff` producer** — the edit and write tools attach a structured
+  before/after `event.FileEdit` to `tool.call.finished`; `ToSessionUpdate`
+  projects it to a `diff` tool-call content block, so an edit renders as a real
+  diff instead of plain text. `terminal`/`image`/`audio`/`resource` stay
+  modeled-but-dormant (no builtin tool naturally produces them).
 
 ## Settled decisions
 
