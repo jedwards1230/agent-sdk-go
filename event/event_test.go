@@ -98,6 +98,83 @@ func TestPlanUpdatedMarshal(t *testing.T) {
 	})
 }
 
+// TestConfigOptionsUpdatedMarshal asserts the additive session.config event
+// carries its options on the wire, is must-deliver, reports the right kind, and
+// marshals an empty set to an options array rather than null.
+func TestConfigOptionsUpdatedMarshal(t *testing.T) {
+	t.Run("with options", func(t *testing.T) {
+		ev := event.NewConfigOptionsUpdated(sid, []event.ConfigOption{
+			{
+				ID:            "model",
+				Name:          "Model",
+				Category:      "model",
+				Kind:          event.ConfigOptionSelect,
+				SelectedValue: "opus",
+				Values: []event.ConfigSelectValue{
+					{Value: "opus", Name: "Opus"},
+					{Value: "sonnet", Name: "Sonnet", Description: "faster"},
+				},
+			},
+			{
+				ID:      "stream",
+				Name:    "Stream",
+				Kind:    event.ConfigOptionBoolean,
+				Enabled: true,
+			},
+		})
+		if ev.Kind() != event.KindSessionConfig {
+			t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionConfig)
+		}
+		if ev.Tier() != event.TierMustDeliver {
+			t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+		}
+		raw, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m struct {
+			Type      string               `json:"type"`
+			SessionID string               `json:"session_id"`
+			Options   []event.ConfigOption `json:"options"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if m.Type != event.KindSessionConfig {
+			t.Errorf("type = %q, want %q", m.Type, event.KindSessionConfig)
+		}
+		if m.SessionID != sid {
+			t.Errorf("session_id = %q, want %q", m.SessionID, sid)
+		}
+		if len(m.Options) != 2 {
+			t.Fatalf("options len = %d, want 2", len(m.Options))
+		}
+		if m.Options[0].Kind != event.ConfigOptionSelect || m.Options[0].SelectedValue != "opus" ||
+			len(m.Options[0].Values) != 2 || m.Options[0].Values[1].Description != "faster" {
+			t.Errorf("select option = %+v, want the round-tripped model selector", m.Options[0])
+		}
+		if m.Options[1].Kind != event.ConfigOptionBoolean || !m.Options[1].Enabled {
+			t.Errorf("boolean option = %+v, want enabled toggle", m.Options[1])
+		}
+	})
+
+	t.Run("empty set marshals to []", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewConfigOptionsUpdated(sid, nil))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m struct {
+			Options json.RawMessage `json:"options"`
+		}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if string(m.Options) != "[]" {
+			t.Errorf("options = %s, want []", m.Options)
+		}
+	})
+}
+
 // TestTurnFinishedContextWindow asserts the additive ContextWindow field
 // serializes as "context_window" when set and, being omitempty, leaves the
 // payload unchanged (no key) when zero.

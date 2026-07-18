@@ -248,6 +248,110 @@ func (e SessionInfoUpdated) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
+// ConfigOptionKind discriminates a [ConfigOption]'s type: a single-value select
+// (dropdown) or a boolean on/off toggle. It mirrors the two ACP config-option
+// kinds neutrally, so the event contract carries config options without
+// depending on the acp package.
+type ConfigOptionKind string
+
+// The config-option kinds.
+const (
+	// ConfigOptionSelect is a single-value selector: SelectedValue names the
+	// current choice out of Values.
+	ConfigOptionSelect ConfigOptionKind = "select"
+	// ConfigOptionBoolean is an on/off toggle: Enabled is its current state.
+	ConfigOptionBoolean ConfigOptionKind = "boolean"
+)
+
+// ConfigSelectValue is one selectable value of a select-kind [ConfigOption].
+type ConfigSelectValue struct {
+	// Value is the value's unique id.
+	Value string `json:"value"`
+	// Name is the human-readable label.
+	Name string `json:"name"`
+	// Description is an optional description for a client to display.
+	Description string `json:"description,omitempty"`
+}
+
+// ConfigOption is one session configuration selector and its current value,
+// carried by a [ConfigOptionsUpdated] event. It is a neutral, transport-only
+// snapshot of a config option: the rich protocol modeling (per-kind wire shape,
+// forward-compat decode) lives in the acp package, which projects this into its
+// own config-option type. A single flat struct with a Kind discriminator carries
+// both variants' data without re-creating that type hierarchy here — Kind selects
+// which fields are meaningful.
+type ConfigOption struct {
+	// ID uniquely identifies the option.
+	ID string `json:"id"`
+	// Name is the human-readable label.
+	Name string `json:"name"`
+	// Description is an optional description for a client to display.
+	Description string `json:"description,omitempty"`
+	// Category is an optional semantic category (UX hint only), e.g. "model".
+	Category string `json:"category,omitempty"`
+	// Kind selects which of the fields below are meaningful.
+	Kind ConfigOptionKind `json:"kind"`
+
+	// SelectedValue and Values apply to a select-kind option: the currently
+	// selected value id and the set of selectable values. Both are empty for a
+	// boolean option.
+	SelectedValue string              `json:"selectedValue,omitempty"`
+	Values        []ConfigSelectValue `json:"values,omitempty"`
+
+	// Enabled is the current on/off state of a boolean-kind option; false (and
+	// omitted) for a select option.
+	Enabled bool `json:"enabled,omitempty"`
+}
+
+// ConfigOptionsUpdated is emitted when the embedder's session configuration
+// options change — e.g. the current model, session mode, or a boolean toggle. It
+// is the seam an embedder uses to advertise its config options to clients live
+// (it projects to an ACP config_option_update). Options is the full current set
+// as an authoritative snapshot (each event carries the whole set, not a delta),
+// so a client replaces its config UI from it; a non-nil but empty slice is a
+// "no options" snapshot.
+//
+// Config-option content is application business logic: WHICH options exist (that
+// "model" is a selector, and its values) is the embedder's knowledge, not the
+// SDK's. The embedder builds the snapshot and emits this event; the SDK only
+// carries and broadcasts it.
+type ConfigOptionsUpdated struct {
+	meta
+	Options []ConfigOption
+}
+
+// NewConfigOptionsUpdated builds a session.config event carrying the embedder's
+// full current set of config options.
+func NewConfigOptionsUpdated(session string, options []ConfigOption) ConfigOptionsUpdated {
+	return ConfigOptionsUpdated{meta: meta{session: session}, Options: options}
+}
+
+// Kind returns KindSessionConfig.
+func (ConfigOptionsUpdated) Kind() string { return KindSessionConfig }
+
+// Tier returns TierMustDeliver: a config-options snapshot is authoritative
+// session metadata.
+func (ConfigOptionsUpdated) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {options}. options is always present (an
+// empty set marshals to []) so a client can distinguish a cleared set from an
+// absent field.
+func (e ConfigOptionsUpdated) MarshalJSON() ([]byte, error) {
+	options := e.Options
+	if options == nil {
+		options = []ConfigOption{}
+	}
+	return json.Marshal(struct {
+		envelope
+		Options []ConfigOption `json:"options"`
+	}{baseEnvelope(e), options})
+}
+
+func (e ConfigOptionsUpdated) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
 // PlanEntry is one item in an agent's task plan carried by a [PlanUpdated]
 // event: what the step is, how it is prioritized, and where it stands. It
 // projects to an ACP plan entry.

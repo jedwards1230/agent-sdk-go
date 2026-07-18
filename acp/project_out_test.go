@@ -177,6 +177,49 @@ func TestToSessionUpdate(t *testing.T) {
 				`"title":"Debug authentication timeout"}}`,
 		},
 		{
+			name: "config options updated -> config_option_update",
+			event: event.NewConfigOptionsUpdated(sid, []event.ConfigOption{
+				{
+					ID:            "model",
+					Name:          "Model",
+					Category:      "model",
+					Kind:          event.ConfigOptionSelect,
+					SelectedValue: "opus",
+					Values: []event.ConfigSelectValue{
+						{Value: "opus", Name: "Opus"},
+						{Value: "sonnet", Name: "Sonnet", Description: "faster"},
+					},
+				},
+				{
+					ID:      "stream",
+					Name:    "Stream",
+					Kind:    event.ConfigOptionBoolean,
+					Enabled: true,
+				},
+			}),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"config_option_update","configOptions":[` +
+				`{"id":"model","name":"Model","category":"model","type":"select","currentValue":"opus",` +
+				`"options":[{"value":"opus","name":"Opus"},{"value":"sonnet","name":"Sonnet","description":"faster"}]},` +
+				`{"id":"stream","name":"Stream","type":"boolean","currentValue":true}]}}`,
+		},
+		{
+			name:   "empty config options -> config_option_update with empty set",
+			event:  event.NewConfigOptionsUpdated(sid, nil),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"config_option_update",` +
+				`"configOptions":[]}}`,
+		},
+		{
+			name: "config option with no explicit kind projects as select",
+			event: event.NewConfigOptionsUpdated(sid, []event.ConfigOption{
+				{ID: "mode", Name: "Mode", SelectedValue: "default"},
+			}),
+			wantOK: true,
+			wantJSON: `{"sessionId":"sess-1","update":{"sessionUpdate":"config_option_update","configOptions":[` +
+				`{"id":"mode","name":"Mode","type":"select","currentValue":"default","options":[]}]}}`,
+		},
+		{
 			name: "plan -> plan session/update",
 			event: event.NewPlanUpdated(sid, []event.PlanEntry{
 				{Content: "Read the code", Priority: "high", Status: "completed"},

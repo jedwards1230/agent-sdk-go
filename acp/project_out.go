@@ -22,9 +22,10 @@ import (
 //     one per delta.
 //   - session lifecycle (session.created/resumed/…) / turn.started /
 //     permission.*: outside the session/update surface (permission.* projects
-//     via [ToRequestPermission] instead). session.info is the one session.*
-//     event that DOES project — to a session_info_update carrying the new
-//     title (below).
+//     via [ToRequestPermission] instead). session.info and session.config are
+//     the session.* events that DO project — to a session_info_update carrying
+//     the new title and a config_option_update carrying the current config
+//     options, respectively (below).
 //
 // An [event.TurnFinished] projects to a usage_update carrying the tokens now in
 // context, the model's total context-window size, and (when priced) the turn's
@@ -154,6 +155,37 @@ func ToSessionUpdate(sessionID string, e event.Event) (SessionNotification, bool
 			update.UpdatedAt = t.UTC().Format(time.RFC3339Nano)
 		}
 		return SessionNotification{SessionID: sessionID, Update: update}, true
+
+	case event.ConfigOptionsUpdated:
+		// session.config carries the embedder's full current set of config
+		// options (the model selector, mode, boolean toggles). Project every
+		// option so the client rebuilds its config UI; an empty set projects to
+		// an empty configOptions array (a valid "no options" snapshot). Each
+		// neutral event option is re-erected into the acp ConfigOption union via
+		// its Kind discriminator.
+		opts := make([]ConfigOption, 0, len(ev.Options))
+		for _, o := range ev.Options {
+			opt := ConfigOption{
+				ID:          o.ID,
+				Name:        o.Name,
+				Description: o.Description,
+				Category:    ConfigOptionCategory(o.Category),
+			}
+			switch o.Kind {
+			case event.ConfigOptionBoolean:
+				opt.Kind = BooleanKind{CurrentValue: o.Enabled}
+			default:
+				// Select is the primary (and default) kind; an empty/unknown
+				// kind is carried as a select of whatever values were supplied.
+				values := make([]SelectOption, 0, len(o.Values))
+				for _, v := range o.Values {
+					values = append(values, SelectOption{Value: v.Value, Name: v.Name, Description: v.Description})
+				}
+				opt.Kind = SelectKind{CurrentValue: o.SelectedValue, Options: values}
+			}
+			opts = append(opts, opt)
+		}
+		return SessionNotification{SessionID: sessionID, Update: ConfigOptionUpdate{ConfigOptions: opts}}, true
 
 	case event.PlanUpdated:
 		// plan carries the agent's full current task plan (from the update_plan
