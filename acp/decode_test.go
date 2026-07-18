@@ -90,7 +90,16 @@ func TestDecodeOp(t *testing.T) {
 func TestDecodeOpHandshakeHasNoOp(t *testing.T) {
 	t.Parallel()
 
-	for _, method := range []string{MethodInitialize, MethodAuthenticate} {
+	// The handshakes plus the request/response methods the SDK does not
+	// pre-project to an op: a transport answers these directly via their
+	// typed decoders, so DecodeOp must recognize them (not error) yet return
+	// no op.
+	for _, method := range []string{
+		MethodInitialize,
+		MethodAuthenticate,
+		MethodSessionList,
+		MethodSessionSetConfigOption,
+	} {
 		op, ok, err := DecodeOp(method, json.RawMessage(`{}`))
 		if err != nil {
 			t.Errorf("DecodeOp(%q) error = %v, want nil", method, err)

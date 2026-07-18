@@ -14,9 +14,17 @@ import (
 // dispatches the returned op to the supervisor.
 //
 // ok is false, with a nil op and nil error, for a well-formed method that
-// carries no op — the handshake methods initialize and authenticate, which a
-// transport answers itself (see [NewInitializeResponse]). It errors on
-// malformed params or an unknown method.
+// carries no op — the methods the SDK does not pre-project to an op, which a
+// transport answers directly via their exported request/response types:
+//
+//   - initialize / authenticate — handshakes (see [NewInitializeResponse]).
+//   - session/list — a query answered from the session store (decode its
+//     params with [DecodeListSessions], reply with [ListSessionsResponse]).
+//   - session/set_config_option — a config mutation whose ConfigID/value
+//     semantics are the application's business logic, not the SDK's (decode
+//     with [DecodeSetConfigOption], reply with [SetConfigOptionResponse]).
+//
+// It errors on malformed params or an unknown method.
 //
 // The four op-bearing methods and their projections:
 //
@@ -54,8 +62,12 @@ func DecodeOp(method string, params json.RawMessage) (op event.Op, ok bool, err 
 		}
 		return FromLoadSession(req), true, nil
 
-	case MethodInitialize, MethodAuthenticate:
-		// Handshake methods carry no op; the transport answers them directly.
+	case MethodInitialize, MethodAuthenticate, MethodSessionList, MethodSessionSetConfigOption:
+		// These carry no pre-projected op: the handshakes, the session/list
+		// query, and session/set_config_option (its config semantics are the
+		// application's business logic). A transport answers them directly via
+		// the exported request/response types (see [DecodeListSessions] and
+		// [DecodeSetConfigOption]).
 		return nil, false, nil
 
 	default:
@@ -71,6 +83,32 @@ func DecodeInitialize(params json.RawMessage) (InitializeRequest, error) {
 	var req InitializeRequest
 	if err := unmarshalParams(MethodInitialize, params, &req); err != nil {
 		return InitializeRequest{}, err
+	}
+	return req, nil
+}
+
+// DecodeListSessions decodes the params of a session/list request. The method
+// carries no op (it is a read query, not a mutation dispatched to the
+// supervisor), so it is not covered by [DecodeOp]; a transport decodes the
+// filter/cursor here, answers from its session store, and replies with a
+// [ListSessionsResponse].
+func DecodeListSessions(params json.RawMessage) (ListSessionsRequest, error) {
+	var req ListSessionsRequest
+	if err := unmarshalParams(MethodSessionList, params, &req); err != nil {
+		return ListSessionsRequest{}, err
+	}
+	return req, nil
+}
+
+// DecodeSetConfigOption decodes the params of a session/set_config_option
+// request. The SDK deliberately does not project this to an op: the meaning of
+// ConfigID and the resulting config set are the application's business logic,
+// so a transport decodes the typed request here, applies its own change, and
+// replies with a [SetConfigOptionResponse].
+func DecodeSetConfigOption(params json.RawMessage) (SetConfigOptionRequest, error) {
+	var req SetConfigOptionRequest
+	if err := unmarshalParams(MethodSessionSetConfigOption, params, &req); err != nil {
+		return SetConfigOptionRequest{}, err
 	}
 	return req, nil
 }

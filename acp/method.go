@@ -25,4 +25,8 @@ const (
 	MethodSessionRequestPermission = "session/request_permission"
 	// MethodSessionList lists existing sessions (session metadata + pagination).
 	MethodSessionList = "session/list"
+	// MethodSessionSetConfigOption sets a session configuration option (the
+	// stable ACP v1 model/mode/thought-level selector and boolean-toggle
+	// mechanism).
+	MethodSessionSetConfigOption = "session/set_config_option"
 )
