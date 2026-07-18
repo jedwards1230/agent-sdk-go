@@ -108,6 +108,10 @@ func TestSetConfigOptionRequestUnmarshalMissingRequired(t *testing.T) {
 			name: "empty configId errors",
 			data: `{"sessionId":"sess_1","configId":"","value":"model-1"}`,
 		},
+		{
+			name: "empty sessionId errors",
+			data: `{"sessionId":"","configId":"model","value":"model-1"}`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

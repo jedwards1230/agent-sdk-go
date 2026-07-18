@@ -90,9 +90,12 @@ func (r *SetConfigOptionRequest) UnmarshalJSON(data []byte) error {
 	r.SessionID = wire.SessionID
 	r.ConfigID = wire.ConfigID
 
-	// configId and value are required by the ACP schema; reject a missing or
-	// null value (which json would otherwise decode to a silent zero value)
-	// rather than accepting an under-specified request.
+	// sessionId, configId, and value are required by the ACP schema; reject a
+	// missing or null value (which json would otherwise decode to a silent
+	// zero value) rather than accepting an under-specified request.
+	if wire.SessionID == "" {
+		return fmt.Errorf("acp: set_config_option request missing required sessionId")
+	}
 	if wire.ConfigID == "" {
 		return fmt.Errorf("acp: set_config_option request missing required configId")
 	}
