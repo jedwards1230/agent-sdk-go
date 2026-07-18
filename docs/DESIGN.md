@@ -404,8 +404,13 @@ consume it unchanged, and only as a mapping, never a built-in behavior.
 - **Inbound** (JSON-RPC method + params → `event.Op`): `DecodeOp` routes the
   four op-bearing methods — `session/prompt`→`PromptSend`, `session/cancel`→
   `TurnInterrupt`, `session/new`→`SessionNew`, `session/load`→`SessionResume`
-  (resume) — via the `From*` functions; `initialize`/`authenticate` are
-  handshakes a transport answers itself.
+  (resume) — via the `From*` functions. It also *recognizes* the
+  request/response methods it does not pre-project to an op — `initialize`,
+  `authenticate`, `session/list`, and `session/set_config_option` — returning
+  no op so a transport answers them directly via their typed request decoders
+  (`DecodeInitialize`, `DecodeListSessions`, `DecodeSetConfigOption`).
+  `set_config_option` stays unprojected on purpose: its `configId`/value
+  semantics are the application's business logic, not the SDK's.
 
 **Shipped (v0.6.0, the projection-safe subset).** `usage_update` projection;
 the `image`/`audio`/`resource` (`EmbeddedResource`) content blocks; and the
@@ -419,9 +424,17 @@ carries no `oldText`). `terminal`, and the `image`/`audio`/`resource` blocks,
 stay **modeled-but-dormant** — no builtin tool naturally produces them (no tool
 drives a terminal or yields image/audio bytes, and the read tool's authoritative
 output is deliberately line-numbered text, not a faithful raw-bytes resource).
-`usage_update` is still skipped for turns without real usage. The `session/list`
-request/response types (`list.go`) and `SessionInfo` (already carrying `cwd` and
-optional `title`) are modeled but not yet wired into dispatch.
+`usage_update` is still skipped for turns without real usage.
+
+**Shipped (session methods).** `session/list` is wired into `DecodeOp`
+dispatch over its already-modeled request/response types (`list.go`) plus a
+`DecodeListSessions` decoder; `session/set_config_option` is modeled
+(`config.go`: `SetConfigOptionRequest`, `SetConfigOptionResponse`, and the
+`ConfigOption` select/boolean value union) with a `DecodeSetConfigOption`
+decoder. Both are recognized-but-unprojected in `DecodeOp` — a transport
+decodes and answers them directly. Grouped select options and `_meta` are not
+modeled yet (additive). `SessionInfo` carries `cwd`/`title`/`updatedAt`; its
+optional `additionalDirectories` is not modeled yet (additive).
 
 **Promote-if-stable** governs what projects onto this standard surface vs stays
 gofer-native — see the [PRD](PRD.md) settled decision. In short: a capability
@@ -431,11 +444,11 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
 
 **SDK-side M4 roadmap** (modeling + projection, matrix-driven):
 
-- **Session methods** — wire `session/list` dispatch/projection over the
-  already-modeled types, model `set_config_option`, and confirm resume
-  (`session/load`) coverage. `SessionInfo.cwd`/`title` already exist; no schema
-  guess needed.
-- **Producers for the rich blocks** — the `diff` producer ships (edit/write →
+- **Session methods** ✅ — `session/list` dispatch, `set_config_option`
+  modeling, and resume (`session/load`) coverage are done (see *Shipped
+  (session methods)* above). Remaining additive follow-ups: grouped select
+  options, `SessionInfo.additionalDirectories`, and `_meta` passthrough.
+- **Producers for the rich blocks** ✅ — the `diff` producer ships (edit/write →
   `event.FileEdit` → `diff` content block). `terminal` (and `image`/`audio`/
   `resource`) stay dormant until a builtin tool naturally produces them; none
   does today, so no producer was invented.
