@@ -24,6 +24,17 @@ type Store interface {
 	// Create starts a new empty journal for projectSlug with a fresh UUIDv7
 	// session id, ready for Append.
 	Create(ctx context.Context, projectSlug string) (*Journal, error)
+	// CreateWithID is Create with a caller-assigned session id instead of a
+	// freshly generated one — the seam a caller that must know a session's id
+	// before the session exists (e.g. a process-isolated worker keyed by that
+	// id for its socket/lock filenames) uses to pin it. An empty id is exactly
+	// equivalent to Create (a fresh UUIDv7 is generated). A non-empty id must be
+	// a safe single path component — it names the journal file — or
+	// [ErrInvalidID] is returned; it does not affect entry-id generation, which
+	// still uses the store's id generator. Collision on an id that already
+	// exists is store-specific: a [FileStore] rejects it (its journal file is
+	// created O_EXCL), a [MemStore] replaces the prior in-memory journal.
+	CreateWithID(ctx context.Context, projectSlug, id string) (*Journal, error)
 	// Open resumes an existing session by id, rebuilding its journal from
 	// disk (torn-write safe). It scans every project dir under the store's
 	// root for <id>.jsonl.
@@ -47,6 +58,13 @@ var ErrInvalidSlug = errors.New("session: invalid project slug")
 // ErrSessionNotFound indicates [Store.Open] found no journal for the given
 // id under any project directory in the store's root.
 var ErrSessionNotFound = errors.New("session: session not found")
+
+// ErrInvalidID indicates a caller-assigned session id (see [Store.CreateWithID])
+// cannot safely be used as a single path component, since it names the journal
+// file: ".", "..", or an id containing a path separator. An empty id is not
+// invalid — it means "generate a fresh one" — so this is only ever returned for
+// a non-empty, unsafe id.
+var ErrInvalidID = errors.New("session: invalid session id")
 
 // FileStore is a [Store] backed by one append-only JSONL file per session, at
 // <root>/sessions/<projectSlug>/<id>.jsonl.
@@ -208,16 +226,44 @@ func validateSlug(slug string) error {
 	return nil
 }
 
+// validateID rejects a non-empty caller-assigned session id that cannot safely
+// be used as a single path component (it names the journal file). It is only
+// called for a non-empty id — an empty id means "generate one".
+func validateID(id string) error {
+	if id == "." || id == ".." || id != filepath.Base(id) {
+		return fmt.Errorf("session: session id %q: %w", id, ErrInvalidID)
+	}
+	return nil
+}
+
 // Create starts a new empty journal for projectSlug with a fresh session id.
 func (s *FileStore) Create(ctx context.Context, projectSlug string) (*Journal, error) {
+	return s.create(ctx, projectSlug, "")
+}
+
+// CreateWithID starts a new empty journal for projectSlug using id verbatim as
+// the session id (or a fresh one when id is empty). See [Store.CreateWithID].
+func (s *FileStore) CreateWithID(ctx context.Context, projectSlug, id string) (*Journal, error) {
+	return s.create(ctx, projectSlug, id)
+}
+
+// create is the shared body of Create/CreateWithID: an empty id is generated
+// from the store's id generator (Create's behavior), a non-empty id is used
+// verbatim after validation. Entry-id generation is unaffected either way — the
+// journal still carries s.idGen for its Append ids.
+func (s *FileStore) create(ctx context.Context, projectSlug, id string) (*Journal, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := validateSlug(projectSlug); err != nil {
 		return nil, err
 	}
+	if id == "" {
+		id = s.idGen()
+	} else if err := validateID(id); err != nil {
+		return nil, err
+	}
 
-	id := s.idGen()
 	dir := filepath.Join(s.root, "sessions", projectSlug)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("session: create project dir %s: %w", dir, err)

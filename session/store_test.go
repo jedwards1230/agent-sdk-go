@@ -76,6 +76,31 @@ func TestFileStoreOpenUnknownID(t *testing.T) {
 	}
 }
 
+// TestFileStoreCreateWithIDCollision asserts a FileStore rejects a pinned id
+// whose journal file already exists — the O_EXCL create surfaces os.ErrExist —
+// rather than truncating or reopening the prior session. This is the existing
+// duplicate-id behavior (a generated UUIDv7 never collides); pinning an id just
+// makes it reachable.
+func TestFileStoreCreateWithIDCollision(t *testing.T) {
+	ctx := context.Background()
+	store, err := session.NewFileStore(session.WithRoot(t.TempDir()))
+	if err != nil {
+		t.Fatalf("NewFileStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if _, err := store.CreateWithID(ctx, "proj", "dup-id"); err != nil {
+		t.Fatalf("CreateWithID (first): %v", err)
+	}
+	_, err = store.CreateWithID(ctx, "proj", "dup-id")
+	if err == nil {
+		t.Fatal("CreateWithID (duplicate): err = nil, want a collision error")
+	}
+	if !errors.Is(err, os.ErrExist) {
+		t.Errorf("CreateWithID (duplicate): err = %v, want wrapping os.ErrExist", err)
+	}
+}
+
 // TestFileStorePathSafety asserts a project slug that attempts path
 // traversal is rejected and never escapes the store root.
 func TestFileStorePathSafety(t *testing.T) {
