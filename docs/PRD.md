@@ -83,6 +83,7 @@ socket, or network — same messages).
 |---|---|
 | `session.created / .resumed / .forked / .compacted / .killed / .archived` | must-deliver |
 | `session.info{title}` (embedder-set title change) | must-deliver |
+| `session.config{options}` (embedder config-option snapshot, e.g. current model) | must-deliver |
 | `plan{entries}` (agent task-plan snapshot via `update_plan`) | must-deliver |
 | `turn.started` · `turn.finished{stop_reason, usage}` | must-deliver |
 | `message.started{kind: text\|reasoning}` | must-deliver |

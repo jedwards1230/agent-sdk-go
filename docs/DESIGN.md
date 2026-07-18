@@ -401,11 +401,13 @@ consume it unchanged, and only as a mapping, never a built-in behavior.
 - **Outbound** (`event.Event` → `session/update`): `ToSessionUpdate` projects
   message/tool-call/permission events to ACP notifications; content blocks
   (`content_block.go`) and tool-call content (`tool_call.go`) carry the payload.
-  It also projects the one session-metadata event, `session.info`
-  (`event.SessionInfoUpdated`), to a `session_info_update` carrying the session
-  `title` (+ `updatedAt` from the event's publish timestamp), and the `plan`
-  event (`event.PlanUpdated`) to a `plan` update carrying the agent's full
-  task-plan `entries`.
+  It also projects the two session-metadata events — `session.info`
+  (`event.SessionInfoUpdated`) to a `session_info_update` carrying the session
+  `title` (+ `updatedAt` from the event's publish timestamp), and
+  `session.config` (`event.ConfigOptionsUpdated`) to a `config_option_update`
+  carrying the embedder's full config-option snapshot — plus the `plan` event
+  (`event.PlanUpdated`) to a `plan` update carrying the agent's full task-plan
+  `entries`.
 - **Inbound** (JSON-RPC method + params → `event.Op`): `DecodeOp` routes the
   four op-bearing methods — `session/prompt`→`PromptSend`, `session/cancel`→
   `TurnInterrupt`, `session/new`→`SessionNew`, `session/load`→`SessionResume`
@@ -467,9 +469,14 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   stays in the embedder (gofer). `plan` **ships**: the `update_plan` builtin tool
   lets the model publish its full task plan; the loop bridges the tool result to
   a must-deliver `plan` event (`event.PlanUpdated`), and `ToSessionUpdate`
-  projects it to a `plan` update. Still stretch: the
-  `available_commands_update`/`current_mode_update`/`config_option_update`
-  registries — modeled as they acquire a stable spec surface and a producer.
+  projects it to a `plan` update. `config_option_update` **ships** (the outbound
+  half): the embedder emits a must-deliver `session.config` event
+  (`event.ConfigOptionsUpdated`) carrying its full config-option snapshot — WHICH
+  options exist (that "model" is a selector, its values) is the embedder's
+  business logic (gofer) — and `ToSessionUpdate` re-erects it into a
+  `config_option_update` reusing the Slice-3 `ConfigOption` shape. Still stretch:
+  the `available_commands_update`/`current_mode_update` registries — modeled as
+  they acquire a stable spec surface and a producer.
 
 ## Session tree & spawn seam (design-ahead, M5)
 

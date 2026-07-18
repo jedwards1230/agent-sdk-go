@@ -58,6 +58,37 @@ func TestSessionUpdateMarshal(t *testing.T) {
 			want:   `{"sessionUpdate":"plan","entries":[]}`,
 		},
 		{
+			name: "config_option_update select and boolean",
+			update: acp.ConfigOptionUpdate{ConfigOptions: []acp.ConfigOption{
+				{
+					ID:       "model",
+					Name:     "Model",
+					Category: acp.ConfigCategoryModel,
+					Kind: acp.SelectKind{
+						CurrentValue: "opus",
+						Options: []acp.SelectOption{
+							{Value: "opus", Name: "Opus"},
+							{Value: "sonnet", Name: "Sonnet", Description: "faster"},
+						},
+					},
+				},
+				{
+					ID:   "stream",
+					Name: "Stream",
+					Kind: acp.BooleanKind{CurrentValue: true},
+				},
+			}},
+			want: `{"sessionUpdate":"config_option_update","configOptions":[` +
+				`{"id":"model","name":"Model","category":"model","type":"select","currentValue":"opus",` +
+				`"options":[{"value":"opus","name":"Opus"},{"value":"sonnet","name":"Sonnet","description":"faster"}]},` +
+				`{"id":"stream","name":"Stream","type":"boolean","currentValue":true}]}`,
+		},
+		{
+			name:   "config_option_update empty set marshals to []",
+			update: acp.ConfigOptionUpdate{},
+			want:   `{"sessionUpdate":"config_option_update","configOptions":[]}`,
+		},
+		{
 			name: "tool_call",
 			update: acp.ToolCall{
 				ToolCallID: "tc-1",

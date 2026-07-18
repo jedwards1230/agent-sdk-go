@@ -96,6 +96,36 @@ func (u SessionInfoUpdate) MarshalJSON() ([]byte, error) {
 	}{u.Kind(), u.Title, u.UpdatedAt})
 }
 
+// ConfigOptionUpdate is the config_option_update session/update variant: the
+// agent advertising the full set of session configuration options and their
+// current values to the client, so it renders live selectors (model, mode,
+// thought-level, boolean toggles). It reuses the [ConfigOption] shape a
+// [SetConfigOptionResponse] carries; a client replaces its config UI from this
+// authoritative snapshot. An empty set marshals to an empty configOptions array
+// (a valid "no options" state), not an absent field.
+type ConfigOptionUpdate struct {
+	// ConfigOptions is the full current set of config options.
+	ConfigOptions []ConfigOption
+}
+
+// Kind returns "config_option_update".
+func (ConfigOptionUpdate) Kind() string { return "config_option_update" }
+
+// MarshalJSON encodes the tagged config_option_update session/update payload
+// {"sessionUpdate":"config_option_update","configOptions":[...]}. A nil set
+// marshals to "[]" so a client can distinguish a cleared set from an absent
+// field.
+func (u ConfigOptionUpdate) MarshalJSON() ([]byte, error) {
+	opts := u.ConfigOptions
+	if opts == nil {
+		opts = []ConfigOption{}
+	}
+	return json.Marshal(struct {
+		SessionUpdate string         `json:"sessionUpdate"`
+		ConfigOptions []ConfigOption `json:"configOptions"`
+	}{u.Kind(), opts})
+}
+
 // PlanEntry is one item in an agent's task plan: what the step is, its priority,
 // and its status. It is the ACP v1 PlanEntry object carried by a [Plan] update;
 // all three fields are required by the schema.
