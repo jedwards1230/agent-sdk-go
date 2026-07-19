@@ -1,6 +1,10 @@
 package session
 
-import "github.com/jedwards1230/agent-sdk-go/provider"
+import (
+	"sort"
+
+	"github.com/jedwards1230/agent-sdk-go/provider"
+)
 
 // PriceLookup resolves per-model pricing for cost aggregation. The provider
 // model registry satisfies it via [RegistryPricing]; tests substitute their own
@@ -32,17 +36,39 @@ type ModelCost struct {
 	Model string
 	Usage provider.Usage // summed tokens for this model
 	Cost  provider.Cost  // priced cost, with per-bucket USD breakdown
+	// Priced reports whether Cost was actually computed. When false, no
+	// pricing was available for this model and Cost is the zero value, which
+	// means UNKNOWN — not free. Usage is still complete either way.
+	Priced bool
 }
 
 // CostReport is a journal's total cost plus a per-model breakdown.
+//
+// Usage is always complete; Cost is not necessarily. A model with no known
+// pricing — an unregistered id, which the SDK now runs rather than refuses —
+// contributes its tokens to Usage but nothing to Cost. Rendering Cost.USD on
+// its own therefore understates a session, and understates it to exactly
+// $0.00 when NO model was priceable. Check [CostReport.Complete] (or the
+// Unpriced list) before presenting a total as the cost of the session.
 type CostReport struct {
 	// Usage is the summed token usage across every entry.
 	Usage provider.Usage
-	// Cost is the total priced cost across every model.
+	// Cost is the total priced cost — the sum over the priceable models ONLY.
+	// It is a lower bound whenever Unpriced is non-empty.
 	Cost provider.Cost
 	// ByModel keys on Entry.Model; entries with an empty model bucket under "".
 	ByModel map[string]ModelCost
+	// Unpriced lists, sorted, the model ids that contributed tokens to Usage
+	// but no cost to Cost because their pricing is unknown. Empty means Cost
+	// accounts for every model in the session.
+	Unpriced []string
 }
+
+// Complete reports whether Cost accounts for every model that used tokens. It
+// is false when any model's pricing was unknown, in which case Cost is a lower
+// bound and a caller should present it as partial (or as unavailable) rather
+// than as the session's cost.
+func (r CostReport) Complete() bool { return len(r.Unpriced) == 0 }
 
 // cost aggregates usage across entries — every branch, including ones dropped
 // from Fold by a fork — pricing each model's summed usage via reg. reg may be
@@ -63,14 +89,19 @@ func cost(entries []Entry, reg PriceLookup) CostReport {
 	report := CostReport{Usage: totalUsage, ByModel: make(map[string]ModelCost, len(usageByModel))}
 	for model, u := range usageByModel {
 		var c provider.Cost
+		var priced bool
 		if reg != nil {
 			if p, ok := reg.Pricing(model); ok {
-				c = p.Cost(u)
+				c, priced = p.Cost(u), true
 			}
 		}
-		report.ByModel[model] = ModelCost{Model: model, Usage: u, Cost: c}
+		report.ByModel[model] = ModelCost{Model: model, Usage: u, Cost: c, Priced: priced}
 		report.Cost = addCost(report.Cost, c)
+		if !priced {
+			report.Unpriced = append(report.Unpriced, model)
+		}
 	}
+	sort.Strings(report.Unpriced)
 	return report
 }
 

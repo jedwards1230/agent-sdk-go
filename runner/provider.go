@@ -55,15 +55,17 @@ var envVars = map[string]string{
 	"openai":    "OPENAI_API_KEY",
 }
 
-// newProvider resolves model's backend from the SDK's model registry, builds a
+// newProvider resolves model's backend via [provider.Resolve] (which admits
+// models the registry does not carry, so a newly released model is usable
+// without an SDK release), builds a
 // compositeCredSource (a stored login credential first, an environment
 // variable second), PRE-FLIGHTS the credential (a store/env lookup — not a
 // live model API call — so a missing credential fails before any session
 // journal is created), and returns a real provider.Provider over it.
 func newProvider(ctx context.Context, model, root string) (provider.Provider, error) {
-	info, ok := provider.Lookup(model)
-	if !ok {
-		return nil, fmt.Errorf("runner: unknown model %q", model)
+	info, err := provider.Resolve(model)
+	if err != nil {
+		return nil, fmt.Errorf("runner: %w", err)
 	}
 
 	var authOpts []auth.Option

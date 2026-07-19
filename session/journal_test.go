@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -354,9 +355,22 @@ func TestJournalCostAggregation(t *testing.T) {
 	if got := report.ByModel[registered]; !got.Usage.Equal(sonnetUsage) || got.Cost != wantSonnetCost {
 		t.Errorf("ByModel[%s] = %+v, want usage %+v cost %+v", registered, got, sonnetUsage, wantSonnetCost)
 	}
-	// Unregistered model: usage summed, cost zero.
+	if got := report.ByModel[registered]; !got.Priced {
+		t.Errorf("ByModel[%s].Priced = false, want true for a registered model", registered)
+	}
+	// Unregistered model: usage summed, cost zero — and flagged as UNPRICED so
+	// a consumer cannot mistake the zero for a real price of $0.00.
 	if got := report.ByModel[unregistered]; got.Usage.InputTokens != 200 || got.Usage.OutputTokens != 100 || got.Cost != (provider.Cost{}) {
 		t.Errorf("ByModel[%s] = %+v, want usage summed and zero cost", unregistered, got)
+	}
+	if got := report.ByModel[unregistered]; got.Priced {
+		t.Errorf("ByModel[%s].Priced = true, want false — an unknown cost must not read as a computed one", unregistered)
+	}
+	if want := []string{unregistered}; !slices.Equal(report.Unpriced, want) {
+		t.Errorf("report.Unpriced = %v, want %v", report.Unpriced, want)
+	}
+	if report.Complete() {
+		t.Error("report.Complete() = true with an unpriced model; a partial total would be presented as the session cost")
 	}
 	// Total cost = only the registered model contributes.
 	if report.Cost != wantSonnetCost {
@@ -369,10 +383,17 @@ func TestJournalCostAggregation(t *testing.T) {
 		t.Errorf("custom-priced USD = %v, want > registry USD %v", got, wantSonnetCost.USD)
 	}
 
-	// nil registry: tokens summed, cost zero everywhere.
+	// nil registry: tokens summed, cost zero everywhere — and NOTHING priced,
+	// so a $0.00 total is reported as unknown rather than as free.
 	nilReport := j.Cost(nil)
 	if !nilReport.Usage.Equal(wantTotalUsage) || nilReport.Cost != (provider.Cost{}) {
 		t.Errorf("Cost(nil) = %+v, want usage summed with zero cost", nilReport)
+	}
+	if want := []string{registered, unregistered}; !slices.Equal(nilReport.Unpriced, want) {
+		t.Errorf("Cost(nil).Unpriced = %v, want %v (sorted)", nilReport.Unpriced, want)
+	}
+	if nilReport.Complete() {
+		t.Error("Cost(nil).Complete() = true; a wholly unpriced $0.00 total must not read as complete")
 	}
 }
 

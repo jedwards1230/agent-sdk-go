@@ -7,17 +7,49 @@ import (
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/auth"
+	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
-// TestNewProvider_UnknownModel asserts a legible, hermetic (no network)
-// error for a model the SDK registry does not recognize.
-func TestNewProvider_UnknownModel(t *testing.T) {
+// TestNewProvider_UninferableModel asserts a legible, hermetic (no network)
+// error for a model id belonging to no known provider family — the only
+// non-empty id newProvider still refuses.
+func TestNewProvider_UninferableModel(t *testing.T) {
 	_, err := newProvider(context.Background(), "not-a-real-model", t.TempDir())
-	if err == nil {
-		t.Fatal("newProvider: got nil error, want an unknown-model error")
+	if !errors.Is(err, provider.ErrUnknownProvider) {
+		t.Fatalf("newProvider error = %v, want ErrUnknownProvider", err)
 	}
-	if !strings.Contains(err.Error(), "unknown model") {
-		t.Errorf("newProvider error = %q, want it to mention the unknown model", err.Error())
+	if !strings.Contains(err.Error(), "not-a-real-model") {
+		t.Errorf("newProvider error = %q, want it to name the offending model", err.Error())
+	}
+}
+
+// TestNewProvider_EmptyModel asserts the empty id is reported as "no model was
+// resolved" — a caller-side bug — rather than as an unrecognized model name,
+// which would send the user hunting for a typo in a name they never typed.
+func TestNewProvider_EmptyModel(t *testing.T) {
+	_, err := newProvider(context.Background(), "", t.TempDir())
+	if !errors.Is(err, provider.ErrNoModel) {
+		t.Fatalf("newProvider(\"\") error = %v, want ErrNoModel", err)
+	}
+	if errors.Is(err, provider.ErrUnknownProvider) {
+		t.Error("empty model reported as an unknown provider; the two cases must stay distinct")
+	}
+}
+
+// TestNewProvider_UnregisteredModelAccepted is the regression test for the
+// allowlist bug: a model the registry does not carry must get PAST model
+// resolution. It is expected to fail later, on the credential pre-flight
+// against an empty store — reaching that point proves the model itself was
+// admitted. If the registry is restored as a gate, this fails with a
+// model error instead.
+func TestNewProvider_UnregisteredModelAccepted(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "") // hermetic: the pre-flight must find nothing
+	_, err := newProvider(context.Background(), "gpt-5.5-turbo-2027", t.TempDir())
+	if errors.Is(err, provider.ErrUnknownProvider) || errors.Is(err, provider.ErrNoModel) {
+		t.Fatalf("newProvider rejected an unregistered model: %v", err)
+	}
+	if !errors.Is(err, ErrNoCredential) {
+		t.Fatalf("newProvider error = %v, want the credential pre-flight to be what stops it", err)
 	}
 }
 

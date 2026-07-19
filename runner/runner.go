@@ -471,9 +471,11 @@ func (r *Runner) currentModel() string {
 // at construction; the per-call model id flows through as [provider.Request]
 // .Model, so switching to another model in that same family works with the
 // existing client. Switching across families would hand the bound client a
-// model id it cannot serve, so SetModel rejects it: model must be a
-// registered id ([provider.Lookup]) whose Provider matches the runner's
-// current model's Provider. A caller that needs a different provider family
+// model id it cannot serve, so SetModel rejects it: model must resolve
+// ([provider.Resolve]) to the same Provider as the runner's current model.
+// The id need NOT be in the registry — an unregistered model whose backend is
+// inferable switches fine, it simply carries no pricing or limits.
+// A caller that needs a different provider family
 // starts a new session (a new Runner, built with the new model, which
 // resolves its own provider and credential) instead of mutating this one.
 //
@@ -487,14 +489,14 @@ func (r *Runner) currentModel() string {
 // deterministic behavior calls SetModel between turns (i.e. after a Prompt
 // call returns).
 func (r *Runner) SetModel(model string) error {
-	next, ok := provider.Lookup(model)
-	if !ok {
-		return fmt.Errorf("runner: unknown model %q", model)
+	next, err := provider.Resolve(model)
+	if err != nil {
+		return fmt.Errorf("runner: %w", err)
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if cur, ok := provider.Lookup(r.model); ok && cur.Provider != next.Provider {
+	if cur, err := provider.Resolve(r.model); err == nil && cur.Provider != next.Provider {
 		return fmt.Errorf("runner: cannot change model from %q (%s) to %q (%s): different provider; start a new session for a different provider instead", r.model, cur.Provider, model, next.Provider)
 	}
 	r.model = model
