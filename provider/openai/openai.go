@@ -36,6 +36,10 @@ type Provider struct {
 	creds   provider.CredentialSource
 	httpc   *http.Client
 	baseURL string // test override; empty derives the base URL from the credential kind
+	// codexClientVersion is sent as the client_version query parameter on the
+	// Codex (OAuth) listing route, which rejects the request without it. See
+	// defaultCodexClientVersion for why the value is configurable.
+	codexClientVersion string
 }
 
 // Option configures a [Provider].
@@ -58,10 +62,30 @@ func WithBaseURL(u string) Option {
 	return func(p *Provider) { p.baseURL = strings.TrimRight(u, "/") }
 }
 
+// WithCodexClientVersion overrides the client_version query parameter sent with
+// [Provider.ListModels] on the Codex (OAuth) route, which rejects the request
+// when it is missing. It exists because the parameter is undocumented and its
+// accepted values are not well understood — see defaultCodexClientVersion. An
+// empty value is ignored, since sending a blank parameter reproduces the very
+// HTTP 400 this exists to avoid. It has no effect on the API-key route or on
+// streaming.
+func WithCodexClientVersion(v string) Option {
+	return func(p *Provider) {
+		if v != "" {
+			p.codexClientVersion = v
+		}
+	}
+}
+
 // New returns a Provider that calls model, resolving credentials from creds
 // under the provider id "openai".
 func New(model string, creds provider.CredentialSource, opts ...Option) *Provider {
-	p := &Provider{model: model, creds: creds, httpc: http.DefaultClient}
+	p := &Provider{
+		model:              model,
+		creds:              creds,
+		httpc:              http.DefaultClient,
+		codexClientVersion: defaultCodexClientVersion,
+	}
 	for _, o := range opts {
 		o(p)
 	}
