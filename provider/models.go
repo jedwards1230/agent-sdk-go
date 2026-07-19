@@ -29,8 +29,10 @@ type ModelInfo struct {
 	// Reasoning reports whether the model supports extended reasoning. It is
 	// false when Unregistered — a conservative default, not a known answer.
 	Reasoning bool
-	// Unregistered reports that this record was synthesized by [Resolve] for a
-	// model id the registry does not carry, rather than read from the registry.
+	// Unregistered reports that this record was synthesized rather than read
+	// from the registry — either by [Resolve], for a model id the registry does
+	// not carry, or by a [ModelLister] from a vendor listing endpoint that
+	// reports no pricing or limits.
 	// Only ID and Provider are trustworthy on such a record: every other field
 	// is a placeholder meaning "unknown". A consumer that surfaces pricing,
 	// limits, or capabilities must branch on this flag and show the value as

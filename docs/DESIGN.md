@@ -71,6 +71,24 @@ client's op started the turn.
   accounting; `CostOf(model, usage)` prices a turn. It is plain data — extend by
   adding rows.
 
+- **Live model listing is an optional capability.** `provider.ModelLister`
+  (`ListModels(ctx) ([]ModelInfo, error)`) is a separate interface, not a method
+  on `Provider`: listing is orthogonal to running a turn, and requiring it would
+  break `faux` and every third-party adapter for no gain. Callers type-assert.
+  `anthropic.Provider` and `openai.Provider` implement it; `faux` deliberately
+  does not. It lives in the SDK because the adapters already own the HTTP
+  client, credential source (incl. OAuth refresh), base URL, and vendor auth
+  headers — reimplementing it upstack would duplicate auth handling and drift.
+
+  It is **stateless**: one vendor call, returning what the vendor said. No
+  caching, TTL, disk persistence, registry merging, or degradation policy —
+  those are application policy. Neither vendor listing endpoint reports pricing
+  or limits (Anthropic returns id/display_name/created_at, OpenAI
+  id/created/owned_by), so every returned record is `Unregistered: true` with
+  metadata fields at zero **meaning unknown**; a caller wanting pricing enriches
+  each id itself via `Lookup`. An empty listing is a success returning an empty
+  slice, never an error.
+
   The registry is **metadata, not an allowlist**. `Resolve(id)` — not `Lookup` —
   is the admission check: an id the table does not carry still resolves, and
   runs, so long as its backend is inferable from its shape (`claude-*`, `gpt-*`,
