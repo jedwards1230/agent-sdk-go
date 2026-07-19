@@ -70,6 +70,22 @@ client's op started the turn.
   output, per-Mtok pricing, reasoning support) backs `Info()` and cost
   accounting; `CostOf(model, usage)` prices a turn. It is plain data — extend by
   adding rows.
+
+  The registry is **metadata, not an allowlist**. `Resolve(id)` — not `Lookup` —
+  is the admission check: an id the table does not carry still resolves, and
+  runs, so long as its backend is inferable from its shape (`claude-*`, `gpt-*`,
+  `o<n>-*`). Such a record has `Unregistered: true` and every metadata field at
+  its zero value **meaning unknown**, so a newly released model is usable the
+  day it ships rather than waiting on an SDK release. Only an empty id
+  (`ErrNoModel` — the caller never resolved a default) and an id belonging to no
+  known family (`ErrUnknownProvider` — no adapter to route to) are refused.
+
+  Degradation is explicit by design, because the failure mode it replaces is
+  worse than a rejection: a consumer that renders an unknown cost as `$0.00`
+  reports a paid model as free. `Lookup`/`CostOf` keep their `ok` result,
+  `ModelInfo.Unregistered` marks a synthesized record, and
+  `session.CostReport` carries `Unpriced` + `Complete()` so a partial total
+  cannot be presented as the session's cost.
 - **Credentials.** `provider.CredentialSource.Credential(ctx, providerID)
   (Credential, error)` decouples providers from the auth package. Kinds are
   `api_key` and `oauth`; `EnvCredentialSource` (API keys from env vars) ships in

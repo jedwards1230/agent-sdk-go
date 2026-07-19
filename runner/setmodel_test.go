@@ -2,6 +2,7 @@ package runner_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -76,10 +77,49 @@ func TestRunner_SetModel_AppliesToNextPrompt(t *testing.T) {
 	}
 }
 
-// TestRunner_SetModel_UnknownModelRejected asserts an unregistered model id
-// is rejected and leaves the runner's model unchanged — a subsequent Prompt
-// still runs on the original model.
-func TestRunner_SetModel_UnknownModelRejected(t *testing.T) {
+// TestRunner_SetModel_UnregisteredSameProviderAccepted is the end-to-end
+// regression test for the allowlist bug: switching to a model the registry
+// does not carry must be ACCEPTED (its backend is inferable and matches the
+// runner's), and the next turn must actually run on it. If the registry is
+// restored as a gate, SetModel errors here and the recorded model stays on the
+// original id.
+func TestRunner_SetModel_UnregisteredSameProviderAccepted(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+
+	const unregistered = "claude-opus-9-1"
+	if _, ok := provider.Lookup(unregistered); ok {
+		t.Fatalf("test premise broken: %q is registered", unregistered)
+	}
+
+	prov := &recordingModelProvider{}
+	r, err := runner.New(context.Background(), runner.Options{
+		Root: root, Cwd: cwd, Model: "claude-sonnet-5",
+		Provider: prov,
+		Tools:    oneToolRegistry{},
+		IDGen:    seqIDGen(), Clock: seqClock(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = r.Close() }()
+
+	if err := r.SetModel(unregistered); err != nil {
+		t.Fatalf("SetModel(%q) = %v, want an unregistered same-provider model to be accepted", unregistered, err)
+	}
+	if err := r.Prompt(context.Background(), "hello"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	if got := prov.last(); got != unregistered {
+		t.Fatalf("req.Model = %q, want %q (the unregistered model must actually run)", got, unregistered)
+	}
+}
+
+// TestRunner_SetModel_UninferableModelRejected asserts a model id belonging to
+// no known provider family is rejected and leaves the runner's model unchanged
+// — a subsequent Prompt still runs on the original model. It also pins the
+// empty-id case to its own distinct error.
+func TestRunner_SetModel_UninferableModelRejected(t *testing.T) {
 	root := t.TempDir()
 	cwd := t.TempDir()
 
@@ -96,11 +136,15 @@ func TestRunner_SetModel_UnknownModelRejected(t *testing.T) {
 	defer func() { _ = r.Close() }()
 
 	err = r.SetModel("not-a-real-model")
-	if err == nil {
-		t.Fatal("SetModel: got nil error, want an unknown-model error")
+	if !errors.Is(err, provider.ErrUnknownProvider) {
+		t.Fatalf("SetModel err = %v, want ErrUnknownProvider", err)
 	}
-	if !strings.Contains(err.Error(), "unknown model") {
-		t.Errorf("SetModel err = %q, want it to mention %q", err.Error(), "unknown model")
+	if !strings.Contains(err.Error(), "not-a-real-model") {
+		t.Errorf("SetModel err = %q, want it to name the offending model", err.Error())
+	}
+
+	if err := r.SetModel(""); !errors.Is(err, provider.ErrNoModel) {
+		t.Errorf("SetModel(\"\") err = %v, want ErrNoModel — an empty model is a caller bug, not a bad name", err)
 	}
 
 	if err := r.Prompt(context.Background(), "hello"); err != nil {

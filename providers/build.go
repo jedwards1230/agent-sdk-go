@@ -13,15 +13,14 @@ import (
 )
 
 // Build returns a [provider.Provider] for the given model id, resolving the
-// backend from the model registry and constructing the matching adapter with
-// creds. Unknown models and unsupported providers return an error.
+// backend via [provider.Resolve] and constructing the matching adapter with
+// creds. A model the registry does not carry still builds, so long as its
+// backend can be determined from its id; only an empty id, an id belonging to
+// no known provider family, or a provider with no adapter returns an error.
 func Build(model string, creds provider.CredentialSource) (provider.Provider, error) {
-	if model == "" {
-		return nil, fmt.Errorf("providers: model is required")
-	}
-	info, ok := provider.Lookup(model)
-	if !ok {
-		return nil, fmt.Errorf("providers: unknown model %q", model)
+	info, err := provider.Resolve(model)
+	if err != nil {
+		return nil, fmt.Errorf("providers: %w", err)
 	}
 	switch info.Provider {
 	case "anthropic":
