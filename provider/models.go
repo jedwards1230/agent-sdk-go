@@ -41,12 +41,16 @@ type ModelInfo struct {
 // ErrNoModel reports that no model id was supplied at all — a caller-side
 // failure to resolve a default, distinct from supplying an id the SDK does not
 // recognize. Callers can errors.Is against it.
-var ErrNoModel = errors.New("provider: no model specified")
+//
+// Its message carries no package prefix: it is a sentinel meant to be wrapped
+// with the caller's own context, and a self-prefix produced the confusing
+// doubled "providers: provider: …" at the [providers.Build] call site.
+var ErrNoModel = errors.New("no model specified")
 
 // ErrUnknownProvider reports that a model id is not registered AND its backend
 // could not be inferred from its id, so no adapter can be constructed for it.
 // This is the only remaining reason [Resolve] refuses a non-empty id.
-var ErrUnknownProvider = errors.New("provider: cannot determine which provider serves model")
+var ErrUnknownProvider = errors.New("cannot determine which provider serves model")
 
 // providerPrefixes maps model-id prefixes to the backend that serves them, for
 // ids the registry does not carry. It exists so a newly released model can be
