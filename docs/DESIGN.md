@@ -82,9 +82,13 @@ client's op started the turn.
 
   It is **stateless**: one vendor call, returning what the vendor said. No
   caching, TTL, disk persistence, registry merging, or degradation policy —
-  those are application policy. Neither vendor listing endpoint reports pricing
-  or limits (Anthropic returns id/display_name/created_at, OpenAI
-  id/created/owned_by), so every returned record is `Unregistered: true` with
+  those are application policy. No vendor listing endpoint reports pricing
+  (Anthropic returns id/display_name/created_at; OpenAI returns
+  id/created/owned_by on the API-key route, and the Codex/OAuth route serves a
+  differently shaped catalogue — `{"models":[{"slug"…}]}`, requiring a
+  `client_version` query parameter — carrying display names and context windows
+  but, being subscription-served, no price). Every returned record is therefore
+  `Unregistered: true` with
   metadata fields at zero **meaning unknown**; a caller wanting pricing enriches
   each id itself via `Lookup`. An empty listing is a success returning an empty
   slice, never an error.

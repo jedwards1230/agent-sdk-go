@@ -12,6 +12,11 @@
 //
 // Both post to <base>/responses and consume the same SSE stream shape.
 //
+// Model listing follows the same routing but NOT the same wire contract: the
+// Codex backend requires a client_version query parameter and answers with a
+// {"models":[{"slug":...}]} body, where the public API takes no parameters and
+// answers with {"data":[{"id":...}]}. See [Provider.ListModels].
+//
 // # Normalized stream
 //
 // Server-sent events are mapped onto the vendor-neutral
