@@ -95,6 +95,8 @@ type storeConfig struct {
 	clock  func() time.Time
 	logger func(string, ...any)
 	ttl    time.Duration
+	// memJournalWriter is honored by MemStore only (see WithMemJournalWriter).
+	memJournalWriter func(id string) JournalWriter
 }
 
 // StoreOption configures a [FileStore] at construction.
@@ -136,6 +138,22 @@ func WithStoreIDGen(f func() string) StoreOption {
 	return func(c *storeConfig) {
 		if f != nil {
 			c.idGen = f
+		}
+	}
+}
+
+// WithMemJournalWriter overrides the [JournalWriter] a [MemStore] installs on
+// each journal it creates or reopens, keyed by session id. The default sink
+// discards every entry; substituting one that can fail its Write or Sync is
+// how a caller exercises what its own code does when a durable append fails
+// (ENOSPC, EIO) — otherwise reachable only by inducing a real disk fault.
+//
+// It affects [MemStore] only; a [FileStore] owns real files and ignores it, as
+// it ignores the other in-memory-irrelevant options. A nil factory is ignored.
+func WithMemJournalWriter(f func(id string) JournalWriter) StoreOption {
+	return func(c *storeConfig) {
+		if f != nil {
+			c.memJournalWriter = f
 		}
 	}
 }

@@ -95,6 +95,15 @@ r, err := runner.New(ctx, runner.Options{
 Journals default to on-disk JSONL for auditability; `session.MemStore` is the
 opt-in for an ephemeral session that leaves no trace.
 
+A journal append that fails (ENOSPC, EIO) fails closed within the turn and is
+reported to the caller by the `Prompt` that hit it — the runner never writes a
+turn's `tool_result` round when the assistant message carrying the matching
+`tool_use` blocks did not make it to disk, since a `tool_result` with no
+`tool_use` would break the provider projection on every later resume. The turn
+is dropped whole and the error surfaces; `Close` reports any failure no `Prompt`
+boundary already did. `session.WithMemJournalWriter` substitutes a `MemStore`'s
+sink so an embedder can exercise its own handling of that path.
+
 Planned: `skill/`, `plugin/`, `mcp/` (M4).
 
 ## Roadmap

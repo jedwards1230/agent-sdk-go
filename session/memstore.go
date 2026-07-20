@@ -23,6 +23,9 @@ import (
 type MemStore struct {
 	idGen func() string
 	clock func() time.Time
+	// newWriter builds the sink installed on each journal this store creates or
+	// reopens; nil means the discarding default (see WithMemJournalWriter).
+	newWriter func(id string) JournalWriter
 
 	mu       sync.Mutex
 	journals map[string]*Journal
@@ -37,7 +40,17 @@ func NewMemStore(opts ...StoreOption) *MemStore {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	return &MemStore{idGen: cfg.idGen, clock: cfg.clock, journals: make(map[string]*Journal)}
+	return &MemStore{idGen: cfg.idGen, clock: cfg.clock, newWriter: cfg.memJournalWriter, journals: make(map[string]*Journal)}
+}
+
+// writerFor returns the sink to install on the journal for id: the configured
+// substitute when [WithMemJournalWriter] was passed, else the discarding
+// default.
+func (s *MemStore) writerFor(id string) JournalWriter {
+	if s.newWriter == nil {
+		return memWriter{}
+	}
+	return s.newWriter(id)
 }
 
 // Create starts a new empty in-memory journal for projectSlug.
@@ -71,7 +84,7 @@ func (s *MemStore) create(ctx context.Context, projectSlug, id string) (*Journal
 	// path is synthetic: <id>.jsonl with no directory, never created on disk.
 	// It keeps Journal.Path/Dir well-formed for callers that derive per-session
 	// artifact paths, without implying a real file.
-	j := newJournal(id, projectSlug, id+".jsonl", nil, memWriter{}, s.idGen, s.clock)
+	j := newJournal(id, projectSlug, id+".jsonl", nil, s.writerFor(id), s.idGen, s.clock)
 	s.mu.Lock()
 	s.journals[id] = j
 	s.mu.Unlock()
@@ -91,7 +104,7 @@ func (s *MemStore) Open(ctx context.Context, id string) (*Journal, error) {
 	if !ok {
 		return nil, fmt.Errorf("session: open %s: %w", id, ErrSessionNotFound)
 	}
-	j.reopen(memWriter{})
+	j.reopen(s.writerFor(id))
 	return j, nil
 }
 
@@ -133,7 +146,7 @@ func (s *MemStore) Close() error {
 // Root returns "" — a MemStore persists nothing, so there is no root directory.
 func (s *MemStore) Root() string { return "" }
 
-// memWriter is the in-memory [journalWriter]: it discards every entry (the
+// memWriter is the in-memory [JournalWriter]: it discards every entry (the
 // journal keeps entries in memory for Fold/Cost/resume regardless of the sink),
 // so an in-memory session writes nothing to disk.
 type memWriter struct{}

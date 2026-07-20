@@ -12,10 +12,15 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
-// journalWriter is the append sink a Journal fsyncs each entry to. *os.File is
+// JournalWriter is the append sink a Journal fsyncs each entry to. *os.File is
 // the on-disk implementation used by FileStore; an in-memory writer (memWriter,
 // used by MemStore) discards writes so an ephemeral session persists nothing.
-type journalWriter interface {
+//
+// It is exported so a [MemStore] can be given a substitute sink via
+// [WithMemJournalWriter] — the seam for exercising how code above the journal
+// behaves when a durable append fails (ENOSPC, EIO), which is otherwise
+// unreachable without a real disk fault.
+type JournalWriter interface {
 	io.Writer
 	Sync() error
 	Close() error
@@ -46,7 +51,7 @@ type Journal struct {
 	mu      sync.Mutex
 	entries []Entry
 	byID    map[string]int
-	w       journalWriter // append handle; nil once closed
+	w       JournalWriter // append handle; nil once closed
 
 	idGen func() string
 	clock func() time.Time
@@ -55,7 +60,7 @@ type Journal struct {
 // newJournal constructs a Journal bound to path with pre-loaded entries
 // (from [readJournal], possibly empty) and a writable append handle.
 // Unexported: built only by a [Store]'s Create/Open.
-func newJournal(id, projectSlug, path string, entries []Entry, w journalWriter, idGen func() string, clock func() time.Time) *Journal {
+func newJournal(id, projectSlug, path string, entries []Entry, w JournalWriter, idGen func() string, clock func() time.Time) *Journal {
 	byID := make(map[string]int, len(entries))
 	for i, e := range entries {
 		byID[e.ID] = i
@@ -239,7 +244,7 @@ func (j *Journal) Close() error {
 // store can resume it within the process. It is a no-op on a journal that is
 // still open. Only [MemStore.Open] uses it; [FileStore] resumes by rebuilding
 // a *Journal from disk instead.
-func (j *Journal) reopen(w journalWriter) {
+func (j *Journal) reopen(w JournalWriter) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if j.w == nil {
