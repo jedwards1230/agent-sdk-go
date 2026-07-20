@@ -183,6 +183,29 @@ type Thinking struct {
 	Effort string
 }
 
+// The unified reasoning-effort levels [Thinking.Effort] accepts. They are the
+// SDK's provider-agnostic vocabulary: a provider projects a level down to its
+// own wire format (OpenAI sends the effort string; Anthropic maps it to a
+// thinking budget) and ignores what it cannot use. Provider-specific
+// super-levels a vendor catalogue may serve are not part of this unified set.
+const (
+	EffortLow    = "low"
+	EffortMedium = "medium"
+	EffortHigh   = "high"
+)
+
+// ValidEffort reports whether effort is a level the unified effort vocabulary
+// recognizes. The empty string is valid and means "no explicit effort — use
+// the provider's default", so a caller can clear a previously-set level.
+func ValidEffort(effort string) bool {
+	switch effort {
+	case "", EffortLow, EffortMedium, EffortHigh:
+		return true
+	default:
+		return false
+	}
+}
+
 // StopReason is a normalized turn-termination reason. Providers map their raw
 // stop reason onto one of these; the underlying string type serializes as-is.
 type StopReason string

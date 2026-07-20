@@ -135,17 +135,20 @@ client's op started the turn.
   of the request/stream shape and end-to-end inspectability of everything that
   enters the model's context. The cost is one thin adapter per vendor; the
   payoff is that nothing in the wire path is opaque.
-- **Runtime reasoning-effort is a design-ahead seam (M4/M5).** Effort is
-  construction-time only today: `Params.Thinking.Effort` (`low`/`medium`/`high`,
-  unifying Anthropic's thinking budget and OpenAI's effort) is resolved once and
-  wired through loop/runner. A live `Runner.SetEffort(effort)` should parallel
-  `Runner.SetModel` — a turn-boundary swap validated against provider capability
-  — so a consuming TUI can offer an effort axis orthogonal to model choice
-  between turns; without a setter it cannot change effort mid-session. It also
-  wants a declarative home: `compose.Load` parses only the manifest `model`
-  today, so a `params.thinking` block should be parsed too, making effort
-  expressible without code. Recorded here so the runner and manifest surfaces
-  leave room for it.
+- **Runtime reasoning-effort is a live seam (M4).** `Params.Thinking.Effort`
+  (`low`/`medium`/`high`, unifying Anthropic's thinking budget and OpenAI's
+  effort) seeds a runner's effort at construction, and `Runner.SetEffort(effort)`
+  hot-swaps it at a turn boundary — the effort-axis parallel to
+  `Runner.SetModel`. The setter validates against the unified vocabulary
+  (`provider.ValidEffort`; `""` clears to the provider default) and against
+  provider capability (it rejects a non-empty effort when the current model is
+  one the registry KNOWS does not reason, staying permissive toward
+  unregistered ids like SetModel). `event.SessionSetEffort` is the wire op that
+  carries the swap, parallel to `session.set_model`. So a consuming TUI can
+  offer an effort axis orthogonal to model choice between turns. Still
+  design-ahead: a declarative home — `compose.Load` parses only the manifest
+  `model` today, so a `params.thinking` block should be parsed too, making
+  effort expressible without code.
 
 ## Auth & credentials (M1)
 
