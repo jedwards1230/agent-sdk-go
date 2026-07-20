@@ -29,4 +29,7 @@ const (
 	// stable ACP v1 model/mode/thought-level selector and boolean-toggle
 	// mechanism).
 	MethodSessionSetConfigOption = "session/set_config_option"
+	// MethodSessionRequestDecision asks the client to answer one or more
+	// structured questions (a decision) — distinct from a tool-call permission.
+	MethodSessionRequestDecision = "session/request_decision"
 )
