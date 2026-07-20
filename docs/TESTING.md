@@ -17,7 +17,7 @@ being "thin".
 | permission engine | unit | every push | table-driven over the `Tool(spec)` grammar + an imported CC-settings corpus |
 | tools | unit | every push | real FS via `t.TempDir()`; git-aware tools run real `git init` in a tempdir |
 | sandbox exec | integ | OS-gated | real subprocess under the real sandbox, build-tagged per OS (Seatbelt on macOS legs, bwrap on Linux) |
-| ACP · MCP | integ | every push | small dedicated fake protocol server for request/response fixtures, separate from the loop fakes |
+| ACP | integ | every push | small dedicated fake protocol server for request/response fixtures, separate from the loop fakes. MCP joins this lane on the same approach when `mcp/` lands (M5) |
 
 ## Reasoning-replay matrix
 
