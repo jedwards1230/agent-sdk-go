@@ -541,10 +541,10 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
 ## Session tree & spawn seam (design-ahead, M5)
 
 A subagent is a real session, not a sub-object: its own UUIDv7 journal, linked
-to its parent. The SDK ships the spawn seam and the linking events — the parent
-journal records a must-deliver `session.spawned{child_id, agent}`, child
-metadata carries `parent_id`, and depth (parent-chain length) is capped at 5 and
-enforced at spawn. The application wires this to its supervisor/roster (tree
+to its parent. The SDK will ship the spawn seam and the linking events — the
+parent journal recording a must-deliver `session.spawned{child_id, agent}`,
+child metadata carrying `parent_id`, and depth (parent-chain length) capped at 5
+and enforced at spawn. The application wires this to its supervisor/roster (tree
 view, peek/attach into any child). Ships M5; recorded here so the session and
 event contracts leave room for it now.
 
@@ -555,8 +555,8 @@ Three tiers, by trust and coupling:
 1. **Core** — hot path, security, or contract; compiled in (loop, broker,
    permission engine, session).
 2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
-   import (`mcp/`, vendor settings loaders). First-party and trusted, but not
-   forced on every embedder.
+   import (`mcp/` and the vendor settings loaders, both planned for M5).
+   First-party and trusted, but not forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
    over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
 

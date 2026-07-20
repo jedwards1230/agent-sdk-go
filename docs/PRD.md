@@ -56,7 +56,7 @@ structural permissions, and ecosystem compatibility (MCP, SKILL.md, ACP).
 provider/    LLM iface · normalized stream · model registry · CredentialSource
 providers/   providers.Build — construct a provider from manifest config     (M2)
 auth/        OAuth flows · on-disk token store (auth.json, 0600) (M1)
-loop/        runAgentLoop · hooks · StreamFn          (M1)
+loop/        loop.Run · hooks · StreamFn              (M1)
 session/     event-sourced JSONL tree · resume · cost   (M1: journal + resume)
 runner/      batteries-included *Runner (provider+tools+broker+loop+journal)  (M2)
 permission/  rules · grants · escalation cap          (M3)
@@ -135,7 +135,8 @@ M0–M3 are what shipped here.
 - **v0.6.0** — first M4 (ACP expansion) increment: `usage_update` projection +
   image/audio/resource content blocks + `diff`/`terminal` tool-call content
   modeled and projected (carries #52–#54). Modeling + projection only — no
-  producer emits the rich blocks yet; that lands in M4 proper.
+  producer emits the rich blocks at this point; the `diff` producer lands in
+  v0.7.0.
 - **v0.7.0** — the `diff` producer (the edit and write tools attach a structured
   before/after `event.FileEdit` to `tool.call.finished`; `ToSessionUpdate`
   projects it to a `diff` tool-call content block, so an edit renders as a real
