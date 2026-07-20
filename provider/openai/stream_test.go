@@ -108,6 +108,24 @@ func TestInfo(t *testing.T) {
 	}
 }
 
+// TestInfoFallbackFlagsUnregistered pins the flag on the fallback record. It is
+// the whole reason a consumer can tell the zero Pricing apart from a genuinely
+// free model — without it, an unregistered model reads as costing $0.00.
+func TestInfoFallbackFlagsUnregistered(t *testing.T) {
+	got := New("mystery-model", nil).Info()
+	if !got.Unregistered {
+		t.Errorf("Info(unregistered).Unregistered = false, want true: %+v", got)
+	}
+	if got.Pricing != (provider.Pricing{}) {
+		t.Errorf("pricing invented for an unregistered model: %+v", got.Pricing)
+	}
+	// A registered model is the control: it comes from the registry, so the
+	// flag must stay off there or it would mark every record unknown.
+	if reg := New("gpt-5", nil).Info(); reg.Unregistered {
+		t.Errorf("Info(gpt-5).Unregistered = true, want false: %+v", reg)
+	}
+}
+
 // --- SSE streaming harness ---
 
 // capture records what the scripted server received.

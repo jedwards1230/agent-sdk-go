@@ -125,9 +125,11 @@ func TestListModelsSuccess(t *testing.T) {
 		t.Errorf("x-api-key = %q, want the configured credential", gotKey)
 	}
 
+	// display_name is the one metadata field this endpoint reports, so it is
+	// carried; everything else stays zero meaning UNKNOWN.
 	want := []provider.ModelInfo{
-		{ID: "claude-sonnet-5", Provider: "anthropic", Unregistered: true},
-		{ID: "claude-haiku-4-5", Provider: "anthropic", Unregistered: true},
+		{ID: "claude-sonnet-5", Provider: "anthropic", DisplayName: "Claude Sonnet 5", Unregistered: true},
+		{ID: "claude-haiku-4-5", Provider: "anthropic", DisplayName: "Claude Haiku 4.5", Unregistered: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
@@ -165,6 +167,11 @@ func TestListModelsReportsUnknownMetadata(t *testing.T) {
 	}
 	if m.Pricing != (provider.Pricing{}) {
 		t.Errorf("pricing invented: %+v", m.Pricing)
+	}
+	// The body carries no display_name, so the label stays empty meaning
+	// UNKNOWN — the adapter must not synthesize one from the id.
+	if m.DisplayName != "" {
+		t.Errorf("DisplayName = %q, want empty when the vendor supplied none", m.DisplayName)
 	}
 	// The registry does know this id; ListModels must not silently merge it.
 	if reg, ok := provider.Lookup(m.ID); ok && m.ContextWindow == reg.ContextWindow && reg.ContextWindow != 0 {

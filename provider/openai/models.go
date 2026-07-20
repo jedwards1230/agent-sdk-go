@@ -42,14 +42,23 @@ const listBodyLimit = 8 << 20
 // the credential-derived base URL. It implements [provider.ModelLister].
 //
 // Every returned record carries the model id, "openai" as the provider, and
-// Unregistered set with all metadata fields at their zero value meaning
-// UNKNOWN, per [provider.ModelInfo]. Neither route reports pricing — the
-// subscription backend has no per-token price at all — so pricing is never
-// synthesized. Nothing is backfilled from the embedded registry: enriching a
-// live listing with registry metadata is the caller's decision, not the
-// adapter's. Fields ModelInfo has no home for are dropped: created and owned_by
-// on the API-key route; display_name, description, context windows, visibility,
-// and plan availability on the Codex route. Neither response is paginated.
+// Unregistered set — nothing here comes from the embedded registry, since
+// enriching a live listing with registry metadata is the caller's decision, not
+// the adapter's. The per-field rule on [provider.ModelInfo.Unregistered] then
+// applies: a zero metadata field means UNKNOWN, a non-zero one is what the
+// vendor said.
+//
+// What the vendor says differs by route. The API-key route reports identity
+// only, so those records carry no metadata at all. The Codex route additionally
+// supplies a display name, a context window, and a visibility marker, which are
+// carried into DisplayName, ContextWindow, and Hidden respectively. Neither
+// route reports pricing — the subscription backend has no per-token price at
+// all — so pricing is never synthesized, nor is MaxOutput or Reasoning.
+//
+// Fields ModelInfo has no home for are dropped: created and owned_by on the
+// API-key route; description and plan availability (available_in_plans,
+// supported_reasoning_levels) on the Codex route. Neither response is
+// paginated.
 //
 // Routing follows the streaming path: an API key lists against the public API,
 // while an OAuth (ChatGPT subscription) credential targets the Codex backend.
@@ -121,31 +130,38 @@ func (p *Provider) ListModels(ctx context.Context) ([]provider.ModelInfo, error)
 		return nil, fmt.Errorf("openai: list models: read body: %w", err)
 	}
 
-	ids, err := decodeModelIDs(data, codex)
+	models, err := decodeModels(data, codex)
 	if err != nil {
 		return nil, fmt.Errorf("openai: list models: decode response: %w", err)
 	}
 
-	out := make([]provider.ModelInfo, 0, len(ids))
-	for _, id := range ids {
-		if id == "" {
+	out := make([]provider.ModelInfo, 0, len(models))
+	for _, m := range models {
+		if m.ID == "" {
 			// An entry with no id names no model; there is nothing a caller
 			// could do with it.
 			continue
 		}
-		out = append(out, provider.ModelInfo{
-			ID:           id,
-			Provider:     providerID,
-			Unregistered: true,
-		})
+		out = append(out, m)
 	}
 	return out, nil
 }
 
-// decodeModelIDs extracts model ids from a listing body in the shape the given
-// route speaks. Only the id-bearing field is read: every other field either has
-// no home on [provider.ModelInfo] or would amount to inventing metadata.
-func decodeModelIDs(data []byte, codex bool) ([]string, error) {
+// visibilityHidden is the one Codex visibility value that means "do not offer
+// this model in a picker". The field is matched EXACTLY against it, and every
+// other value — "list", a marker this SDK has never seen, or an absent field —
+// leaves [provider.ModelInfo.Hidden] false. That direction is the safe one: an
+// unrecognized marker at worst shows a model the vendor would have tucked away,
+// where the inverse would silently hide models over a vocabulary change.
+const visibilityHidden = "hide"
+
+// decodeModels turns a listing body in the shape the given route speaks into
+// records. It reads the fields ModelInfo has a home for and can honestly carry;
+// everything else is either homeless or would amount to inventing metadata.
+//
+// Entries are returned as-is, including ones with an empty id — filtering those
+// is the caller's step, so this function stays a pure decode.
+func decodeModels(data []byte, codex bool) ([]provider.ModelInfo, error) {
 	if codex {
 		// The Codex backend names models with "slug" inside a "models" array.
 		// That array is decoded through a pointer so an ABSENT key stays
@@ -155,7 +171,16 @@ func decodeModelIDs(data []byte, codex bool) ([]string, error) {
 		// failure from every caller.
 		var res struct {
 			Models *[]struct {
-				Slug string `json:"slug"`
+				Slug        string `json:"slug"`
+				DisplayName string `json:"display_name"`
+				// Two spellings of the same idea appear in this catalogue.
+				// context_window is the authoritative one when present;
+				// max_context_window is the older/wider field kept as a
+				// fallback so a body carrying only it is not read as
+				// "unknown".
+				ContextWindow    int    `json:"context_window"`
+				MaxContextWindow int    `json:"max_context_window"`
+				Visibility       string `json:"visibility"`
 			} `json:"models"`
 		}
 		if err := json.Unmarshal(data, &res); err != nil {
@@ -164,13 +189,31 @@ func decodeModelIDs(data []byte, codex bool) ([]string, error) {
 		if res.Models == nil {
 			return nil, errNoModelsField
 		}
-		ids := make([]string, 0, len(*res.Models))
+		out := make([]provider.ModelInfo, 0, len(*res.Models))
 		for _, m := range *res.Models {
-			ids = append(ids, m.Slug)
+			// Absent and zero are treated alike here: a reported window of 0
+			// is not a real limit, so falling back costs nothing. When NEITHER
+			// field is present the window stays 0 meaning UNKNOWN — no value
+			// is ever invented to fill the gap.
+			window := m.ContextWindow
+			if window == 0 {
+				window = m.MaxContextWindow
+			}
+			out = append(out, provider.ModelInfo{
+				ID:            m.Slug,
+				Provider:      providerID,
+				DisplayName:   m.DisplayName,
+				ContextWindow: window,
+				Hidden:        m.Visibility == visibilityHidden,
+				Unregistered:  true,
+			})
 		}
-		return ids, nil
+		return out, nil
 	}
 
+	// The public API's listing reports identity only — created and owned_by are
+	// the rest of it, and neither has a home on ModelInfo — so these records
+	// carry no metadata at all.
 	var res struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -179,11 +222,15 @@ func decodeModelIDs(data []byte, codex bool) ([]string, error) {
 	if err := json.Unmarshal(data, &res); err != nil {
 		return nil, err
 	}
-	ids := make([]string, 0, len(res.Data))
+	out := make([]provider.ModelInfo, 0, len(res.Data))
 	for _, m := range res.Data {
-		ids = append(ids, m.ID)
+		out = append(out, provider.ModelInfo{
+			ID:           m.ID,
+			Provider:     providerID,
+			Unregistered: true,
+		})
 	}
-	return ids, nil
+	return out, nil
 }
 
 // errNoModelsField reports a Codex-route 200 whose body carries no models key —

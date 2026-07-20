@@ -34,7 +34,8 @@ const (
 // listResponse is the Models API page envelope.
 type listResponse struct {
 	Data []struct {
-		ID string `json:"id"`
+		ID          string `json:"id"`
+		DisplayName string `json:"display_name"`
 	} `json:"data"`
 	HasMore bool   `json:"has_more"`
 	LastID  string `json:"last_id"`
@@ -45,12 +46,13 @@ type listResponse struct {
 //
 // The endpoint returns identity only — id, type, display_name, created_at — and
 // no pricing, context window, max output, or reasoning capability. Every
-// returned record therefore carries the id, "anthropic" as the provider, and
-// Unregistered set with all metadata fields at their zero value meaning
-// UNKNOWN, per [provider.ModelInfo]. Nothing is backfilled from the embedded
-// registry: enriching a live listing with registry metadata is the caller's
-// decision, not the adapter's. display_name and created_at are dropped because
-// ModelInfo has no field for them.
+// returned record therefore carries the id, "anthropic" as the provider, the
+// vendor's display_name, and Unregistered set. Per the per-field rule on
+// [provider.ModelInfo.Unregistered], the metadata fields this endpoint says
+// nothing about stay at their zero value meaning UNKNOWN — they are never
+// backfilled from the embedded registry, since enriching a live listing with
+// registry metadata is the caller's decision, not the adapter's. created_at is
+// dropped because ModelInfo has no field for it.
 //
 // A vendor listing of zero models returns an empty slice and a nil error.
 func (p *Provider) ListModels(ctx context.Context) ([]provider.ModelInfo, error) {
@@ -75,6 +77,7 @@ func (p *Provider) ListModels(ctx context.Context) ([]provider.ModelInfo, error)
 			out = append(out, provider.ModelInfo{
 				ID:           m.ID,
 				Provider:     providerID,
+				DisplayName:  m.DisplayName,
 				Unregistered: true,
 			})
 		}
