@@ -257,28 +257,51 @@ func (r *Runner) maybeFlushToolTurn(acc *turnAcc) {
 	if len(acc.results) < len(acc.started) {
 		return // still waiting on tool results
 	}
-	r.flushAssistant(acc, true)
-	r.flushRound(acc)
+	// The tool_result round is written ONLY if the assistant message holding
+	// the matching tool_use blocks is durable. Writing it anyway would leave a
+	// tool_result with no tool_use — the exact dangling block this
+	// accumulator's flush ordering exists to prevent, and one that breaks the
+	// provider projection on every later resume. Dropping the turn loses it
+	// once; the orphan breaks the session permanently.
+	//
+	// The accumulator is reset either way. Leaving it populated so the
+	// close-path re-flush could retry would let this turn's text and tool
+	// calls merge into the NEXT turn's entry, since the loop keeps running off
+	// its own in-memory messages — trading a cleanly dropped turn for a
+	// silently conflated one. The failure is not swallowed: it reaches the
+	// caller at the Prompt turn boundary (see Runner.Prompt).
+	if r.flushAssistant(acc, true) {
+		r.flushRound(acc)
+	}
 	acc.reset()
 }
 
 // flushAssistant appends the assistant message entry (reasoning + text, plus
 // tool_use blocks when includeToolUse) at most once per turn. It no-ops when
 // the message has no blocks or was already written.
-func (r *Runner) flushAssistant(acc *turnAcc, includeToolUse bool) {
+//
+// It reports whether the turn's assistant message is durable — true when it
+// was written (now or by an earlier call), false when its Append failed.
+// msgFlushed is set only on a successful append, so the flag never claims
+// durability the journal does not have: a caller that flushes again gets a
+// real retry rather than a no-op, and [Runner.maybeFlushToolTurn] can tell
+// whether it is safe to write the matching tool_result round.
+func (r *Runner) flushAssistant(acc *turnAcc, includeToolUse bool) bool {
 	if acc.msgFlushed {
-		return
+		return true
 	}
 	blocks := acc.assistantBlocks(includeToolUse)
 	if len(blocks) == 0 {
-		return
+		return true // nothing to write: the turn is vacuously durable
 	}
 	msg := provider.Message{Role: provider.RoleAssistant, Content: blocks}
 	entry := session.NewMessageEntry(msg, session.WithEntryModel(r.currentModel()), session.WithEntryUsage(acc.usage))
 	if _, err := r.journal.Append(entry); err != nil {
 		r.setJournalWriteErr(err)
+		return false
 	}
 	acc.msgFlushed = true
+	return true
 }
 
 // flushRound appends the tool_result round for the turn's announced calls, in

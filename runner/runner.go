@@ -374,7 +374,24 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	// Prompt's user-message append cannot land ahead of this run's assistant and
 	// tool entries (which consume writes asynchronously off the broker).
 	r.awaitJournaled()
-	return err
+	// The barrier above guarantees this run's journaling is done, so any write
+	// failure it hit is visible now — this is the turn boundary, and the only
+	// point at which the caller can still act on it (retry the turn, abandon
+	// the session, alert an operator). Surfacing it here matches the
+	// user-message append at the top of Prompt, which has always returned its
+	// error; the asymmetry where only the consumer goroutine's appends were
+	// swallowed was the bug. Taking the error clears it, so a caller that
+	// retries after a transient fault is not handed a stale failure forever;
+	// a persistent fault simply sets it again on the next turn.
+	jerr := r.takeJournalWriteErr()
+	switch {
+	case jerr == nil:
+		return err
+	case err == nil:
+		return jerr
+	default:
+		return errors.Join(err, jerr)
+	}
 }
 
 // spillCallsDir returns the absolute directory this session's per-call tool
@@ -418,14 +435,15 @@ func (r *Runner) awaitJournaled() {
 // this Runner built its own store (Options.Store was nil) — the store. An
 // injected store is never closed here; its lifecycle belongs to the caller
 // (e.g. a supervisor sharing one store across many Runners). Close returns
-// the first error encountered, if any, joined with any journal write error
-// the consumer observed.
+// the first error encountered, if any, joined with any journal write error the
+// consumer observed that no [Runner.Prompt] turn boundary already reported —
+// the backstop for a failure in the final drain.
 func (r *Runner) Close() error {
 	r.broker.Close()
 	<-r.journalDone
 
 	var errs []error
-	if err := r.journalWriteErr(); err != nil {
+	if err := r.takeJournalWriteErr(); err != nil {
 		errs = append(errs, err)
 	}
 	if err := r.journal.Close(); err != nil {
@@ -504,8 +522,9 @@ func (r *Runner) SetModel(model string) error {
 }
 
 // setJournalWriteErr records the first journal write failure the consumer
-// goroutine observes; later failures are dropped (the first is the one that
-// matters for diagnosis).
+// goroutine observes since the last [Runner.takeJournalWriteErr]; later
+// failures in the same window are dropped (the first is the one that matters
+// for diagnosis).
 func (r *Runner) setJournalWriteErr(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -514,10 +533,14 @@ func (r *Runner) setJournalWriteErr(err error) {
 	}
 }
 
-// journalWriteErr returns the first journal write failure the consumer
-// goroutine observed, if any.
-func (r *Runner) journalWriteErr() error {
+// takeJournalWriteErr returns the journal write failure the consumer goroutine
+// observed since the last take, and clears it. [Runner.Prompt] takes it at each
+// turn boundary; [Runner.Close] takes whatever is left as a backstop, covering
+// a failure in the final drain that no later Prompt boundary could report.
+func (r *Runner) takeJournalWriteErr() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.jerr
+	err := r.jerr
+	r.jerr = nil
+	return err
 }
