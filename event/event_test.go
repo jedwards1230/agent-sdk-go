@@ -257,6 +257,72 @@ func TestToolCallFinishedEdits(t *testing.T) {
 	})
 }
 
+// TestToolCallAgent asserts the additive Agent field serializes as an "agent"
+// string on all three tool-call events when set — and, being omitempty, leaves
+// the payload unchanged (no key) when empty, so an un-attributed call is wire-
+// identical to before the field existed.
+func TestToolCallAgent(t *testing.T) {
+	set := []struct {
+		name string
+		ev   func(agent string) event.Event
+	}{
+		{
+			name: "tool.call.started",
+			ev: func(agent string) event.Event {
+				ev := event.NewToolCallStarted(sid, "tc-1", "bash", nil)
+				ev.Agent = agent
+				return ev
+			},
+		},
+		{
+			name: "tool.call.delta",
+			ev: func(agent string) event.Event {
+				ev := event.NewToolCallDelta(sid, "tc-1", "chunk")
+				ev.Agent = agent
+				return ev
+			},
+		},
+		{
+			name: "tool.call.finished",
+			ev: func(agent string) event.Event {
+				ev := event.NewToolCallFinished(sid, "tc-1", nil, "ok", false, nil)
+				ev.Agent = agent
+				return ev
+			},
+		},
+	}
+
+	for _, tc := range set {
+		t.Run(tc.name+" set", func(t *testing.T) {
+			raw, err := json.Marshal(tc.ev("researcher"))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got := m["agent"]; got != "researcher" {
+				t.Errorf("agent = %v, want researcher: %s", got, raw)
+			}
+		})
+
+		t.Run(tc.name+" empty omitted", func(t *testing.T) {
+			raw, err := json.Marshal(tc.ev(""))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if _, ok := m["agent"]; ok {
+				t.Errorf("agent present for empty value: %s", raw)
+			}
+		})
+	}
+}
+
 // TestMessageUserRoundTrip asserts MessageUser is just another MessageKind
 // value: it round-trips through the MessageStarted/MessageDelta/MessageFinished
 // JSON envelopes exactly like MessageText and MessageReasoning do, and

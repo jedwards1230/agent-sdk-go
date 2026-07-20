@@ -645,6 +645,12 @@ type ToolCallStarted struct {
 	ID    string
 	Name  string
 	Input json.RawMessage
+	// Agent is the id of the originating agent — the agent or subagent whose loop
+	// issued this call — or empty when the call is un-attributed. Like
+	// [ToolCallFinished.Edits], it is set on the built event at emit time (like
+	// ContextWindow on TurnFinished), not through the constructors; additive and
+	// journal-portable.
+	Agent string
 }
 
 // NewToolCallStarted builds a tool.call.started event.
@@ -658,14 +664,17 @@ func (ToolCallStarted) Kind() string { return KindToolCallStarted }
 // Tier returns TierMustDeliver.
 func (ToolCallStarted) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope plus {id, name, input}.
+// MarshalJSON encodes the envelope plus {id, name, input, agent?}. agent is
+// omitempty so an un-attributed call leaves the payload identical to before this
+// field existed.
 func (e ToolCallStarted) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
 		ID    string          `json:"id"`
 		Name  string          `json:"name"`
 		Input json.RawMessage `json:"input,omitempty"`
-	}{baseEnvelope(e), e.ID, e.Name, e.Input})
+		Agent string          `json:"agent,omitempty"`
+	}{baseEnvelope(e), e.ID, e.Name, e.Input, e.Agent})
 }
 
 func (e ToolCallStarted) withMeta(seq uint64, ts time.Time) Event {
@@ -679,6 +688,12 @@ type ToolCallDelta struct {
 	meta
 	ID    string
 	Delta string
+	// Agent is the id of the originating agent — the agent or subagent whose loop
+	// issued this call — or empty when the call is un-attributed. Like
+	// [ToolCallFinished.Edits], it is set on the built event at emit time (like
+	// ContextWindow on TurnFinished), not through the constructors; additive and
+	// journal-portable.
+	Agent string
 }
 
 // NewToolCallDelta builds a tool.call.delta event.
@@ -692,13 +707,16 @@ func (ToolCallDelta) Kind() string { return KindToolCallDelta }
 // Tier returns TierLossy.
 func (ToolCallDelta) Tier() Tier { return TierLossy }
 
-// MarshalJSON encodes the envelope plus {id, delta}.
+// MarshalJSON encodes the envelope plus {id, delta, agent?}. agent is omitempty
+// so an un-attributed call leaves the payload identical to before this field
+// existed.
 func (e ToolCallDelta) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
 		ID    string `json:"id"`
 		Delta string `json:"delta"`
-	}{baseEnvelope(e), e.ID, e.Delta})
+		Agent string `json:"agent,omitempty"`
+	}{baseEnvelope(e), e.ID, e.Delta, e.Agent})
 }
 
 func (e ToolCallDelta) withMeta(seq uint64, ts time.Time) Event {
@@ -747,6 +765,11 @@ type ToolCallFinished struct {
 	SpillBytes int64
 	// SpillSHA256 is the hex-encoded sha256 of the full spilled output.
 	SpillSHA256 string
+	// Agent is the id of the originating agent — the agent or subagent whose loop
+	// issued this call — or empty when the call is un-attributed. Like Edits, it
+	// is set on the built event at emit time (like ContextWindow on
+	// TurnFinished), not through the constructors; additive and journal-portable.
+	Agent string
 }
 
 // FileEdit is a structured before/after record of one file a tool mutated: the
@@ -796,9 +819,9 @@ func (ToolCallFinished) Kind() string { return KindToolCallFinished }
 func (ToolCallFinished) Tier() Tier { return TierMustDeliver }
 
 // MarshalJSON encodes the envelope plus {id, input?, result, is_error?,
-// diagnostics?, edits?, spill_path?, spill_bytes?, spill_sha256?}. edits is
-// omitempty so a call that changed no files leaves the payload identical to
-// before this field existed.
+// diagnostics?, edits?, spill_path?, spill_bytes?, spill_sha256?, agent?}. edits
+// and agent are omitempty so a call that changed no files and is un-attributed
+// leaves the payload identical to before those fields existed.
 func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		envelope
@@ -811,7 +834,8 @@ func (e ToolCallFinished) MarshalJSON() ([]byte, error) {
 		SpillPath   string          `json:"spill_path,omitempty"`
 		SpillBytes  int64           `json:"spill_bytes,omitempty"`
 		SpillSHA256 string          `json:"spill_sha256,omitempty"`
-	}{baseEnvelope(e), e.ID, e.Input, e.Result, e.IsError, e.Diagnostics, e.Edits, e.SpillPath, e.SpillBytes, e.SpillSHA256})
+		Agent       string          `json:"agent,omitempty"`
+	}{baseEnvelope(e), e.ID, e.Input, e.Result, e.IsError, e.Diagnostics, e.Edits, e.SpillPath, e.SpillBytes, e.SpillSHA256, e.Agent})
 }
 
 func (e ToolCallFinished) withMeta(seq uint64, ts time.Time) Event {

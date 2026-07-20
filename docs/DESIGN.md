@@ -581,14 +581,18 @@ and enforced at spawn. The application wires this to its supervisor/roster (tree
 view, peek/attach into any child). Ships M5; recorded here so the session and
 event contracts leave room for it now.
 
-**Tool-call agent attribution (design-ahead, follows this seam).** Tool events
-(`tool.call.started`/`delta`/`finished`) carry `{id, name, input}` and nest under
-the run span by call `id` only, with no originating-agent field — the
-instrumentation seam (*The Event/Op stream is the span/metric source*) also adds
-no `turn_id` on purpose. Once this spawn seam lands and a child session carries
-`parent_id`, tool events should also carry the spawning child/agent id, so a
-consumer can attribute "which worker ran this tool" across a session tree without
-correlating out-of-band. Recorded with the spawn seam it depends on.
+**Tool-call agent attribution (carrier ships; auto-population follows this seam).**
+Tool events (`tool.call.started`/`delta`/`finished`) nest under the run span by
+call `id`, and the instrumentation seam (*The Event/Op stream is the span/metric
+source*) adds no `turn_id` on purpose. The **carrier** now exists: each of the
+three tool-call events carries an optional `agent` field (omitempty, so an
+un-attributed call is wire-identical to before the field existed), stamped at
+emit time from `loop.Config.Agent` — surfaced end-to-end through
+`runner.Options.Agent` and `compose.LoopDeps.Agent`. An embedder that knows which
+agent a loop drives sets it today; once the spawn seam lands and a child session
+carries `parent_id`, the SDK can auto-populate it from the spawning child/agent
+id, so a consumer can attribute "which worker ran this tool" across a session
+tree without correlating out-of-band. Absent id ⇒ un-attributed rendering.
 
 ## Extension tiers
 

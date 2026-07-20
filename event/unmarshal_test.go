@@ -17,7 +17,8 @@ import (
 // event is built via its constructor (seq 0, zero time), so the restored
 // envelope matches without depending on seq/time reassignment; the additive
 // fields not reachable through a constructor (TurnFinished.ContextWindow,
-// ToolCallFinished.Edits) are set on the value to prove they survive too.
+// ToolCallFinished.Edits, and the tool-call events' Agent) are set on the value
+// to prove they survive too.
 func TestUnmarshalRoundTrip(t *testing.T) {
 	turnFinished := event.NewTurnFinishedCost(sid, "end_turn",
 		provider.Usage{InputTokens: 10, OutputTokens: 20, CacheReadTokens: 3},
@@ -32,6 +33,14 @@ func TestUnmarshalRoundTrip(t *testing.T) {
 		{Path: "new.go", NewText: "package main"},
 		{Path: "old.go", OldText: "v1", NewText: "v2"},
 	}
+	// Agent is set at emit time (not through a constructor); set it here to prove
+	// it survives the round trip on all three tool-call events.
+	toolFinished.Agent = "researcher"
+
+	toolStarted := event.NewToolCallStarted(sid, "tc-1", "edit", json.RawMessage(`{"a":1}`))
+	toolStarted.Agent = "researcher"
+	toolDelta := event.NewToolCallDelta(sid, "tc-1", "chunk")
+	toolDelta.Agent = "researcher"
 
 	cases := []struct {
 		name string
@@ -66,8 +75,8 @@ func TestUnmarshalRoundTrip(t *testing.T) {
 		{"message.delta", event.NewMessageDelta(sid, event.MessageReasoning, "thinking")},
 		{"message.finished", event.NewMessageFinishedMeta(sid, event.MessageUser, "hello",
 			map[string]string{"anthropic.signature": "sig"})},
-		{"tool.call.started", event.NewToolCallStarted(sid, "tc-1", "edit", json.RawMessage(`{"a":1}`))},
-		{"tool.call.delta", event.NewToolCallDelta(sid, "tc-1", "chunk")},
+		{"tool.call.started", toolStarted},
+		{"tool.call.delta", toolDelta},
 		{"tool.call.finished", toolFinished},
 		{"permission.requested", event.NewPermissionRequested(sid, "p-1", "edit",
 			map[string]any{"path": "/etc/hosts"}, []string{"rule-a", "rule-b"})},

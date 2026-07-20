@@ -88,9 +88,9 @@ func Unmarshal(data []byte) (Event, error) {
 	case KindMessageFinished:
 		return MessageFinished{meta: m, MessageKind: w.MessageKind, Content: w.Content, Meta: w.Meta}, nil
 	case KindToolCallStarted:
-		return ToolCallStarted{meta: m, ID: w.ID, Name: w.Name, Input: w.Input}, nil
+		return ToolCallStarted{meta: m, ID: w.ID, Name: w.Name, Input: w.Input, Agent: w.Agent}, nil
 	case KindToolCallDelta:
-		return ToolCallDelta{meta: m, ID: w.ID, Delta: w.Delta}, nil
+		return ToolCallDelta{meta: m, ID: w.ID, Delta: w.Delta, Agent: w.Agent}, nil
 	case KindToolCallFinished:
 		return ToolCallFinished{
 			meta:        m,
@@ -103,6 +103,7 @@ func Unmarshal(data []byte) (Event, error) {
 			SpillPath:   w.SpillPath,
 			SpillBytes:  w.SpillBytes,
 			SpillSHA256: w.SpillSHA256,
+			Agent:       w.Agent,
 		}, nil
 	case KindPermissionRequested:
 		return PermissionRequested{meta: m, ID: w.ID, Tool: w.Tool, Spec: w.Spec, Trace: w.Trace}, nil
@@ -172,6 +173,7 @@ type wireEvent struct {
 	SpillPath   string          `json:"spill_path"`
 	SpillBytes  int64           `json:"spill_bytes"`
 	SpillSHA256 string          `json:"spill_sha256"`
+	Agent       string          `json:"agent"`
 
 	// permission.requested / permission.resolved
 	Tool    string         `json:"tool"`

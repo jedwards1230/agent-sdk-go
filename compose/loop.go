@@ -18,7 +18,10 @@ import (
 type LoopDeps struct {
 	Broker    *event.Broker
 	SessionID string
-	Tools     loop.ToolRegistry
+	// Agent is the originating-agent id forwarded to loop.Config.Agent; empty ⇒
+	// tool-call events are un-attributed (the default).
+	Agent string
+	Tools loop.ToolRegistry
 	// CredentialSource, when set, overrides the manifest-derived credential
 	// source ([CredentialSource]). Required for oauth auth, which needs an
 	// auth.Store.
@@ -43,6 +46,7 @@ func LoopConfig(_ context.Context, m *Manifest, deps LoopDeps) (loop.Config, err
 		Tools:     deps.Tools,
 		Broker:    deps.Broker,
 		SessionID: deps.SessionID,
+		Agent:     deps.Agent,
 	}, nil
 }
 

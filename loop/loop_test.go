@@ -247,6 +247,77 @@ func TestToolCallFinishedCarriesEdits(t *testing.T) {
 	}
 }
 
+// TestToolCallEventsCarryAgent asserts Config.Agent is stamped onto every
+// tool-call event the loop emits — tool.call.started, tool.call.delta, and
+// tool.call.finished — so a consumer can attribute the call to the agent that
+// ran it. The empty-Agent sub-test proves the un-attributed default: every tool
+// event carries an empty Agent, matching pre-field behavior.
+func TestToolCallEventsCarryAgent(t *testing.T) {
+	cases := []struct {
+		name  string
+		agent string
+	}{
+		{"attributed", "researcher"},
+		{"un-attributed default", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			b := event.NewBroker()
+			defer b.Close()
+			sub := b.Subscribe(event.FilterAll, 256)
+
+			tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "pong"}}
+			cfg := baseConfig(b, scripted(
+				toolTurn("t1", "echo", `{"msg":"ping"}`),
+				textTurn("done", provider.StopEndTurn),
+			))
+			cfg.Agent = tc.agent
+			cfg.Tools = tool
+
+			if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+
+			var started, delta, finished int
+			for {
+				var e event.Event
+				select {
+				case ev, ok := <-sub.C:
+					if !ok {
+						goto done
+					}
+					e = ev
+				default:
+					goto done
+				}
+				switch tce := e.(type) {
+				case event.ToolCallStarted:
+					started++
+					if tce.Agent != tc.agent {
+						t.Errorf("tool.call.started Agent = %q, want %q", tce.Agent, tc.agent)
+					}
+				case event.ToolCallDelta:
+					delta++
+					if tce.Agent != tc.agent {
+						t.Errorf("tool.call.delta Agent = %q, want %q", tce.Agent, tc.agent)
+					}
+				case event.ToolCallFinished:
+					finished++
+					if tce.Agent != tc.agent {
+						t.Errorf("tool.call.finished Agent = %q, want %q", tce.Agent, tc.agent)
+					}
+				}
+			}
+		done:
+			// The scripted round produces exactly one of each tool-call event, so a
+			// zero count means the assertion above never ran (a vacuous pass).
+			if started != 1 || delta != 1 || finished != 1 {
+				t.Fatalf("tool-call event counts: started=%d delta=%d finished=%d, want 1/1/1", started, delta, finished)
+			}
+		})
+	}
+}
+
 // drainPlan collects every plan event queued on sub.
 func drainPlan(sub *event.Subscription) []event.PlanUpdated {
 	var out []event.PlanUpdated
