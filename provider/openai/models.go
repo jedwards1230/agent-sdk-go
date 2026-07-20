@@ -50,15 +50,16 @@ const listBodyLimit = 8 << 20
 //
 // What the vendor says differs by route. The API-key route reports identity
 // only, so those records carry no metadata at all. The Codex route additionally
-// supplies a display name, a context window, and a visibility marker, which are
-// carried into DisplayName, ContextWindow, and Hidden respectively. Neither
-// route reports pricing — the subscription backend has no per-token price at
-// all — so pricing is never synthesized, nor is MaxOutput or Reasoning.
+// supplies a display name, a context window, a visibility marker, and a list of
+// supported reasoning levels, which are carried into DisplayName,
+// ContextWindow, Hidden, and Reasoning respectively. Neither route reports
+// pricing — the subscription backend has no per-token price at all — so pricing
+// is never synthesized, nor is MaxOutput.
 //
 // Fields ModelInfo has no home for are dropped: created and owned_by on the
-// API-key route; description and plan availability (available_in_plans,
-// supported_reasoning_levels) on the Codex route. Neither response is
-// paginated.
+// API-key route; description, available_in_plans, and the reasoning level
+// VALUES themselves on the Codex route (only their presence is carried, as the
+// Reasoning bit — see [countReasoningLevels]). Neither response is paginated.
 //
 // Routing follows the streaming path: an API key lists against the public API,
 // while an OAuth (ChatGPT subscription) credential targets the Codex backend.
@@ -181,6 +182,10 @@ func decodeModels(data []byte, codex bool) ([]provider.ModelInfo, error) {
 				ContextWindow    int    `json:"context_window"`
 				MaxContextWindow int    `json:"max_context_window"`
 				Visibility       string `json:"visibility"`
+				// Held raw and decoded separately so a vendor shape change
+				// degrades this one advisory field instead of failing the whole
+				// catalogue. See [countReasoningLevels].
+				SupportedReasoningLevels json.RawMessage `json:"supported_reasoning_levels"`
 			} `json:"models"`
 		}
 		if err := json.Unmarshal(data, &res); err != nil {
@@ -205,7 +210,21 @@ func decodeModels(data []byte, codex bool) ([]provider.ModelInfo, error) {
 				DisplayName:   m.DisplayName,
 				ContextWindow: window,
 				Hidden:        m.Visibility == visibilityHidden,
-				Unregistered:  true,
+				// Every level value the catalogue has been observed to use
+				// ("low", "medium", "high", "xhigh", "max", "ultra") names a
+				// reasoning EFFORT, and the vocabulary has no "none"/"off"
+				// member — so a non-empty list is positive vendor evidence that
+				// the model reasons. Zero levels leaves this false, which under
+				// the per-field [provider.ModelInfo.Unregistered] rule reads as
+				// UNKNOWN: a bool cannot distinguish "the vendor says no" from
+				// "the vendor said nothing", and the conservative reading is the
+				// safe one either way.
+				//
+				// The levels THEMSELVES are deliberately dropped: nothing
+				// consumes them today, and carrying a slice would make ModelInfo
+				// non-comparable.
+				Reasoning:    countReasoningLevels(m.SupportedReasoningLevels) > 0,
+				Unregistered: true,
 			})
 		}
 		return out, nil
@@ -231,6 +250,50 @@ func decodeModels(data []byte, codex bool) ([]provider.ModelInfo, error) {
 		})
 	}
 	return out, nil
+}
+
+// countReasoningLevels reports how many reasoning levels a Codex catalogue entry
+// declares, reading supported_reasoning_levels TOLERANTLY.
+//
+// The field is advisory, so no shape of it may ever fail the listing — a vendor
+// change here must cost one capability bit, not the whole catalogue (the same
+// silently-empty-catalogue failure class [TestListModelsCodexShape] guards).
+// Two shapes are understood and everything else counts zero:
+//
+//   - [{"effort":"low"},…], the shape the catalogue actually serves. Entries
+//     with an empty effort name no level and are not counted.
+//   - ["low",…], a flat string list. Not observed live, but a plausible enough
+//     spelling to accept rather than discard.
+//
+// An absent field, an empty array, a bare string, an object, or malformed JSON
+// all yield 0 with no error.
+func countReasoningLevels(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	var objs []struct {
+		Effort string `json:"effort"`
+	}
+	if err := json.Unmarshal(raw, &objs); err == nil {
+		n := 0
+		for _, o := range objs {
+			if o.Effort != "" {
+				n++
+			}
+		}
+		return n
+	}
+	var strs []string
+	if err := json.Unmarshal(raw, &strs); err == nil {
+		n := 0
+		for _, s := range strs {
+			if s != "" {
+				n++
+			}
+		}
+		return n
+	}
+	return 0
 }
 
 // errNoModelsField reports a Codex-route 200 whose body carries no models key —
