@@ -424,13 +424,17 @@ func TestListModelsAPIKeyOmitsClientVersion(t *testing.T) {
 // zero models and a nil error, which is worse than the 400 it replaced.
 func TestListModelsCodexShape(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Element shape and effort vocabulary are the catalogue's real ones. Only
+		// the "low" description is a verbatim sampled string; the other entries
+		// carry effort alone, which doubles as coverage that description is
+		// optional to this decoder.
 		_, _ = w.Write([]byte(`{"models":[
-			{"slug":"gpt-5-codex","display_name":"GPT-5-Codex","description":"d",
+			{"slug":"gpt-5.6-sol","display_name":"GPT-5.6 Sol","description":"d",
 			 "max_context_window":272000,"visibility":"list",
 			 "supported_reasoning_levels":[
-			   {"effort":"low","description":"fast"},
-			   {"effort":"medium","description":"balanced"},
-			   {"effort":"high","description":"thorough"}],
+			   {"effort":"low","description":"Fast responses with lighter reasoning"},
+			   {"effort":"medium"},{"effort":"high"},
+			   {"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}],
 			 "available_in_plans":["plus","pro"]},
 			{"slug":"gpt-5","display_name":"GPT-5","visibility":"hide"}
 		]}`))
@@ -449,7 +453,7 @@ func TestListModelsCodexShape(t *testing.T) {
 	// field this adapter starts inventing shows up as a diff.
 	want := []provider.ModelInfo{
 		{
-			ID: "gpt-5-codex", Provider: "openai", DisplayName: "GPT-5-Codex",
+			ID: "gpt-5.6-sol", Provider: "openai", DisplayName: "GPT-5.6 Sol",
 			ContextWindow: 272000, Reasoning: true, Unregistered: true,
 		},
 		{
@@ -602,8 +606,9 @@ func TestListModelsCodexReasoning(t *testing.T) {
 		want  bool
 	}{
 		{
+			// The real element shape, with a verbatim sampled description.
 			name:  "object shape with efforts",
-			entry: `{"slug":"m","supported_reasoning_levels":[{"effort":"low","description":"fast"},{"effort":"high","description":"thorough"}]}`,
+			entry: `{"slug":"m","supported_reasoning_levels":[{"effort":"low","description":"Fast responses with lighter reasoning"},{"effort":"ultra"}]}`,
 			want:  true,
 		},
 		{
@@ -675,11 +680,23 @@ func TestListModelsCodexReasoning(t *testing.T) {
 
 // TestListModelsCodexReasoningPerModel proves the bit is per-model data read
 // from each entry, not a blanket flag set for the whole response.
+//
+// The first two slugs and their level sets are real, and they differ in SIZE
+// (six levels vs four) — the vendor genuinely varies this per model, so a
+// blanket flag would be wrong even among models that all reason. The third
+// entry omits the field entirely: every model in the sampled response carried
+// it, so that row is constructed rather than observed, and it is what pins the
+// false half of the split.
 func TestListModelsCodexReasoningPerModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"models":[
-			{"slug":"reasoner","supported_reasoning_levels":[{"effort":"xhigh"}]},
-			{"slug":"plain"}
+			{"slug":"gpt-5.6-sol","supported_reasoning_levels":[
+			  {"effort":"low"},{"effort":"medium"},{"effort":"high"},
+			  {"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},
+			{"slug":"gpt-5.5","supported_reasoning_levels":[
+			  {"effort":"low"},{"effort":"medium"},{"effort":"high"},
+			  {"effort":"xhigh"}]},
+			{"slug":"no-levels-reported"}
 		]}`))
 	}))
 	defer srv.Close()
@@ -689,8 +706,9 @@ func TestListModelsCodexReasoningPerModel(t *testing.T) {
 		t.Fatalf("ListModels: %v", err)
 	}
 	want := []provider.ModelInfo{
-		{ID: "reasoner", Provider: "openai", Reasoning: true, Unregistered: true},
-		{ID: "plain", Provider: "openai", Unregistered: true},
+		{ID: "gpt-5.6-sol", Provider: "openai", Reasoning: true, Unregistered: true},
+		{ID: "gpt-5.5", Provider: "openai", Reasoning: true, Unregistered: true},
+		{ID: "no-levels-reported", Provider: "openai", Unregistered: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
