@@ -103,6 +103,11 @@ socket, or network — same messages).
 `tool.cancel{id}` · `session.compact` · `session.set_model{model}` ·
 `session.kill` · `session.archive`.
 
+*Design-ahead (M4/M5):* a `session.set_effort{effort}` op should parallel
+`session.set_model` — a turn-boundary reasoning-effort swap validated against
+provider capability — and a manifest `params.thinking` block should make effort
+declaratively expressible. See DESIGN *Provider parity & credentials*.
+
 **Two-tier broker**: deltas ride a lossy tier (drop under backpressure, drop
 counters exposed); terminal events are must-deliver with bounded blocking.
 Settled `*.finished` payloads carry authoritative content, so a slow client
@@ -117,7 +122,7 @@ converges to the correct state regardless of drops.
 | **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (application) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 (v0.3.0) | Sandbox/containment seam (concrete Seatbelt/bwrap+seccomp backends are an application concern) + approval protocol events + binary containment policy (sandboxable → run contained; else → ask a human) + tool-output spill files + headless exec + LSP | a non-sandboxable tool call raises `permission.requested` and a client's reply gates execution |
 | **M4 · ACP v1 featureset expansion** | Cross-repo, matrix-driven ACP surface build-out — this repo owns the modeling + projection half. Session-method projection (`session/list` dispatch, resume, a modeled `set_config_option`) over the already-present `cwd`/`title` on `SessionInfo`; producers for the already-modeled rich blocks (emit `diff` from the edit tools, `terminal`) so a real tool call carries them; native list-models types feeding gofer's `session/new` model picker; capability modeling for the stretch set (`session_info_update`, `plan`, the `*_update` registries). Shipped so far: the projection-safe subset in **v0.6.0**; the `diff` producer, `set_config_option` modeling and `session/list` dispatch in **v0.7.0**; `session_info_update` in **v0.8.0**; `plan` in **v0.9.0**; `config_option_update` in **v0.10.0**; and the model-discovery types (`provider.ModelLister`) in **v0.13.0**. Still open: the `available_commands_update`/`current_mode_update` registries, and the additive follow-ups (grouped select options, `SessionInfo.additionalDirectories`, `_meta`). | gofer emits a `diff` tool-call block from an edit tool and an ACP client renders it |
-| M5 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
+| M5 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam (tool events gain originating-agent attribution) + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
 | M6 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ### Point releases (post-M3)
@@ -212,3 +217,12 @@ M0–M3 are what shipped here.
 - No graph/DAG workflow engine — this is an interactive agent loop.
 - No hosted service, no central registry, no telemetry.
 - No UI in this repo; TUI and supervision live in the consuming application.
+
+**Open question — in-process background-task handle.** A consuming app (gofer)
+wants a first-class long-running background-task primitive: persistent,
+task-id-keyed, re-attachable across turns. Whether the SDK offers a **task-handle
+seam** (task ids + persistence layered atop resumable sessions) or leaves it
+purely application-layer atop `runner.Resume` + the JSONL journal is undecided —
+recorded, not committed. This is an *in-process* handle: it does **not** reopen
+the "no hosted service / central registry" non-goal above, which forecloses a
+hosted registry, not an in-process task id.
