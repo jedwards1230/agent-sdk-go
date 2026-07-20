@@ -427,7 +427,10 @@ func TestListModelsCodexShape(t *testing.T) {
 		_, _ = w.Write([]byte(`{"models":[
 			{"slug":"gpt-5-codex","display_name":"GPT-5-Codex","description":"d",
 			 "max_context_window":272000,"visibility":"list",
-			 "supported_reasoning_levels":["low","medium","high"],
+			 "supported_reasoning_levels":[
+			   {"effort":"low","description":"fast"},
+			   {"effort":"medium","description":"balanced"},
+			   {"effort":"high","description":"thorough"}],
 			 "available_in_plans":["plus","pro"]},
 			{"slug":"gpt-5","display_name":"GPT-5","visibility":"hide"}
 		]}`))
@@ -438,15 +441,16 @@ func TestListModelsCodexShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
-	// Three of the Codex-only fields are carried — display_name, the context
-	// window, and visibility normalized to Hidden. The rest (description,
-	// available_in_plans, supported_reasoning_levels) have no home on ModelInfo
-	// and are still dropped, which the exact struct comparison below enforces:
-	// any field this adapter starts inventing shows up as a diff.
+	// Four of the Codex-only fields are carried — display_name, the context
+	// window, visibility normalized to Hidden, and supported_reasoning_levels
+	// collapsed to the Reasoning bit. The rest (description, available_in_plans,
+	// and the reasoning level values themselves) have no home on ModelInfo and
+	// are still dropped, which the exact struct comparison below enforces: any
+	// field this adapter starts inventing shows up as a diff.
 	want := []provider.ModelInfo{
 		{
 			ID: "gpt-5-codex", Provider: "openai", DisplayName: "GPT-5-Codex",
-			ContextWindow: 272000, Unregistered: true,
+			ContextWindow: 272000, Reasoning: true, Unregistered: true,
 		},
 		{
 			ID: "gpt-5", Provider: "openai", DisplayName: "GPT-5",
@@ -462,15 +466,17 @@ func TestListModelsCodexShape(t *testing.T) {
 		}
 	}
 	// The Codex catalogue reports no price — subscription models have none —
-	// so pricing stays zero meaning UNKNOWN and is never synthesized. Nor does
-	// it report a max output or a reasoning capability, despite listing
-	// supported_reasoning_levels, which names levels rather than answering
-	// whether extended reasoning is supported.
+	// so pricing stays zero meaning UNKNOWN and is never synthesized, and nor is
+	// a max output, which it also never reports. Reasoning IS reported, via
+	// supported_reasoning_levels: every level the catalogue names is a reasoning
+	// EFFORT and the vocabulary has no "none" member, so a non-empty list is
+	// positive vendor evidence. The per-model split is asserted above — the
+	// entry that lists levels reasons, the one that lists none stays false.
 	for _, m := range got {
 		if m.Pricing != (provider.Pricing{}) {
 			t.Errorf("pricing invented for %s: %+v", m.ID, m.Pricing)
 		}
-		if m.MaxOutput != 0 || m.Reasoning {
+		if m.MaxOutput != 0 {
 			t.Errorf("unreported metadata invented for %s: %+v", m.ID, m)
 		}
 	}
@@ -577,6 +583,186 @@ func TestListModelsCodexVisibility(t *testing.T) {
 				t.Errorf("Hidden = %v, want %v", got[0].Hidden, tc.want)
 			}
 		})
+	}
+}
+
+// TestListModelsCodexReasoning pins the collapse of supported_reasoning_levels
+// into the Reasoning bit. The vendor names reasoning EFFORTS ("low", "medium",
+// "high", "xhigh", "max", "ultra") with no "none" member in the vocabulary, so a
+// non-empty list is positive evidence the model reasons and an empty or absent
+// one leaves the bit false — which on an Unregistered record reads as UNKNOWN.
+//
+// The comparison is against the whole struct on purpose: it is the same
+// anti-invention guard as [TestListModelsCodexShape], so a mapping that starts
+// filling in some other field fails here too.
+func TestListModelsCodexReasoning(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry string
+		want  bool
+	}{
+		{
+			name:  "object shape with efforts",
+			entry: `{"slug":"m","supported_reasoning_levels":[{"effort":"low","description":"fast"},{"effort":"high","description":"thorough"}]}`,
+			want:  true,
+		},
+		{
+			// Not the live shape, but a plausible enough spelling to accept
+			// rather than read as "no reasoning".
+			name:  "flat string shape is tolerated",
+			entry: `{"slug":"m","supported_reasoning_levels":["low","medium"]}`,
+			want:  true,
+		},
+		{
+			name:  "empty array is not evidence",
+			entry: `{"slug":"m","supported_reasoning_levels":[]}`,
+			want:  false,
+		},
+		{
+			name:  "absent field is unknown",
+			entry: `{"slug":"m"}`,
+			want:  false,
+		},
+		{
+			name:  "null is unknown",
+			entry: `{"slug":"m","supported_reasoning_levels":null}`,
+			want:  false,
+		},
+		{
+			// Objects that name no effort name no level.
+			name:  "objects with empty effort do not count",
+			entry: `{"slug":"m","supported_reasoning_levels":[{"description":"d"}]}`,
+			want:  false,
+		},
+		{
+			name:  "bare string degrades to false",
+			entry: `{"slug":"m","supported_reasoning_levels":"high"}`,
+			want:  false,
+		},
+		{
+			name:  "object degrades to false",
+			entry: `{"slug":"m","supported_reasoning_levels":{"a":1}}`,
+			want:  false,
+		},
+		{
+			name:  "number list degrades to false",
+			entry: `{"slug":"m","supported_reasoning_levels":[1,2,3]}`,
+			want:  false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"models":[` + tc.entry + `]}`))
+			}))
+			defer srv.Close()
+
+			got, err := codexProvider(t, srv).ListModels(context.Background())
+			if err != nil {
+				t.Fatalf("ListModels: %v", err)
+			}
+			want := provider.ModelInfo{
+				ID: "m", Provider: "openai", Reasoning: tc.want, Unregistered: true,
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d models, want 1: %+v", len(got), got)
+			}
+			if got[0] != want {
+				t.Errorf("model = %+v, want %+v", got[0], want)
+			}
+		})
+	}
+}
+
+// TestListModelsCodexReasoningPerModel proves the bit is per-model data read
+// from each entry, not a blanket flag set for the whole response.
+func TestListModelsCodexReasoningPerModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"reasoner","supported_reasoning_levels":[{"effort":"xhigh"}]},
+			{"slug":"plain"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := codexProvider(t, srv).ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []provider.ModelInfo{
+		{ID: "reasoner", Provider: "openai", Reasoning: true, Unregistered: true},
+		{ID: "plain", Provider: "openai", Unregistered: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("model[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestListModelsCodexReasoningMalformedKeepsCatalogue is the degrade-never-fail
+// guarantee. supported_reasoning_levels is advisory; a vendor shape change there
+// must cost one capability bit and nothing else. If it ever fails the decode,
+// the whole catalogue disappears behind an error — the same silently-broken
+// listing failure class [TestListModelsCodexShape] exists to prevent.
+func TestListModelsCodexReasoningMalformedKeepsCatalogue(t *testing.T) {
+	for _, tc := range []struct{ name, levels string }{
+		{"bare string", `"high"`},
+		{"object", `{"a":1}`},
+		{"nested garbage", `[["low"],["high"]]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"models":[
+					{"slug":"a","supported_reasoning_levels":` + tc.levels + `},
+					{"slug":"b","display_name":"B","context_window":1000},
+					{"slug":"c","supported_reasoning_levels":[{"effort":"low"}]}
+				]}`))
+			}))
+			defer srv.Close()
+
+			got, err := codexProvider(t, srv).ListModels(context.Background())
+			if err != nil {
+				t.Fatalf("a malformed advisory field must not fail the listing, got %v", err)
+			}
+			want := []provider.ModelInfo{
+				{ID: "a", Provider: "openai", Unregistered: true},
+				{ID: "b", Provider: "openai", DisplayName: "B", ContextWindow: 1000, Unregistered: true},
+				{ID: "c", Provider: "openai", Reasoning: true, Unregistered: true},
+			}
+			if len(got) != len(want) {
+				t.Fatalf("got %d models, want the full catalogue of %d: %+v", len(got), len(want), got)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Errorf("model[%d] = %+v, want %+v", i, got[i], want[i])
+				}
+			}
+		})
+	}
+}
+
+// TestListModelsAPIKeyRouteIgnoresReasoningLevels keeps the capability bit off
+// the public API's route. That endpoint reports identity only and never
+// documents supported_reasoning_levels, so reading it there would mean trusting
+// a field the endpoint does not claim to serve.
+func TestListModelsAPIKeyRouteIgnoresReasoningLevels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"gpt-5","supported_reasoning_levels":[{"effort":"high"}]}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := testProvider(t, srv).ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := provider.ModelInfo{ID: "gpt-5", Provider: "openai", Unregistered: true}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 
