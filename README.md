@@ -4,14 +4,15 @@ An importable, provider-agnostic **agent framework for Go**: an owned, auditable
 agent loop with sessions, permissions, tools, skills, MCP, ACP, plugins, and
 declarative agent manifests.
 
-> **Status: v0.5.0, M3 shipped.** The typed Event/Op contract, the two-tier
+> **Status: v0.14.1, M0–M3 shipped.** The typed Event/Op contract, the two-tier
 > event broker, real Anthropic/OpenAI providers (API key + subscription
 > OAuth), the agent loop, builtin tools, the `runner` package, a clean-room
 > `acp` (Agent Client Protocol) adapter, and M3's guardrails (permission
 > engine, guard/approval seam, spill files, headless exec, LSP) are all in
-> place, plus two point releases (v0.4.0, v0.5.0) letting a client swap a
-> session's model mid-flight. Next up is M4, the ecosystem milestone (see the
-> [roadmap](#roadmap)).
+> place. M4, the ACP v1 featureset expansion, is in progress: session-method
+> dispatch, the `diff` producer, `session_info_update`/`plan`/
+> `config_option_update` projections, and live model discovery
+> (`provider.ModelLister`) have all landed (see the [roadmap](#roadmap)).
 
 ## Why
 
@@ -104,7 +105,7 @@ is dropped whole and the error surfaces; `Close` reports any failure no `Prompt`
 boundary already did. `session.WithMemJournalWriter` substitutes a `MemStore`'s
 sink so an embedder can exercise its own handling of that path.
 
-Planned: `skill/`, `plugin/`, `mcp/` (M4).
+Planned: `skill/`, `plugin/`, `mcp/` (M5).
 
 ## Roadmap
 
@@ -114,12 +115,12 @@ Planned: `skill/`, `plugin/`, `mcp/` (M4).
 | **M1 · one good session** ✅ | Loop + real provider (Anthropic + OpenAI) + builtin tools + JSONL session tree + usage/cost accounting |
 | **M2 · the daemon** ✅ | (in the consuming application) supervisor + TUI + native ACP; SDK ships `acp/` + `runner/` |
 | **M3 · guardrails** ✅ | Sandbox/approval seam, binary containment policy, tool-output spill files, headless exec, LSP diagnostics |
-| M4 · ecosystem | MCP client (tool-search-first), SKILL.md skills, plugin subprocess host, session tree / subagent spawn seam, vendor settings adapters, provider breadth |
-| M5 · auto + polish | Reviewer pipeline, WASM plugin tier, asset import |
+| M4 · ACP v1 featureset expansion | Session-method projection (`session/list` dispatch, resume, modeled `set_config_option`), producers for the modeled rich blocks (`diff` from the edit/write tools), model-discovery types, capability modeling for the stretch set |
+| M5 · ecosystem | MCP client (tool-search-first), SKILL.md skills, plugin subprocess host, session tree / subagent spawn seam, vendor settings adapters, provider breadth |
+| M6 · auto + polish | Reviewer pipeline, WASM plugin tier, asset import, mDNS pairing |
 
-Two point releases followed M3, ahead of M4: **v0.4.0** (ACP `session/new`
-optional `model` field) and **v0.5.0** (`Runner.SetModel`, mid-session model
-swap) — both support gofer's M4, not SDK milestones.
+Point releases are cut between milestones; `docs/PRD.md` carries the per-release
+list. **SDK milestone numbers are independent of the consuming application's.**
 
 The SDK must always build and test green with **zero** application code
 present — the embedder is a CI gate, not a hope.

@@ -518,9 +518,10 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   `event.FileEdit` → `diff` content block). `terminal` (and `image`/`audio`/
   `resource`) stay dormant until a builtin tool naturally produces them; none
   does today, so no producer was invented.
-- **Model discovery types** — the types backing gofer's native list-models
-  endpoint that feeds the `session/new` model picker (migrate to `providers/
-  list` only once that spec surface stabilizes).
+- **Model discovery types** ✅ — `provider.ModelLister` and the vendor metadata
+  it carries on `ModelInfo` back gofer's native list-models endpoint, which
+  feeds the `session/new` model picker (see *Live model listing* above). Migrate
+  to `providers/list` only once that spec surface stabilizes.
 - **Capability modeling for the stretch set** — `session_info_update` **ships**:
   `session.Session` carries an embedder-set `title` (`SetTitle`/`Title`), a
   `SetTitle` change emits the must-deliver `session.info` event, and

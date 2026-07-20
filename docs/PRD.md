@@ -116,7 +116,7 @@ converges to the correct state regardless of drops.
 | **M1 · one good session** ✅ shipped 2026-07-12 | Loop + real provider (Anthropic + OpenAI, API-key + subscription OAuth) + builtin tools + JSONL tree + usage/cost accounting | a real coding task end-to-end, streaming, resumable after kill |
 | **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (application) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 (v0.3.0) | Sandbox/containment seam (concrete Seatbelt/bwrap+seccomp backends are an application concern) + approval protocol events + binary containment policy (sandboxable → run contained; else → ask a human) + tool-output spill files + headless exec + LSP | a non-sandboxable tool call raises `permission.requested` and a client's reply gates execution |
-| **M4 · ACP v1 featureset expansion** | Cross-repo, matrix-driven ACP surface build-out — this repo owns the modeling + projection half. Session-method projection (`session/list` dispatch, resume, a modeled `set_config_option`) over the already-present `cwd`/`title` on `SessionInfo`; producers for the already-modeled rich blocks (emit `diff` from the edit tools, `terminal`) so a real tool call carries them; native list-models types feeding gofer's `session/new` model picker; capability modeling for the stretch set (`session_info_update`, `plan`, the `*_update` registries). Projection-safe subset (`usage_update` + image/audio/resource content blocks + `diff`/`terminal` tool-call content modeling) already shipped in **v0.6.0**. | gofer emits a `diff` tool-call block from an edit tool and an ACP client renders it |
+| **M4 · ACP v1 featureset expansion** | Cross-repo, matrix-driven ACP surface build-out — this repo owns the modeling + projection half. Session-method projection (`session/list` dispatch, resume, a modeled `set_config_option`) over the already-present `cwd`/`title` on `SessionInfo`; producers for the already-modeled rich blocks (emit `diff` from the edit tools, `terminal`) so a real tool call carries them; native list-models types feeding gofer's `session/new` model picker; capability modeling for the stretch set (`session_info_update`, `plan`, the `*_update` registries). Shipped so far: the projection-safe subset in **v0.6.0**; the `diff` producer, `set_config_option` modeling and `session/list` dispatch in **v0.7.0**; `session_info_update` in **v0.8.0**; `plan` in **v0.9.0**; `config_option_update` in **v0.10.0**; and the model-discovery types (`provider.ModelLister`) in **v0.13.0**. Still open: the `available_commands_update`/`current_mode_update` registries, and the additive follow-ups (grouped select options, `SessionInfo.additionalDirectories`, `_meta`). | gofer emits a `diff` tool-call block from an edit tool and an ACP client renders it |
 | M5 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
 | M6 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
@@ -136,11 +136,35 @@ M0–M3 are what shipped here.
   image/audio/resource content blocks + `diff`/`terminal` tool-call content
   modeled and projected (carries #52–#54). Modeling + projection only — no
   producer emits the rich blocks yet; that lands in M4 proper.
-- **`diff` producer** — the edit and write tools attach a structured
+- **v0.7.0** — the `diff` producer (the edit and write tools attach a structured
   before/after `event.FileEdit` to `tool.call.finished`; `ToSessionUpdate`
   projects it to a `diff` tool-call content block, so an edit renders as a real
-  diff instead of plain text. `terminal`/`image`/`audio`/`resource` stay
-  modeled-but-dormant (no builtin tool naturally produces them).
+  diff instead of plain text — `terminal`/`image`/`audio`/`resource` stay
+  modeled-but-dormant, since no builtin tool naturally produces them), plus
+  `session/set_config_option` modeling and `session/list` dispatch.
+- **v0.8.0** — session title seam (`Session.SetTitle`/`Title`, the must-deliver
+  `session.info` event) + `session_info_update` projection.
+- **v0.9.0** — `update_plan` builtin tool + `plan` session/update projection.
+- **v0.10.0** — `config_option_update` outbound projection + `session.config`
+  event.
+- **v0.11.0** — canonical `event.Unmarshal` decoder; pre-assigned session-id
+  seam (`runner.Options.SessionID`).
+- **v0.12.0** — the model registry stops being an admission allowlist:
+  `Resolve` admits an unregistered id whose backend is inferable from its shape,
+  `Lookup`/`CostOf` stay strict and keep their `ok` result.
+- **v0.13.0** — `provider.ModelLister`, the optional live model-listing
+  capability, with Anthropic and OpenAI adapters; the Codex (OAuth) route needs
+  a `client_version` query parameter and serves a differently shaped catalogue.
+- **v0.13.1** — `ModelInfo` carries vendor-supplied metadata (`DisplayName`,
+  `Hidden`) under the per-field rule on `Unregistered`: a zero-value field means
+  unknown, a non-zero one is vendor fact. `Pricing` is the strict exception and
+  stays unconditionally zero.
+- **v0.14.0** — `Reasoning` is derived from the Codex listing's
+  `supported_reasoning_levels`.
+- **v0.14.1** — a journal `Append` failure fails closed instead of being
+  swallowed: the consumer goroutine records it, `Runner.Prompt` takes-and-clears
+  it at each turn boundary, and `Runner.Close` reports whatever residual failure
+  no `Prompt` boundary already did.
 
 ## Settled decisions
 
