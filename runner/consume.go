@@ -134,6 +134,11 @@ func (a *turnAcc) assistantBlocks(includeToolUse bool) []provider.ContentBlock {
 		blocks = append(blocks, block)
 	}
 	if includeToolUse {
+		// Appending one block per started call is load-bearing beyond this
+		// function: [Runner.flushAssistant] relies on it to conclude that no
+		// blocks implies no announced calls, which is what keeps a failed
+		// assistant append from being followed by an orphan tool_result round.
+		// See the INVARIANT comment there before making this conditional.
 		for _, c := range a.started {
 			// tool.call.started carries only the start-of-block seed (an empty
 			// "{}" for a streamed tool call); tool.call.finished carries the
@@ -292,7 +297,21 @@ func (r *Runner) flushAssistant(acc *turnAcc, includeToolUse bool) bool {
 	}
 	blocks := acc.assistantBlocks(includeToolUse)
 	if len(blocks) == 0 {
-		return true // nothing to write: the turn is vacuously durable
+		// Nothing to write: the turn is vacuously durable.
+		//
+		// INVARIANT (load-bearing, and spanning two functions): returning true
+		// here lets maybeFlushToolTurn proceed to flushRound, which would write
+		// an orphan tool_result if this could ever co-occur with a non-empty
+		// acc.started. It cannot: with includeToolUse=true, assistantBlocks
+		// appends one tool_use block per acc.started unconditionally, so
+		// len(blocks)==0 implies len(acc.started)==0 — and flushRound
+		// early-returns on exactly that. Both halves are required. If a future
+		// change makes assistantBlocks able to return no blocks while calls are
+		// announced (e.g. filtering tool_use blocks), this return must become
+		// `return len(acc.started) == 0` or the orphan this whole function
+		// exists to prevent comes back. No test covers that combination,
+		// because it is currently unreachable.
+		return true
 	}
 	msg := provider.Message{Role: provider.RoleAssistant, Content: blocks}
 	entry := session.NewMessageEntry(msg, session.WithEntryModel(r.currentModel()), session.WithEntryUsage(acc.usage))
