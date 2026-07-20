@@ -438,9 +438,20 @@ func TestListModelsCodexShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListModels: %v", err)
 	}
+	// Three of the Codex-only fields are carried — display_name, the context
+	// window, and visibility normalized to Hidden. The rest (description,
+	// available_in_plans, supported_reasoning_levels) have no home on ModelInfo
+	// and are still dropped, which the exact struct comparison below enforces:
+	// any field this adapter starts inventing shows up as a diff.
 	want := []provider.ModelInfo{
-		{ID: "gpt-5-codex", Provider: "openai", Unregistered: true},
-		{ID: "gpt-5", Provider: "openai", Unregistered: true},
+		{
+			ID: "gpt-5-codex", Provider: "openai", DisplayName: "GPT-5-Codex",
+			ContextWindow: 272000, Unregistered: true,
+		},
+		{
+			ID: "gpt-5", Provider: "openai", DisplayName: "GPT-5",
+			Hidden: true, Unregistered: true,
+		},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d models, want %d: %+v", len(got), len(want), got)
@@ -451,14 +462,171 @@ func TestListModelsCodexShape(t *testing.T) {
 		}
 	}
 	// The Codex catalogue reports no price — subscription models have none —
-	// so pricing stays zero meaning UNKNOWN and is never synthesized.
+	// so pricing stays zero meaning UNKNOWN and is never synthesized. Nor does
+	// it report a max output or a reasoning capability, despite listing
+	// supported_reasoning_levels, which names levels rather than answering
+	// whether extended reasoning is supported.
 	for _, m := range got {
 		if m.Pricing != (provider.Pricing{}) {
 			t.Errorf("pricing invented for %s: %+v", m.ID, m.Pricing)
 		}
-		if m.ContextWindow != 0 || m.MaxOutput != 0 {
-			t.Errorf("limits invented for %s: %+v", m.ID, m)
+		if m.MaxOutput != 0 || m.Reasoning {
+			t.Errorf("unreported metadata invented for %s: %+v", m.ID, m)
 		}
+	}
+	// gpt-5 IS in the embedded registry, with a real context window and real
+	// pricing. It must come back bare anyway: merging the registry into a live
+	// listing is the caller's decision. This is the backfill guard.
+	reg, ok := provider.Lookup("gpt-5")
+	if !ok || reg.ContextWindow == 0 || reg.Pricing == (provider.Pricing{}) {
+		t.Fatal("test premise broken: gpt-5 must be registered with a window and pricing")
+	}
+	if got[1].ContextWindow != 0 {
+		t.Errorf("gpt-5 ContextWindow = %d; the Codex entry reported none, so it must stay unknown",
+			got[1].ContextWindow)
+	}
+	if got[1].Pricing != (provider.Pricing{}) {
+		t.Errorf("gpt-5 pricing backfilled from the registry: %+v", got[1].Pricing)
+	}
+	if !got[1].Unregistered {
+		t.Error("gpt-5 Unregistered = false; a listing record is never registry-sourced")
+	}
+}
+
+// TestListModelsCodexContextWindow pins the precedence between the catalogue's
+// two window spellings, and — more importantly — that neither being present
+// yields UNKNOWN rather than an invented number.
+func TestListModelsCodexContextWindow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry string
+		want  int
+	}{
+		{
+			// Both present and DIFFERENT, so a swapped precedence cannot pass.
+			name:  "context_window wins over max_context_window",
+			entry: `{"slug":"m","context_window":111000,"max_context_window":272000}`,
+			want:  111000,
+		},
+		{
+			name:  "max_context_window used when context_window absent",
+			entry: `{"slug":"m","max_context_window":272000}`,
+			want:  272000,
+		},
+		{
+			// An explicit zero is not a real limit, so it falls back too.
+			name:  "max_context_window used when context_window is zero",
+			entry: `{"slug":"m","context_window":0,"max_context_window":272000}`,
+			want:  272000,
+		},
+		{
+			name:  "neither present is unknown",
+			entry: `{"slug":"m"}`,
+			want:  0,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"models":[` + tc.entry + `]}`))
+			}))
+			defer srv.Close()
+
+			got, err := codexProvider(t, srv).ListModels(context.Background())
+			if err != nil {
+				t.Fatalf("ListModels: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d models, want 1: %+v", len(got), got)
+			}
+			if got[0].ContextWindow != tc.want {
+				t.Errorf("ContextWindow = %d, want %d", got[0].ContextWindow, tc.want)
+			}
+		})
+	}
+}
+
+// TestListModelsCodexVisibility pins the fail-open normalization of the
+// vendor's visibility marker: only the exact value "hide" hides a model, so an
+// unrecognized or absent marker can never make the catalogue disappear.
+func TestListModelsCodexVisibility(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		entry string
+		want  bool
+	}{
+		{"hide hides", `{"slug":"m","visibility":"hide"}`, true},
+		{"list does not", `{"slug":"m","visibility":"list"}`, false},
+		{"unrecognized fails open", `{"slug":"m","visibility":"archived"}`, false},
+		{"absent fails open", `{"slug":"m"}`, false},
+		{"empty fails open", `{"slug":"m","visibility":""}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(`{"models":[` + tc.entry + `]}`))
+			}))
+			defer srv.Close()
+
+			got, err := codexProvider(t, srv).ListModels(context.Background())
+			if err != nil {
+				t.Fatalf("ListModels: %v", err)
+			}
+			if len(got) != 1 {
+				t.Fatalf("got %d models, want 1: %+v", len(got), got)
+			}
+			if got[0].Hidden != tc.want {
+				t.Errorf("Hidden = %v, want %v", got[0].Hidden, tc.want)
+			}
+		})
+	}
+}
+
+// TestListModelsCodexDisplayName carries the vendor's label when it has one and
+// leaves it empty — meaning UNKNOWN, with the id as the fallback label — when
+// it does not. The adapter never synthesizes a name from the slug.
+func TestListModelsCodexDisplayName(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-5-codex","display_name":"GPT-5-Codex"},
+			{"slug":"gpt-5-nameless"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := codexProvider(t, srv).ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d models, want 2: %+v", len(got), got)
+	}
+	if got[0].DisplayName != "GPT-5-Codex" {
+		t.Errorf("DisplayName = %q, want the vendor label", got[0].DisplayName)
+	}
+	if got[1].DisplayName != "" {
+		t.Errorf("DisplayName = %q, want empty when the vendor supplied none", got[1].DisplayName)
+	}
+}
+
+// TestListModelsAPIKeyRouteCarriesNoMetadata keeps the public API's decoder
+// narrow. That endpoint reports none of the Codex catalogue's metadata, so even
+// a body that happens to carry those keys must yield bare records: reading them
+// there would mean trusting fields the endpoint does not actually document.
+func TestListModelsAPIKeyRouteCarriesNoMetadata(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"gpt-5","display_name":"GPT-5","context_window":400000,
+			 "max_context_window":400000,"visibility":"hide"}
+		]}`))
+	}))
+	defer srv.Close()
+
+	got, err := testProvider(t, srv).ListModels(context.Background())
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	want := []provider.ModelInfo{{ID: "gpt-5", Provider: "openai", Unregistered: true}}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
 

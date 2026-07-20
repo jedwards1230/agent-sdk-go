@@ -13,30 +13,62 @@ type ModelInfo struct {
 	ID string
 	// Provider is the backend that serves the model ("anthropic", "openai", …).
 	Provider string
-	// ContextWindow is the maximum input context in tokens, or 0 when unknown
-	// (always 0 when Unregistered). Zero means "unknown", NOT "no context" —
-	// a consumer must render it as unavailable rather than as an exhausted
-	// budget, and must not divide by it.
+	// DisplayName is the vendor's own human-readable label for the model
+	// ("GPT-5-Codex", "Claude Sonnet 5"), or "" when no source supplied one.
+	// Empty means UNKNOWN, not "unnamed": a consumer renders [ModelInfo.ID]
+	// instead, which is always present.
+	DisplayName string
+	// ContextWindow is the maximum input context in tokens, or 0 when unknown.
+	// Zero means "unknown", NOT "no context" — a consumer must render it as
+	// unavailable rather than as an exhausted budget, and must not divide by
+	// it. A vendor listing may report a real context window on an Unregistered
+	// record; see the per-field rule on Unregistered.
 	ContextWindow int
-	// MaxOutput is the maximum output tokens per response, or 0 when unknown
-	// (always 0 when Unregistered). Adapters fall back to their own default.
+	// MaxOutput is the maximum output tokens per response, or 0 when unknown.
+	// Adapters fall back to their own default. No vendor listing endpoint
+	// reports it today, so it is zero on every Unregistered record in practice
+	// — but that is a fact about the endpoints, not a guarantee of this field.
 	MaxOutput int
 	// Pricing is the model's per-million-token pricing in USD. It is the zero
-	// value when Unregistered — which is NOT a price of zero. Never price
-	// usage off this field without first checking Unregistered; use [CostOf],
-	// which reports unknown pricing through its ok result.
+	// value when Unregistered — which is NOT a price of zero. This field keeps
+	// the STRICT rule that the rest no longer do (see Unregistered): no vendor
+	// listing endpoint reports pricing, and a fabricated price is the dangerous
+	// failure this contract exists to prevent. Never price usage off this field
+	// without first checking Unregistered; use [CostOf], which reports unknown
+	// pricing through its ok result.
 	Pricing Pricing
-	// Reasoning reports whether the model supports extended reasoning. It is
-	// false when Unregistered — a conservative default, not a known answer.
+	// Reasoning reports whether the model supports extended reasoning. False
+	// means "not known to support it" — a conservative default, which on an
+	// Unregistered record is usually an absence of information rather than a
+	// measured answer.
 	Reasoning bool
-	// Unregistered reports that this record was synthesized rather than read
-	// from the registry — either by [Resolve], for a model id the registry does
-	// not carry, or by a [ModelLister] from a vendor listing endpoint that
-	// reports no pricing or limits.
-	// Only ID and Provider are trustworthy on such a record: every other field
-	// is a placeholder meaning "unknown". A consumer that surfaces pricing,
-	// limits, or capabilities must branch on this flag and show the value as
-	// unavailable instead of rendering the zero value as fact.
+	// Hidden reports that the VENDOR marks this model as not user-selectable in
+	// its own picker. It is advisory metadata, not an access control: a hidden
+	// model may still be perfectly runnable, and the SDK never refuses one.
+	//
+	// The polarity is deliberate and load-bearing. This field FAILS OPEN: the
+	// zero value means "not known to be hidden", so any record from a source
+	// that says nothing about visibility — the registry, [Resolve], an adapter
+	// that never sets it — shows up. The obvious inverse spelling, a
+	// Selectable bool, would fail CLOSED at its zero value and every such
+	// record would silently vanish from a consumer's picker. Vendor visibility
+	// vocabularies also differ and grow; normalizing them to this one
+	// boolean is the SDK's job, so the raw vendor string is never exported.
+	Hidden bool
+	// Unregistered reports that this record was NOT read from the curated
+	// registry — it was synthesized by [Resolve] for a model id the registry
+	// does not carry, or built by a [ModelLister] from a vendor listing.
+	//
+	// The rule it implies is PER-FIELD, not whole-record. On such a record:
+	//
+	//   - A metadata field at its ZERO value is UNKNOWN, not a measured zero.
+	//     A consumer must render it as unavailable, never as fact.
+	//   - A NON-ZERO metadata field is vendor-supplied fact and MAY be
+	//     rendered. Vendor listings do report some real metadata (the Codex
+	//     catalogue supplies a context window and a display name), and
+	//     discarding it would be its own kind of dishonesty.
+	//   - Pricing is the exception and stays STRICT: it is unconditionally the
+	//     zero value here. See the Pricing field.
 	Unregistered bool
 }
 
@@ -88,6 +120,11 @@ func inferProvider(id string) string {
 // backend can be inferred from its shape returns a degraded record — correct ID
 // and Provider, Unregistered set, and every metadata field at its zero value
 // meaning "unknown" — so the model can still be run.
+//
+// That every-field-zero property is specific to Resolve, which has nothing but
+// the id to work from and so synthesizes an empty record. It is NOT a property
+// of Unregistered records generally: a [ModelLister] builds Unregistered records
+// too, and those can carry real vendor-supplied metadata. See [ModelInfo].
 //
 // This is the entry point callers should use to answer "can I run this model?".
 // [Lookup] answers the narrower question "does the SDK know this model's

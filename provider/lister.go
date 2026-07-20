@@ -28,10 +28,15 @@ type ModelLister interface {
 	// in the consuming application. In particular the SDK writes nothing to
 	// disk here.
 	//
-	// Neither built-in vendor endpoint reports pricing or limits, so every
-	// returned record has [ModelInfo.Unregistered] set and every metadata field
-	// at its zero value meaning UNKNOWN. Only ID and Provider are trustworthy.
-	// A caller wanting pricing and limits enriches each id itself via [Lookup].
+	// Nothing here is registry-sourced, so every returned record has
+	// [ModelInfo.Unregistered] set, and the per-field rule documented on that
+	// flag applies: a metadata field at its zero value is UNKNOWN, while a
+	// non-zero one is vendor-supplied fact a caller may render. What each
+	// endpoint actually supplies varies and is documented on the adapters.
+	//
+	// Pricing is the one field that is always zero: no listing endpoint reports
+	// a price. A caller wanting pricing — or limits an endpoint omitted —
+	// enriches each id itself via [Lookup].
 	//
 	// An empty result with a nil error means the vendor listed no models, which
 	// is a successful answer and distinct from a failure. Implementations return

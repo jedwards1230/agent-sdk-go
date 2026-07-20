@@ -88,16 +88,28 @@ client's op started the turn.
   differently shaped catalogue — `{"models":[{"slug"…}]}`, requiring a
   `client_version` query parameter — carrying display names and context windows
   but, being subscription-served, no price). Every returned record is therefore
-  `Unregistered: true` with
-  metadata fields at zero **meaning unknown**; a caller wanting pricing enriches
+  `Unregistered: true` — nothing here is registry-sourced — and the flag's rule
+  is **per-field**: a metadata field at zero means **unknown**, while a non-zero
+  one is vendor-supplied fact a caller may render. The adapters carry what the
+  vendor actually reports (Anthropic's `display_name`; the Codex route's
+  `display_name`, `context_window`/`max_context_window`, and `visibility`
+  normalized to `Hidden`) and invent nothing else. `Pricing` is the strict
+  exception: it is always zero, because no listing endpoint reports a price and
+  a fabricated one is the dangerous failure. A caller wanting pricing enriches
   each id itself via `Lookup`. An empty listing is a success returning an empty
   slice, never an error.
+
+  `Hidden` **fails open**: its zero value means "not known to be hidden", so a
+  record from any source that says nothing about visibility still shows up. The
+  inverse spelling (`Selectable bool`) would fail closed and silently hide every
+  model an adapter forgot to mark.
 
   The registry is **metadata, not an allowlist**. `Resolve(id)` — not `Lookup` —
   is the admission check: an id the table does not carry still resolves, and
   runs, so long as its backend is inferable from its shape (`claude-*`, `gpt-*`,
-  `o<n>-*`). Such a record has `Unregistered: true` and every metadata field at
-  its zero value **meaning unknown**, so a newly released model is usable the
+  `o<n>-*`). Such a record has `Unregistered: true` and — `Resolve` having only
+  the id to work from — every metadata field at its zero value **meaning
+  unknown**, so a newly released model is usable the
   day it ships rather than waiting on an SDK release. Only an empty id
   (`ErrNoModel` — the caller never resolved a default) and an id belonging to no
   known family (`ErrUnknownProvider` — no adapter to route to) are refused.

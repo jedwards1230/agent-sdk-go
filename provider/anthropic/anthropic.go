@@ -107,11 +107,16 @@ func New(model string, creds provider.CredentialSource, opts ...Option) *Provide
 
 // Info returns the model metadata from the shared registry, or a minimal record
 // (id + provider) when the model is not registered.
+//
+// The fallback sets Unregistered because the record it returns is exactly the
+// thing that flag exists to mark: zero pricing, zero limits, and no way to tell
+// them apart from measured values without it. Omitting it let a consumer read
+// the zero Pricing as a free model.
 func (p *Provider) Info() provider.ModelInfo {
 	if info, ok := provider.Lookup(p.model); ok {
 		return info
 	}
-	return provider.ModelInfo{ID: p.model, Provider: providerID}
+	return provider.ModelInfo{ID: p.model, Provider: providerID, Unregistered: true}
 }
 
 // Stream starts one Messages API call and returns a handle over the normalized
