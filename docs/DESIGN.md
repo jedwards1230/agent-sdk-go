@@ -135,6 +135,17 @@ client's op started the turn.
   of the request/stream shape and end-to-end inspectability of everything that
   enters the model's context. The cost is one thin adapter per vendor; the
   payoff is that nothing in the wire path is opaque.
+- **Runtime reasoning-effort is a design-ahead seam (M4/M5).** Effort is
+  construction-time only today: `Params.Thinking.Effort` (`low`/`medium`/`high`,
+  unifying Anthropic's thinking budget and OpenAI's effort) is resolved once and
+  wired through loop/runner. A live `Runner.SetEffort(effort)` should parallel
+  `Runner.SetModel` — a turn-boundary swap validated against provider capability
+  — so a consuming TUI can offer an effort axis orthogonal to model choice
+  between turns; without a setter it cannot change effort mid-session. It also
+  wants a declarative home: `compose.Load` parses only the manifest `model`
+  today, so a `params.thinking` block should be parsed too, making effort
+  expressible without code. Recorded here so the runner and manifest surfaces
+  leave room for it.
 
 ## Auth & credentials (M1)
 
@@ -263,6 +274,28 @@ raises an approval request. There is no third "run uncontained" outcome.
 - Every gated-off call (deny or ask-then-deny) still emits `tool.call.finished`
   — nothing executed, so there is no spill — keeping the loop's tool-round
   invariant (one `tool_result` per `tool_use`) intact for every outcome.
+
+**Permission outcomes grow AMEND / EXPLAIN (design-ahead, M5).** ACP
+`request_permission` today models only `allow_once`/`allow_always`/`reject_once`/
+`reject_always`, and the loop's `Reply` is a bare allow/deny. Two outcomes should
+join it: **amend** (the client returns a modified tool input, run in place of the
+original) and **explain** (the client requests the agent's rationale before
+deciding, then re-prompts). This lets a consuming TUI offer "amend the command" /
+"explain why" on a permission request without leaving the guard/approver seam.
+Recorded here so the `Reply` and `permission.resolved` shapes leave room for the
+extra verdicts.
+
+**Structured question surface, distinct from permission (design-ahead, M5).**
+Permission gating is the only interactive-choice primitive today (allow/deny on a
+`permission.requested`). A consuming TUI also wants a first-class *question*
+surface: a titled question with N labeled options, each carrying a rationale
+sub-line, optional free-text, and a batched **multi-question** form (ordered
+questions, a per-option reference payload, per-question notes). This is a new
+client-prompt surface — a modeled `acp/` message type and/or a builtin `ask_user`
+tool — separate from permission: it composes with the guard/approver await seam
+(the loop blocks on a client reply the same way) but it is not a policy gate, so
+it is *not* the permission engine. Recorded design-ahead so the Event/Op contract
+leaves room for the question event + its reply op.
 
 ## Agent manifest (compose/)
 
@@ -547,6 +580,15 @@ child metadata carrying `parent_id`, and depth (parent-chain length) capped at 5
 and enforced at spawn. The application wires this to its supervisor/roster (tree
 view, peek/attach into any child). Ships M5; recorded here so the session and
 event contracts leave room for it now.
+
+**Tool-call agent attribution (design-ahead, follows this seam).** Tool events
+(`tool.call.started`/`delta`/`finished`) carry `{id, name, input}` and nest under
+the run span by call `id` only, with no originating-agent field — the
+instrumentation seam (*The Event/Op stream is the span/metric source*) also adds
+no `turn_id` on purpose. Once this spawn seam lands and a child session carries
+`parent_id`, tool events should also carry the spawning child/agent id, so a
+consumer can attribute "which worker ran this tool" across a session tree without
+correlating out-of-band. Recorded with the spawn seam it depends on.
 
 ## Extension tiers
 
