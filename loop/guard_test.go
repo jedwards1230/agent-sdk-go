@@ -2,6 +2,7 @@ package loop_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -249,6 +250,53 @@ func TestGuardAskApprovedWithRememberGrants(t *testing.T) {
 	}
 	if len(guard.granted) != 1 || guard.granted[0].ID != "t1" {
 		t.Errorf("granted = %+v, want exactly the approved call remembered", guard.granted)
+	}
+}
+
+func TestGuardAskAmendedRunsToolWithReplacementInput(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	defer b.Subscribe(event.FilterAll, 256).Close()
+
+	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
+	cfg := gatedToolConfig(b, tool) // model's original input is {"a":1}
+	cfg.Guard = &stubGuard{decision: loop.DecisionAsk, rule: "ask echo"}
+	amended := json.RawMessage(`{"a":2}`)
+	cfg.Approver = stubApprover{reply: loop.Reply{Verdict: event.VerdictAllow, Input: amended}}
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tool.runs != 1 {
+		t.Fatalf("tool.runs = %d, want 1 (amended allow runs the tool)", tool.runs)
+	}
+	if string(tool.gotIn) != string(amended) {
+		t.Errorf("tool input = %s, want the amended input %s", tool.gotIn, amended)
+	}
+}
+
+func TestGuardAskAmendedRememberGrantsAmendedCall(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	defer b.Subscribe(event.FilterAll, 256).Close()
+
+	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
+	guard := &stubGuard{decision: loop.DecisionAsk, rule: "ask echo"}
+	cfg := gatedToolConfig(b, tool)
+	cfg.Guard = guard
+	amended := json.RawMessage(`{"a":2}`)
+	cfg.Approver = stubApprover{reply: loop.Reply{Verdict: event.VerdictAllow, Remember: true, Input: amended}}
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A remembered amend grants the call the human approved (amended input),
+	// not the model's original.
+	if len(guard.granted) != 1 {
+		t.Fatalf("granted = %+v, want exactly one grant", guard.granted)
+	}
+	if string(guard.granted[0].Input) != string(amended) {
+		t.Errorf("granted input = %s, want the amended input %s", guard.granted[0].Input, amended)
 	}
 }
 

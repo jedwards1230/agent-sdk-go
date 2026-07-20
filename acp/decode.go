@@ -23,6 +23,9 @@ import (
 //   - session/set_config_option — a config mutation whose ConfigID/value
 //     semantics are the application's business logic, not the SDK's (decode
 //     with [DecodeSetConfigOption], reply with [SetConfigOptionResponse]).
+//   - session/explain_permission — a read-only rationale query answered from
+//     the daemon's held guard decision (decode with [DecodeExplainPermission],
+//     reply with [ExplainPermissionResponse]).
 //
 // It errors on malformed params or an unknown method.
 //
@@ -62,12 +65,14 @@ func DecodeOp(method string, params json.RawMessage) (op event.Op, ok bool, err 
 		}
 		return FromLoadSession(req), true, nil
 
-	case MethodInitialize, MethodAuthenticate, MethodSessionList, MethodSessionSetConfigOption:
+	case MethodInitialize, MethodAuthenticate, MethodSessionList, MethodSessionSetConfigOption, MethodSessionExplainPermission:
 		// These carry no pre-projected op: the handshakes, the session/list
-		// query, and session/set_config_option (its config semantics are the
-		// application's business logic). A transport answers them directly via
-		// the exported request/response types (see [DecodeListSessions] and
-		// [DecodeSetConfigOption]).
+		// query, session/set_config_option (its config semantics are the
+		// application's business logic), and session/explain_permission (a
+		// read-only rationale query answered from the daemon's held guard
+		// decision, not a mutation). A transport answers them directly via the
+		// exported request/response types (see [DecodeListSessions],
+		// [DecodeSetConfigOption], and [DecodeExplainPermission]).
 		return nil, false, nil
 
 	default:
@@ -109,6 +114,20 @@ func DecodeSetConfigOption(params json.RawMessage) (SetConfigOptionRequest, erro
 	var req SetConfigOptionRequest
 	if err := unmarshalParams(MethodSessionSetConfigOption, params, &req); err != nil {
 		return SetConfigOptionRequest{}, err
+	}
+	return req, nil
+}
+
+// DecodeExplainPermission decodes the params of a session/explain_permission
+// request. The method carries no op (it is a read-only rationale query, not a
+// mutation dispatched to the supervisor), so it is not covered by [DecodeOp];
+// a transport decodes the request here, builds the [PermissionRationale] from
+// the guard decision it holds for the still-pending permission request, and
+// replies with an [ExplainPermissionResponse].
+func DecodeExplainPermission(params json.RawMessage) (ExplainPermissionRequest, error) {
+	var req ExplainPermissionRequest
+	if err := unmarshalParams(MethodSessionExplainPermission, params, &req); err != nil {
+		return ExplainPermissionRequest{}, err
 	}
 	return req, nil
 }

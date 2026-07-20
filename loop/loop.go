@@ -381,7 +381,8 @@ func (r *runner) publishPlan(plan []event.PlanEntry) {
 // carry — the full output lives only in the spill file.
 func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.ContentBlock {
 	call = r.beforeTool(ctx, call)
-	if block, proceed := r.gate(ctx, call); !proceed {
+	call, block, proceed := r.gate(ctx, call)
+	if !proceed {
 		return block
 	}
 
@@ -448,33 +449,38 @@ func (r *runner) execTool(ctx context.Context, call ToolCall) ToolResult {
 // --- guard / permission seam ---
 
 // gate consults the guard, emits permission events, and on an "ask" awaits a
-// human reply. Returns (block, false) when the call is blocked (a denied
-// tool_result the caller returns as-is), or (zero, true) to proceed to exec.
-func (r *runner) gate(ctx context.Context, call ToolCall) (provider.ContentBlock, bool) {
+// human reply. It returns the call to execute — usually the input call, but an
+// amended allow substitutes the human-edited input — alongside (block, false)
+// when the call is blocked (a denied tool_result the caller returns as-is), or
+// (zero, true) to proceed to exec.
+func (r *runner) gate(ctx context.Context, call ToolCall) (ToolCall, provider.ContentBlock, bool) {
 	if r.cfg.Guard == nil {
-		return provider.ContentBlock{}, true
+		return call, provider.ContentBlock{}, true
 	}
 	g := r.cfg.Guard.Evaluate(ctx, call)
 	switch g.Decision {
 	case DecisionRunContained:
-		return provider.ContentBlock{}, true
+		return call, provider.ContentBlock{}, true
 	case DecisionDeny:
 		// static deny: no human asked ⇒ emit resolved(deny) only, then finished.
 		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
-		return r.finishBlocked(call, "denied by policy"), false
+		return call, r.finishBlocked(call, "denied by policy"), false
 	case DecisionAsk:
 		return r.awaitApproval(ctx, call, g)
 	default:
 		// unknown decision ⇒ fail closed.
 		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
-		return r.finishBlocked(call, "unknown guard decision"), false
+		return call, r.finishBlocked(call, "unknown guard decision"), false
 	}
 }
 
 // awaitApproval emits permission.requested and, if an Approver is configured,
 // awaits its reply; both a missing Approver and an Await error fail closed
-// (deny).
-func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (provider.ContentBlock, bool) {
+// (deny). On an amended allow (reply carries replacement Input) it returns the
+// call with the human-edited input substituted, so the tool runs with the
+// arguments the human approved rather than the model's original ones — the
+// human's edit is a deliberate override of the input the guard evaluated.
+func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (ToolCall, provider.ContentBlock, bool) {
 	spec := g.Spec
 	if spec == nil {
 		spec = decodeInput(call.Input)
@@ -482,23 +488,28 @@ func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (
 	r.broker().Publish(event.NewPermissionRequested(r.cfg.SessionID, call.ID, call.Name, spec, g.Trace))
 	if r.cfg.Approver == nil {
 		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
-		return r.finishBlocked(call, "no approver configured"), false
+		return call, r.finishBlocked(call, "no approver configured"), false
 	}
 	reply, err := r.cfg.Approver.Await(ctx, call.ID)
 	if err != nil { // ctx cancelled / approver failed ⇒ fail closed
 		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
-		return r.finishBlocked(call, "permission await: "+err.Error()), false
+		return call, r.finishBlocked(call, "permission await: "+err.Error()), false
 	}
 	r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, reply.Verdict, g.Rule))
 	if reply.Verdict == event.VerdictAllow {
+		// Substitute the amended input first so a remembered amend grants the
+		// call the human actually approved, not the model's original.
+		if len(reply.Input) > 0 {
+			call.Input = reply.Input
+		}
 		if reply.Remember {
 			if gr, ok := r.cfg.Guard.(Granter); ok {
 				gr.Grant(call)
 			}
 		}
-		return provider.ContentBlock{}, true
+		return call, provider.ContentBlock{}, true
 	}
-	return r.finishBlocked(call, "denied by user"), false
+	return call, r.finishBlocked(call, "denied by user"), false
 }
 
 // finishBlocked emits tool.call.finished for a gated-off call and returns the

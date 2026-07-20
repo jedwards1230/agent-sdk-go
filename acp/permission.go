@@ -67,6 +67,33 @@ func (o PermissionOutcomeSelected) MarshalJSON() ([]byte, error) {
 	}{o.Outcome(), o.OptionID})
 }
 
+// PermissionOutcomeAmended reports that the client approved the call after
+// editing its input: it selected an allow option AND supplied replacement tool
+// input to run in place of the model's original arguments. It is the
+// amend-before-approve variant (a consuming TUI renders it as "Tab" on the
+// approval row). The chosen option's [PermissionOptionKind] still decides
+// whether the amended allow is remembered, resolved by the daemon against the
+// original option set the same way a plain [PermissionOutcomeSelected] is.
+type PermissionOutcomeAmended struct {
+	// OptionID is the chosen allow [PermissionOption.OptionID].
+	OptionID string
+	// RawInput is the replacement tool input the call runs with instead of the
+	// model's original arguments.
+	RawInput json.RawMessage
+}
+
+// Outcome returns "amended".
+func (PermissionOutcomeAmended) Outcome() string { return "amended" }
+
+// MarshalJSON encodes {"outcome":"amended","optionId":...,"rawInput":...}.
+func (o PermissionOutcomeAmended) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Outcome  string          `json:"outcome"`
+		OptionID string          `json:"optionId"`
+		RawInput json.RawMessage `json:"rawInput"`
+	}{o.Outcome(), o.OptionID, o.RawInput})
+}
+
 // PermissionOutcomeCancelled reports that the permission request was
 // cancelled before the client answered.
 type PermissionOutcomeCancelled struct{}
@@ -99,6 +126,15 @@ func UnmarshalPermissionOutcome(data []byte) (PermissionOutcome, error) {
 			return nil, fmt.Errorf("acp: decode selected outcome: %w", err)
 		}
 		return PermissionOutcomeSelected{OptionID: v.OptionID}, nil
+	case "amended":
+		var v struct {
+			OptionID string          `json:"optionId"`
+			RawInput json.RawMessage `json:"rawInput"`
+		}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return nil, fmt.Errorf("acp: decode amended outcome: %w", err)
+		}
+		return PermissionOutcomeAmended{OptionID: v.OptionID, RawInput: v.RawInput}, nil
 	case "cancelled":
 		return PermissionOutcomeCancelled{}, nil
 	default:

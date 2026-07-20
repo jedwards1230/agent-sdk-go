@@ -76,6 +76,40 @@ func TestRequestPermissionResponseRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRequestPermissionResponseAmendedRoundTrip(t *testing.T) {
+	// Amended carries a json.RawMessage, so it is not == comparable; assert on
+	// the wire shape and on the decoded fields instead.
+	outcome := acp.PermissionOutcomeAmended{
+		OptionID: "opt-1",
+		RawInput: []byte(`{"command":"ls -la"}`),
+	}
+	resp := acp.RequestPermissionResponse{Outcome: outcome}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	want := `{"outcome":{"outcome":"amended","optionId":"opt-1","rawInput":{"command":"ls -la"}}}`
+	assertJSONEqual(t, data, want)
+
+	var got acp.RequestPermissionResponse
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	amended, ok := got.Outcome.(acp.PermissionOutcomeAmended)
+	if !ok {
+		t.Fatalf("round trip outcome type = %T, want acp.PermissionOutcomeAmended", got.Outcome)
+	}
+	if amended.OptionID != outcome.OptionID {
+		t.Errorf("OptionID = %q, want %q", amended.OptionID, outcome.OptionID)
+	}
+	if string(amended.RawInput) != string(outcome.RawInput) {
+		t.Errorf("RawInput = %s, want %s", amended.RawInput, outcome.RawInput)
+	}
+	if amended.Outcome() != "amended" {
+		t.Errorf("Outcome() = %q, want %q", amended.Outcome(), "amended")
+	}
+}
+
 func TestUnmarshalPermissionOutcomeUnknown(t *testing.T) {
 	_, err := acp.UnmarshalPermissionOutcome([]byte(`{"outcome":"bogus"}`))
 	if err == nil {
