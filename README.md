@@ -125,6 +125,11 @@ list. **SDK milestone numbers are independent of the consuming application's.**
 The SDK must always build and test green with **zero** application code
 present — the embedder is a CI gate, not a hope.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for build/test/lint commands, branching,
+and PR conventions.
+
 ## License
 
 [Apache-2.0](LICENSE). See [NOTICE](NOTICE) for attribution requirements.
