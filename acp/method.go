@@ -23,10 +23,17 @@ const (
 	MethodSessionUpdate = "session/update"
 	// MethodSessionRequestPermission asks the client to decide a tool call.
 	MethodSessionRequestPermission = "session/request_permission"
+	// MethodSessionExplainPermission asks the agent why a tool call was gated:
+	// the client sends it while a request_permission is still pending to fetch
+	// the gating rationale, then re-prompts the human with the same options.
+	MethodSessionExplainPermission = "session/explain_permission"
 	// MethodSessionList lists existing sessions (session metadata + pagination).
 	MethodSessionList = "session/list"
 	// MethodSessionSetConfigOption sets a session configuration option (the
 	// stable ACP v1 model/mode/thought-level selector and boolean-toggle
 	// mechanism).
 	MethodSessionSetConfigOption = "session/set_config_option"
+	// MethodSessionRequestDecision asks the client to answer one or more
+	// structured questions (a decision) — distinct from a tool-call permission.
+	MethodSessionRequestDecision = "session/request_decision"
 )

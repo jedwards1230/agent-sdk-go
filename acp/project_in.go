@@ -1,6 +1,10 @@
 package acp
 
-import "github.com/jedwards1230/agent-sdk-go/event"
+import (
+	"encoding/json"
+
+	"github.com/jedwards1230/agent-sdk-go/event"
+)
 
 // FromPrompt projects a session/prompt request to a [event.PromptSend] op.
 // Text is the concatenation of the prompt's text blocks ([BlocksText]);
@@ -51,18 +55,31 @@ func FromLoadSession(req LoadSessionRequest) event.SessionResume {
 // optionId against that set and passes the matching option as chosen. chosen
 // is ignored when outcome is a cancellation.
 //
+// An amended outcome ([PermissionOutcomeAmended]) resolves exactly like the
+// selection it carries — the chosen option's kind still decides allow/deny and
+// remember — but its replacement input rides along on the reply's Input, so an
+// allowed call runs with the human-edited arguments in place of the model's.
+// The daemon resolves the amended outcome's optionId against the original set
+// the same way it does a plain selection.
+//
 // A cancelled outcome, or a chosen option with an unmodeled kind, both
-// fail-safe to a non-remembered deny.
+// fail-safe to a non-remembered deny (and any amended input is discarded).
 func ToPermissionReply(id string, outcome RequestPermissionResponse, chosen PermissionOption) event.PermissionReply {
 	if _, cancelled := outcome.Outcome.(PermissionOutcomeCancelled); cancelled || outcome.Outcome == nil {
 		return event.PermissionReply{ID: id, Verdict: event.VerdictDeny, Remember: false}
 	}
 
+	// An amended outcome carries replacement input that rides along on an allow.
+	var amendedInput json.RawMessage
+	if amended, ok := outcome.Outcome.(PermissionOutcomeAmended); ok {
+		amendedInput = amended.RawInput
+	}
+
 	switch chosen.Kind {
 	case PermissionAllowOnce:
-		return event.PermissionReply{ID: id, Verdict: event.VerdictAllow, Remember: false}
+		return event.PermissionReply{ID: id, Verdict: event.VerdictAllow, Remember: false, Input: amendedInput}
 	case PermissionAllowAlways:
-		return event.PermissionReply{ID: id, Verdict: event.VerdictAllow, Remember: true}
+		return event.PermissionReply{ID: id, Verdict: event.VerdictAllow, Remember: true, Input: amendedInput}
 	case PermissionRejectOnce:
 		return event.PermissionReply{ID: id, Verdict: event.VerdictDeny, Remember: false}
 	case PermissionRejectAlways:

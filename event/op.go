@@ -135,19 +135,25 @@ type PermissionReply struct {
 	ID       string
 	Verdict  Verdict
 	Remember bool
+	// Input, when non-nil, is replacement tool input supplied with an amended
+	// allow (the ACP amend-before-approve outcome): an allow whose call runs
+	// with this input in place of the model's original arguments. It is nil for
+	// a plain allow/deny, and is ignored unless Verdict is VerdictAllow.
+	Input json.RawMessage
 }
 
 // Kind returns OpPermissionReply.
 func (PermissionReply) Kind() string { return OpPermissionReply }
 
-// MarshalJSON encodes the envelope plus {id, verdict, remember?}.
+// MarshalJSON encodes the envelope plus {id, verdict, remember?, input?}.
 func (o PermissionReply) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		opEnvelope
-		ID       string  `json:"id"`
-		Verdict  Verdict `json:"verdict"`
-		Remember bool    `json:"remember,omitempty"`
-	}{opEnvelope{o.Kind()}, o.ID, o.Verdict, o.Remember})
+		ID       string          `json:"id"`
+		Verdict  Verdict         `json:"verdict"`
+		Remember bool            `json:"remember,omitempty"`
+		Input    json.RawMessage `json:"input,omitempty"`
+	}{opEnvelope{o.Kind()}, o.ID, o.Verdict, o.Remember, o.Input})
 }
 
 // TurnInterrupt interrupts the running turn of a session.

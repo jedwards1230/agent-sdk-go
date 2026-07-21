@@ -225,4 +225,6 @@ seam** (task ids + persistence layered atop resumable sessions) or leaves it
 purely application-layer atop `runner.Resume` + the JSONL journal is undecided —
 recorded, not committed. This is an *in-process* handle: it does **not** reopen
 the "no hosted service / central registry" non-goal above, which forecloses a
-hosted registry, not an in-process task id.
+hosted registry, not an in-process task id. Fuller analysis, options, and a
+recommendation (gofer-native atop the journal, plus a small additive SDK seam):
+[`proposals/checkpoint-task-handle-seam.md`](proposals/checkpoint-task-handle-seam.md).

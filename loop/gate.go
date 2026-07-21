@@ -67,7 +67,7 @@ func (g *Gate) Await(ctx context.Context, id string) (Reply, error) {
 // If no waiter is registered yet, the reply is stashed for the imminent Await
 // (see the Gate doc) rather than dropped.
 func (g *Gate) Reply(op event.PermissionReply) {
-	reply := Reply{Verdict: op.Verdict, Remember: op.Remember}
+	reply := Reply{Verdict: op.Verdict, Remember: op.Remember, Input: op.Input}
 	g.mu.Lock()
 	ch, ok := g.waiters[op.ID]
 	if ok {
