@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -52,6 +53,11 @@ type Granter interface {
 type Reply struct {
 	Verdict  event.Verdict
 	Remember bool
+	// Input, when non-nil, is replacement tool input supplied with an amended
+	// allow: the call runs with this input in place of the model's original
+	// arguments. It is honored only when Verdict is event.VerdictAllow; a nil
+	// Input leaves the original call unchanged (the plain allow/deny path).
+	Input json.RawMessage
 }
 
 // Approver awaits a human's reply to an emitted permission request. Await

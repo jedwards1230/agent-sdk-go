@@ -278,15 +278,27 @@ raises an approval request. There is no third "run uncontained" outcome.
   — nothing executed, so there is no spill — keeping the loop's tool-round
   invariant (one `tool_result` per `tool_use`) intact for every outcome.
 
-**Permission outcomes grow AMEND / EXPLAIN (design-ahead, M5).** ACP
-`request_permission` today models only `allow_once`/`allow_always`/`reject_once`/
-`reject_always`, and the loop's `Reply` is a bare allow/deny. Two outcomes should
-join it: **amend** (the client returns a modified tool input, run in place of the
-original) and **explain** (the client requests the agent's rationale before
-deciding, then re-prompts). This lets a consuming TUI offer "amend the command" /
-"explain why" on a permission request without leaving the guard/approver seam.
-Recorded here so the `Reply` and `permission.resolved` shapes leave room for the
-extra verdicts.
+**Permission outcomes grow AMEND / EXPLAIN.** Beyond the four selection kinds
+(`allow_once`/`allow_always`/`reject_once`/`reject_always`) the ACP permission
+surface carries two more affordances a consuming TUI renders as "Tab" / "explain
+why":
+
+- **Amend** — `acp.PermissionOutcomeAmended{OptionID, RawInput}` is a
+  `request_permission` response variant: the human edits the tool input, then
+  allows the *amended* call. It resolves like the allow option it names (the
+  chosen kind still decides remember-ness), but the replacement input rides
+  along: `acp.ToPermissionReply` projects it onto `event.PermissionReply.Input`
+  → `loop.Reply.Input`, and the loop substitutes it into the call before exec
+  (a deliberate human override of the input the guard evaluated). A remembered
+  amend grants the amended call, not the model's original. A nil `Input` is the
+  unchanged plain allow/deny path — the whole extension is additive.
+- **Explain** — `session/explain_permission` is a read-only rationale query
+  (`acp.ExplainPermissionRequest`/`ExplainPermissionResponse` +
+  `PermissionRationale{Reason, Policy, Source, Trace}`) the client sends while a
+  `request_permission` is still pending. It carries no op (like `session/list`):
+  the daemon answers from the guard decision it holds (the matched-rule label
+  and decision trace already on the permission events), and the client
+  re-prompts with the original options. It never resolves the request.
 
 **Structured question surface, distinct from permission (design-ahead, M5).**
 Permission gating is the only interactive-choice primitive today (allow/deny on a

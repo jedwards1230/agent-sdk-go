@@ -1,6 +1,7 @@
 package acp_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/acp"
@@ -132,11 +133,44 @@ func TestToPermissionReply(t *testing.T) {
 			chosen:  acp.PermissionOption{OptionID: "opt-3", Kind: acp.PermissionOptionKind("bogus")},
 			want:    event.PermissionReply{ID: "req-1", Verdict: event.VerdictDeny, Remember: false},
 		},
+		{
+			name: "amended allow_once carries replacement input",
+			outcome: acp.RequestPermissionResponse{Outcome: acp.PermissionOutcomeAmended{
+				OptionID: "opt-1",
+				RawInput: []byte(`{"command":"ls -la"}`),
+			}},
+			chosen: acp.PermissionOption{OptionID: "opt-1", Kind: acp.PermissionAllowOnce},
+			want: event.PermissionReply{
+				ID: "req-1", Verdict: event.VerdictAllow, Remember: false,
+				Input: []byte(`{"command":"ls -la"}`),
+			},
+		},
+		{
+			name: "amended allow_always remembers and carries input",
+			outcome: acp.RequestPermissionResponse{Outcome: acp.PermissionOutcomeAmended{
+				OptionID: "opt-1",
+				RawInput: []byte(`{"command":"ls -la"}`),
+			}},
+			chosen: acp.PermissionOption{OptionID: "opt-1", Kind: acp.PermissionAllowAlways},
+			want: event.PermissionReply{
+				ID: "req-1", Verdict: event.VerdictAllow, Remember: true,
+				Input: []byte(`{"command":"ls -la"}`),
+			},
+		},
+		{
+			name: "amended with reject kind fails safe to deny and drops input",
+			outcome: acp.RequestPermissionResponse{Outcome: acp.PermissionOutcomeAmended{
+				OptionID: "opt-2",
+				RawInput: []byte(`{"command":"rm -rf /"}`),
+			}},
+			chosen: acp.PermissionOption{OptionID: "opt-2", Kind: acp.PermissionRejectOnce},
+			want:   event.PermissionReply{ID: "req-1", Verdict: event.VerdictDeny, Remember: false},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := acp.ToPermissionReply("req-1", tc.outcome, tc.chosen)
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("ToPermissionReply() = %#v, want %#v", got, tc.want)
 			}
 		})
