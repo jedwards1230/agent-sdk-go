@@ -298,7 +298,12 @@ client-prompt surface — a modeled `acp/` message type and/or a builtin `ask_us
 tool — separate from permission: it composes with the guard/approver await seam
 (the loop blocks on a client reply the same way) but it is not a policy gate, so
 it is *not* the permission engine. Recorded design-ahead so the Event/Op contract
-leaves room for the question event + its reply op.
+leaves room for the question event + its reply op. The `acp/` message type is now
+modeled (`acp/decision.go`): `session/request_decision` carries a
+`RequestDecisionRequest` of `DecisionQuestion`/`DecisionOption` values, answered
+by a `RequestDecisionResponse` of `DecisionAnswer`s whose tagged `DecisionOutcome`
+union (selected/text/chat/cancelled) mirrors `PermissionOutcome`. The Event/Op
+projection remains design-ahead — only the wire types exist so far.
 
 ## Agent manifest (compose/)
 
