@@ -52,10 +52,11 @@ the test strategy.
 
 ## Commands
 
+Build/test/lint commands are in [CONTRIBUTING.md](CONTRIBUTING.md#build-test--lint).
+One addition not covered there:
+
 ```bash
-go build ./... && go vet ./... && go test ./...   # the CI gate
-golangci-lint run                                  # lint, zero tolerance
-go test ./compose/... -update                      # regenerate golden files (review the diff!)
+go test ./compose/... -update   # regenerate golden files (review the diff!)
 ```
 
 ## Layout
