@@ -110,6 +110,36 @@ func TestRequestPermissionResponseAmendedRoundTrip(t *testing.T) {
 	}
 }
 
+func TestPermissionOutcomeAmendedNilInput(t *testing.T) {
+	// A nil RawInput must omit the key (not emit "rawInput":null) and decode
+	// back to nil, so a no-input amend is never mistaken for a real replacement.
+	resp := acp.RequestPermissionResponse{Outcome: acp.PermissionOutcomeAmended{OptionID: "opt-1"}}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	assertJSONEqual(t, data, `{"outcome":{"outcome":"amended","optionId":"opt-1"}}`)
+
+	// An explicit "rawInput":null from a non-conforming client also normalizes
+	// to nil rather than the 4-byte "null".
+	for _, in := range []string{
+		`{"outcome":"amended","optionId":"opt-1"}`,
+		`{"outcome":"amended","optionId":"opt-1","rawInput":null}`,
+	} {
+		got, err := acp.UnmarshalPermissionOutcome([]byte(in))
+		if err != nil {
+			t.Fatalf("UnmarshalPermissionOutcome(%s) error = %v", in, err)
+		}
+		amended, ok := got.(acp.PermissionOutcomeAmended)
+		if !ok {
+			t.Fatalf("outcome type = %T, want acp.PermissionOutcomeAmended", got)
+		}
+		if amended.RawInput != nil {
+			t.Errorf("RawInput = %s (len %d), want nil", amended.RawInput, len(amended.RawInput))
+		}
+	}
+}
+
 func TestUnmarshalPermissionOutcomeUnknown(t *testing.T) {
 	_, err := acp.UnmarshalPermissionOutcome([]byte(`{"outcome":"bogus"}`))
 	if err == nil {

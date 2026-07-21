@@ -85,12 +85,15 @@ type PermissionOutcomeAmended struct {
 // Outcome returns "amended".
 func (PermissionOutcomeAmended) Outcome() string { return "amended" }
 
-// MarshalJSON encodes {"outcome":"amended","optionId":...,"rawInput":...}.
+// MarshalJSON encodes {"outcome":"amended","optionId":...,"rawInput":...}. A nil
+// RawInput omits the key rather than emitting "rawInput":null — a JSON null
+// would round-trip back to a non-empty json.RawMessage and be mistaken for a
+// real replacement input.
 func (o PermissionOutcomeAmended) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Outcome  string          `json:"outcome"`
 		OptionID string          `json:"optionId"`
-		RawInput json.RawMessage `json:"rawInput"`
+		RawInput json.RawMessage `json:"rawInput,omitempty"`
 	}{o.Outcome(), o.OptionID, o.RawInput})
 }
 
@@ -133,6 +136,12 @@ func UnmarshalPermissionOutcome(data []byte) (PermissionOutcome, error) {
 		}
 		if err := json.Unmarshal(data, &v); err != nil {
 			return nil, fmt.Errorf("acp: decode amended outcome: %w", err)
+		}
+		// A missing rawInput decodes to nil, but an explicit "rawInput":null
+		// decodes to the 4-byte "null"; normalize both to nil so a no-input
+		// amend is not mistaken for a real replacement input downstream.
+		if string(v.RawInput) == "null" {
+			v.RawInput = nil
 		}
 		return PermissionOutcomeAmended{OptionID: v.OptionID, RawInput: v.RawInput}, nil
 	case "cancelled":
