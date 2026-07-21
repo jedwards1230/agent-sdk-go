@@ -135,6 +135,11 @@ type Config struct {
 	Broker *event.Broker
 	// SessionID tags every emitted event. Required.
 	SessionID string
+	// Agent is the originating-agent id stamped onto every tool-call event this
+	// loop emits (tool.call.started/delta/finished), so a consumer can attribute
+	// which agent ran a tool across a session tree. Empty ⇒ tool events are
+	// un-attributed (the default).
+	Agent string
 	// MaxIters caps model-call rounds; <= 0 uses the default.
 	MaxIters int
 
@@ -279,7 +284,7 @@ func (r *runner) callModel(ctx context.Context, msgs []provider.Message) (provid
 	}
 	defer func() { _ = stream.Close() }()
 
-	conv := newConverter(r.broker(), sid)
+	conv := newConverter(r.broker(), sid, r.cfg.Agent)
 	for {
 		if err := ctx.Err(); err != nil {
 			conv.flush()
@@ -342,7 +347,7 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 		// tool, so there is nothing to spill.
 		if err := ctx.Err(); err != nil {
 			res := ToolResult{Content: "cancelled: " + err.Error(), IsError: true}
-			r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, true, nil))
+			r.broker().Publish(r.settleFinished(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, true, nil), nil))
 			blocks = append(blocks, provider.ToolResultBlock(call.ID, res.Content, true))
 			continue
 		}
@@ -351,12 +356,15 @@ func (r *runner) runTools(ctx context.Context, calls []ToolCall) []provider.Cont
 	return blocks
 }
 
-// withEdits stamps a tool's structured file edits onto a tool.call.finished
-// event (as ContextWindow is stamped onto turn.finished), so the ACP projection
-// can surface a diff. edits are nil for non-editing tools, leaving the event
-// unchanged.
-func withEdits(ev event.ToolCallFinished, edits []event.FileEdit) event.ToolCallFinished {
+// settleFinished stamps the emit-time fields onto a tool.call.finished event (as
+// ContextWindow is stamped onto turn.finished): the tool's structured file edits
+// (so the ACP projection can surface a diff; nil for non-editing tools, leaving
+// the event unchanged) and the originating-agent id from the loop config (empty
+// ⇒ un-attributed). Every tool.call.finished the runner emits rides through here
+// so attribution is centralized.
+func (r *runner) settleFinished(ev event.ToolCallFinished, edits []event.FileEdit) event.ToolCallFinished {
 	ev.Edits = edits
+	ev.Agent = r.cfg.Agent
 	return ev
 }
 
@@ -392,7 +400,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		r.emitError("spill: "+err.Error(), false)
 		res := r.execTool(ctx, call)
 		r.publishPlan(res.Plan)
-		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
+		r.broker().Publish(r.settleFinished(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -408,7 +416,7 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		// The spill file is suspect: emit the tool's own content and drop the
 		// (possibly inconsistent) reference, but never crash the loop.
 		r.emitError("spill: close "+call.ID+": "+closeErr.Error(), false)
-		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
+		r.broker().Publish(r.settleFinished(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, res.Content, res.IsError, res.Diagnostics), res.Edits))
 		return provider.ToolResultBlock(call.ID, res.Content, res.IsError)
 	}
 
@@ -421,9 +429,9 @@ func (r *runner) runOneTool(ctx context.Context, call ToolCall) provider.Content
 		modelContent = res.Content
 	}
 	if ref.Path != "" {
-		r.broker().Publish(withEdits(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256), res.Edits))
+		r.broker().Publish(r.settleFinished(event.NewToolCallFinishedSpill(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics, ref.Path, ref.Bytes, ref.SHA256), res.Edits))
 	} else {
-		r.broker().Publish(withEdits(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics), res.Edits))
+		r.broker().Publish(r.settleFinished(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, modelContent, res.IsError, res.Diagnostics), res.Edits))
 	}
 	return provider.ToolResultBlock(call.ID, modelContent, res.IsError)
 }
@@ -505,7 +513,7 @@ func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (
 // error tool_result block the model sees. (No spill: nothing executed.)
 func (r *runner) finishBlocked(call ToolCall, reason string) provider.ContentBlock {
 	content := "permission denied: " + reason
-	r.broker().Publish(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, content, true, nil))
+	r.broker().Publish(r.settleFinished(event.NewToolCallFinished(r.cfg.SessionID, call.ID, call.Input, content, true, nil), nil))
 	return provider.ToolResultBlock(call.ID, content, true)
 }
 
@@ -578,6 +586,7 @@ func (r *runner) prepareNextTurn(ctx context.Context, state TurnState) []provide
 type converter struct {
 	broker *event.Broker
 	sid    string
+	agent  string // originating-agent id stamped onto tool.call.started/delta
 
 	// open message (text or reasoning) state.
 	open    bool
@@ -619,8 +628,8 @@ func mergeMeta(dst, src map[string]string) map[string]string {
 	return dst
 }
 
-func newConverter(b *event.Broker, sid string) *converter {
-	return &converter{broker: b, sid: sid, toolIdx: map[string]int{}}
+func newConverter(b *event.Broker, sid, agent string) *converter {
+	return &converter{broker: b, sid: sid, agent: agent, toolIdx: map[string]int{}}
 }
 
 func (c *converter) handle(se provider.StreamEvent) {
@@ -688,7 +697,9 @@ func (c *converter) toolStart(t *provider.ToolCall, meta map[string]string) {
 	c.closeMessage()
 	c.toolIdx[t.ID] = len(c.partial)
 	c.partial = append(c.partial, toolAssembly{id: t.ID, name: t.Name, seed: t.Input, meta: mergeMeta(nil, meta)})
-	c.broker.Publish(event.NewToolCallStarted(c.sid, t.ID, t.Name, t.Input))
+	ev := event.NewToolCallStarted(c.sid, t.ID, t.Name, t.Input)
+	ev.Agent = c.agent
+	c.broker.Publish(ev)
 }
 
 func (c *converter) toolDelta(t *provider.ToolCall, meta map[string]string) {
@@ -699,7 +710,9 @@ func (c *converter) toolDelta(t *provider.ToolCall, meta map[string]string) {
 		c.partial[i].buf.WriteString(t.Delta)
 		c.partial[i].meta = mergeMeta(c.partial[i].meta, meta)
 	}
-	c.broker.Publish(event.NewToolCallDelta(c.sid, t.ID, t.Delta))
+	ev := event.NewToolCallDelta(c.sid, t.ID, t.Delta)
+	ev.Agent = c.agent
+	c.broker.Publish(ev)
 }
 
 func (c *converter) toolEnd(t *provider.ToolCall, meta map[string]string) {

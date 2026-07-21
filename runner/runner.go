@@ -67,6 +67,10 @@ type Options struct {
 	Params provider.Params
 	// MaxIters caps model-call rounds per Prompt; <= 0 uses the loop default.
 	MaxIters int
+	// Agent is the originating-agent id forwarded to loop.Config.Agent, stamped
+	// onto every tool-call event the runner emits so a consumer can attribute
+	// tool calls to the agent that ran them. Empty ⇒ un-attributed (the default).
+	Agent string
 
 	// Guard decides how each tool call is handled before execution
 	// (run-contained / ask / deny). Nil ⇒ every tool runs uncontained, the
@@ -119,6 +123,7 @@ type Runner struct {
 	params   provider.Params
 	effort   string
 	maxIters int
+	agent    string
 
 	provider provider.Provider
 	tools    loop.ToolRegistry
@@ -280,6 +285,7 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 		params:      opts.Params,
 		effort:      opts.Params.Thinking.Effort,
 		maxIters:    opts.MaxIters,
+		agent:       opts.Agent,
 		provider:    prov,
 		tools:       tools,
 		guard:       opts.Guard,
@@ -369,6 +375,7 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 		Tools:       r.tools,
 		Broker:      r.broker,
 		SessionID:   sid,
+		Agent:       r.agent,
 		MaxIters:    r.maxIters,
 		SpillDir:    spillDir,
 		SpillRelDir: spillRelDir,
