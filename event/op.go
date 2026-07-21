@@ -16,6 +16,7 @@ const (
 	OpToolCancel       = "tool.cancel"
 	OpSessionCompact   = "session.compact"
 	OpSessionSetModel  = "session.set_model"
+	OpSessionSetEffort = "session.set_effort"
 	OpSessionKill      = "session.kill"
 	OpSessionArchive   = "session.archive"
 )
@@ -201,6 +202,26 @@ func (o SessionSetModel) MarshalJSON() ([]byte, error) {
 		SessionID string `json:"session_id"`
 		Model     string `json:"model"`
 	}{opEnvelope{o.Kind()}, o.SessionID, o.Model})
+}
+
+// SessionSetEffort changes the reasoning effort bound to a session. It is the
+// effort-axis parallel to [SessionSetModel]; Effort is a unified level ("low",
+// "medium", "high", or "" to clear to the provider default).
+type SessionSetEffort struct {
+	SessionID string
+	Effort    string
+}
+
+// Kind returns OpSessionSetEffort.
+func (SessionSetEffort) Kind() string { return OpSessionSetEffort }
+
+// MarshalJSON encodes the envelope plus {session_id, effort}.
+func (o SessionSetEffort) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		opEnvelope
+		SessionID string `json:"session_id"`
+		Effort    string `json:"effort"`
+	}{opEnvelope{o.Kind()}, o.SessionID, o.Effort})
 }
 
 // SessionKill terminates a session.

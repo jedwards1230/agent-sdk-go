@@ -117,6 +117,7 @@ type Runner struct {
 	model    string
 	system   string
 	params   provider.Params
+	effort   string
 	maxIters int
 
 	provider provider.Provider
@@ -277,6 +278,7 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 		model:       opts.Model,
 		system:      opts.System,
 		params:      opts.Params,
+		effort:      opts.Params.Thinking.Effort,
 		maxIters:    opts.MaxIters,
 		provider:    prov,
 		tools:       tools,
@@ -353,11 +355,17 @@ func (r *Runner) Prompt(ctx context.Context, text string) error {
 	r.broker.Publish(event.NewMessageFinishedMeta(sid, event.MessageUser, text, nil))
 
 	spillDir, spillRelDir := r.spillCallsDir()
+	// Overlay the live reasoning effort onto this turn's params. r.params is the
+	// construction-time base (sampling controls, thinking budget); currentEffort
+	// is the authoritative, hot-swappable effort level, read under the same lock
+	// currentModel uses so a concurrent SetEffort can't race this turn's build.
+	params := r.params
+	params.Thinking.Effort = r.currentEffort()
 	cfg := loop.Config{
 		Provider:    r.provider,
 		Model:       r.currentModel(),
 		System:      r.system,
-		Params:      r.params,
+		Params:      params,
 		Tools:       r.tools,
 		Broker:      r.broker,
 		SessionID:   sid,
@@ -518,6 +526,62 @@ func (r *Runner) SetModel(model string) error {
 		return fmt.Errorf("runner: cannot change model from %q (%s) to %q (%s): different provider; start a new session for a different provider instead", r.model, cur.Provider, model, next.Provider)
 	}
 	r.model = model
+	return nil
+}
+
+// currentEffort returns the reasoning effort this runner currently uses,
+// synchronized against [SetEffort] and mirroring [currentModel]. Prompt reads
+// the effort through this accessor when it overlays the per-turn params, so a
+// concurrent SetEffort can never race with a Prompt in flight.
+func (r *Runner) currentEffort() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.effort
+}
+
+// SetEffort changes the reasoning effort this runner uses for its next (and
+// subsequent) Prompt turns, without rebuilding the session. It is the
+// effort-axis parallel to [SetModel]: a consuming TUI uses it to raise or lower
+// reasoning effort mid-session — orthogonal to model choice — while keeping the
+// same journal, provider client, and conversation history.
+//
+// effort must be a level the unified vocabulary recognizes
+// ([provider.ValidEffort]): "low", "medium", "high", or "" to clear the level
+// back to the provider's default. A provider projects the level down to its own
+// wire format (OpenAI's effort string, Anthropic's thinking budget) and ignores
+// what it cannot use, so the same call is meaningful across provider families —
+// unlike SetModel, effort carries no same-provider constraint.
+//
+// Capability: a non-empty effort is rejected when the runner's CURRENT model is
+// one the registry KNOWS does not support reasoning. This mirrors SetModel's
+// permissiveness toward unregistered ids — an unregistered model's reasoning
+// support is UNKNOWN, not "no", so it is allowed; only positive registry
+// evidence of a non-reasoning model rejects. Setting effort does not itself
+// switch models, so pair it with SetModel when moving to a reasoning model.
+//
+// Concurrency: the field write lands under the same lock [currentEffort] reads
+// through, so this is race-free to call concurrently with Prompt. As with
+// SetModel, a turn already in flight completes on the effort it started with
+// (Prompt reads the effort once, at the top of the turn); only the NEXT Prompt
+// observes the change, and the exact turn boundary is unspecified when called
+// mid-turn.
+func (r *Runner) SetEffort(effort string) error {
+	if !provider.ValidEffort(effort) {
+		return fmt.Errorf("runner: unknown reasoning effort %q: want %q, %q, %q, or \"\" to clear", effort, provider.EffortLow, provider.EffortMedium, provider.EffortHigh)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// Reject only on positive evidence the current model cannot reason. Lookup
+	// (registered-only) never reports on an unregistered id, so those pass —
+	// the same UNKNOWN-is-allowed rule SetModel applies. Clearing (effort == "")
+	// is always allowed: it asks for no reasoning, so model capability is moot.
+	if effort != "" {
+		if info, ok := provider.Lookup(r.model); ok && !info.Reasoning {
+			return fmt.Errorf("runner: model %q does not support reasoning effort; switch to a reasoning model first", r.model)
+		}
+	}
+	r.effort = effort
 	return nil
 }
 
