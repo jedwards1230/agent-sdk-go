@@ -36,7 +36,11 @@
 //     OpenAI has no cache-write charge, so CacheWriteTokens is always zero.
 //   - Reasoning: OpenAI takes a reasoning effort level, not a token budget, so
 //     Params.Thinking.BudgetTokens is ignored and Effort is used (default
-//     "medium"). Only reasoning summaries are streamed back; raw thinking is not
+//     "medium"). Naming an Effort is itself enough to turn reasoning on
+//     (provider.Thinking.Active) — Enabled need not also be set. Reasoning
+//     config is emitted only for models the registry marks as reasoning, and an
+//     unregistered model counts as non-reasoning, so an effort set on one is
+//     dropped. Only reasoning summaries are streamed back; raw thinking is not
 //     round-tripped into request history.
 //   - Temperature is only sent to non-reasoning models; reasoning models reject
 //     it, so it is dropped for them.

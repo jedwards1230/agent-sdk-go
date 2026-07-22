@@ -143,7 +143,13 @@ client's op started the turn.
   (`provider.ValidEffort`; `""` clears to the provider default) and against
   provider capability (it rejects a non-empty effort when the current model is
   one the registry KNOWS does not reason, staying permissive toward
-  unregistered ids like SetModel). `event.SessionSetEffort` is the wire op that
+  unregistered ids like SetModel). A named level is self-enabling —
+  `provider.Thinking.Active()` is `Enabled || Effort != ""`, so an embedder that
+  never constructs `provider.Params` still gets reasoning on the wire from a
+  bare `SetEffort`; requiring both fields is what made the setter inert through
+  v0.17.0. Anthropic projects the level onto a thinking budget (an explicit
+  `BudgetTokens` outranks it), OpenAI sends it as its effort string.
+  `event.SessionSetEffort` is the wire op that
   carries the swap, parallel to `session.set_model`. So a consuming TUI can
   offer an effort axis orthogonal to model choice between turns. Still
   design-ahead: a declarative home — `compose.Load` parses only the manifest

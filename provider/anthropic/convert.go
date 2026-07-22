@@ -73,9 +73,20 @@ type thinkingConfig struct {
 // API requires input_schema to be a JSON Schema object.
 var emptySchema = json.RawMessage(`{"type":"object"}`)
 
-// minThinkingBudget is the Anthropic-mandated floor for an extended-thinking
-// budget; a smaller (or zero) budget is raised to it.
-const minThinkingBudget = 1024
+// Anthropic extended-thinking token budgets. minThinkingBudget is the
+// Anthropic-mandated floor; a smaller (or zero) budget is raised to it. The
+// per-level budgets are this adapter's projection of the unified effort
+// vocabulary ([provider.Thinking.Effort]) down to Anthropic's native unit —
+// the counterpart of the OpenAI adapter sending the level as an effort string.
+// They are deliberately well clear of the floor so the levels are actually
+// distinguishable, and well under every registered Anthropic model's max
+// output so the budget never crowds out the answer.
+const (
+	minThinkingBudget    = 1024
+	lowThinkingBudget    = 4_096
+	mediumThinkingBudget = 16_384
+	highThinkingBudget   = 32_768
+)
 
 // buildBody projects a provider.Request down to the Messages API wire format and
 // returns it as a ready-to-send JSON reader. credKind selects whether the OAuth
@@ -96,8 +107,21 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 
 	wire.MaxTokens = p.maxTokens(model, req.Params)
 
-	if req.Params.Thinking.Enabled {
+	if req.Params.Thinking.Active() {
+		// An explicit budget is Anthropic's native unit and the more precise
+		// statement, so it wins; otherwise the effort level projects down to one.
+		// With neither, the floor stands in for "on, at the cheapest depth".
 		budget := req.Params.Thinking.BudgetTokens
+		if budget == 0 {
+			switch req.Params.Thinking.Effort {
+			case provider.EffortLow:
+				budget = lowThinkingBudget
+			case provider.EffortMedium:
+				budget = mediumThinkingBudget
+			case provider.EffortHigh:
+				budget = highThinkingBudget
+			}
+		}
 		if budget < minThinkingBudget {
 			budget = minThinkingBudget
 		}
