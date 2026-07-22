@@ -347,3 +347,92 @@ func TestInfoFallbackFlagsUnregistered(t *testing.T) {
 		t.Errorf("Info(claude-sonnet-5).Unregistered = true, want false: %+v", reg)
 	}
 }
+
+// TestBuildBodyThinkingEffortEnables is the issue #88 regression at the
+// Anthropic wire: a named effort with Enabled left false — exactly the Params a
+// Runner produces for an embedder that never constructs provider.Params — must
+// still turn extended thinking on, and each level must project onto its own
+// budget. Before the fix every one of these cases emitted no thinking block at
+// all, so Runner.SetEffort could not reach the API.
+func TestBuildBodyThinkingEffortEnables(t *testing.T) {
+	tests := []struct {
+		name       string
+		thinking   provider.Thinking
+		wantBudget int
+	}{
+		{"low effort alone", provider.Thinking{Effort: provider.EffortLow}, lowThinkingBudget},
+		{"medium effort alone", provider.Thinking{Effort: provider.EffortMedium}, mediumThinkingBudget},
+		{"high effort alone", provider.Thinking{Effort: provider.EffortHigh}, highThinkingBudget},
+		{
+			"enabled plus effort agrees with effort alone",
+			provider.Thinking{Enabled: true, Effort: provider.EffortHigh},
+			highThinkingBudget,
+		},
+		{
+			"explicit budget outranks the level",
+			provider.Thinking{Effort: provider.EffortHigh, BudgetTokens: 5000},
+			5000,
+		},
+		{
+			"enabled with no level keeps the floor",
+			provider.Thinking{Enabled: true},
+			minThinkingBudget,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+			temp := 0.7
+			r, err := p.buildBody(provider.Request{
+				Messages: []provider.Message{provider.UserText("hi")},
+				Params:   provider.Params{Temperature: &temp, Thinking: tc.thinking},
+			}, provider.CredAPIKey)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			body := decodeBody(t, r)
+
+			if body.Thinking == nil {
+				t.Fatalf("thinking block missing for %+v — the effort never reached the wire", tc.thinking)
+			}
+			if body.Thinking.Type != "enabled" {
+				t.Errorf("thinking type = %q, want %q", body.Thinking.Type, "enabled")
+			}
+			if body.Thinking.BudgetTokens != tc.wantBudget {
+				t.Errorf("budget = %d, want %d", body.Thinking.BudgetTokens, tc.wantBudget)
+			}
+			// max_tokens must exceed the budget or the API rejects the request.
+			if body.MaxTokens <= body.Thinking.BudgetTokens {
+				t.Errorf("max_tokens = %d, want > budget %d", body.MaxTokens, body.Thinking.BudgetTokens)
+			}
+			// Anthropic forbids an explicit temperature alongside extended
+			// thinking, so enabling via effort must drop it just as Enabled does.
+			if body.Temperature != nil {
+				t.Errorf("temperature = %v, want nil once thinking is on", *body.Temperature)
+			}
+		})
+	}
+}
+
+// TestBuildBodyThinkingOffWithoutEffort is the must-fire twin of the test
+// above: with neither Enabled nor an effort, no thinking block may appear and
+// temperature must survive. Without it, a change that unconditionally enabled
+// thinking would pass every assertion in TestBuildBodyThinkingEffortEnables.
+func TestBuildBodyThinkingOffWithoutEffort(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	temp := 0.7
+	r, err := p.buildBody(provider.Request{
+		Messages: []provider.Message{provider.UserText("hi")},
+		Params:   provider.Params{Temperature: &temp, Thinking: provider.Thinking{}},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+	if body.Thinking != nil {
+		t.Errorf("thinking = %+v, want nil with reasoning unrequested", body.Thinking)
+	}
+	if body.Temperature == nil || *body.Temperature != temp {
+		t.Errorf("temperature = %v, want %v preserved when thinking is off", body.Temperature, temp)
+	}
+}

@@ -271,3 +271,52 @@ func TestWireRole(t *testing.T) {
 		}
 	}
 }
+
+// TestReasoningEffortEnables is the issue #88 regression at the OpenAI wire: a
+// named effort with Enabled left false — exactly the Params a Runner produces
+// for an embedder that never constructs provider.Params — must still emit the
+// reasoning config carrying that level, and opt into encrypted reasoning
+// content. Before the fix the config was omitted entirely, so Runner.SetEffort
+// could not reach the API.
+func TestReasoningEffortEnables(t *testing.T) {
+	for _, effort := range []string{provider.EffortLow, provider.EffortMedium, provider.EffortHigh} {
+		t.Run(effort, func(t *testing.T) {
+			req := provider.Request{Params: provider.Params{
+				Thinking: provider.Thinking{Effort: effort},
+			}}
+			m := decodeReq(t, "gpt-5", req, true)
+
+			rc, ok := m["reasoning"].(map[string]any)
+			if !ok {
+				t.Fatalf("reasoning config missing for effort %q — it never reached the wire", effort)
+			}
+			if rc["effort"] != effort {
+				t.Errorf("reasoning effort = %v, want %q", rc["effort"], effort)
+			}
+			include, ok := m["include"].([]any)
+			if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+				t.Errorf("include = %v, want [reasoning.encrypted_content]", m["include"])
+			}
+		})
+	}
+}
+
+// TestReasoningEffortOffWithoutRequest is the must-fire twin of the test above:
+// with neither Enabled nor an effort no reasoning config may appear, so a change
+// that enabled reasoning unconditionally cannot pass both tests. It also pins
+// that a non-reasoning model still refuses an effort-only request — the model
+// capability gate outranks the caller's level.
+func TestReasoningEffortOffWithoutRequest(t *testing.T) {
+	unrequested := decodeReq(t, "gpt-5", provider.Request{}, true)
+	if _, present := unrequested["reasoning"]; present {
+		t.Errorf("reasoning = %v, want omitted with reasoning unrequested", unrequested["reasoning"])
+	}
+
+	effortReq := provider.Request{Params: provider.Params{
+		Thinking: provider.Thinking{Effort: provider.EffortHigh},
+	}}
+	nonReasoning := decodeReq(t, "some-chat-model", effortReq, false)
+	if _, present := nonReasoning["reasoning"]; present {
+		t.Errorf("reasoning = %v, want omitted for a non-reasoning model", nonReasoning["reasoning"])
+	}
+}
