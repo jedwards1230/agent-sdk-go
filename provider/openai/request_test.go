@@ -304,8 +304,9 @@ func TestReasoningEffortEnables(t *testing.T) {
 // TestReasoningEffortOffWithoutRequest is the must-fire twin of the test above:
 // with neither Enabled nor an effort no reasoning config may appear, so a change
 // that enabled reasoning unconditionally cannot pass both tests. It also pins
-// that a non-reasoning model still refuses an effort-only request — the model
-// capability gate outranks the caller's level.
+// that buildRequest's reasoningModel=false branch refuses an effort-only
+// request. Which models reach that branch is a separate question, decided by
+// Provider.reasoningSupported and pinned by TestReasoningSupported.
 func TestReasoningEffortOffWithoutRequest(t *testing.T) {
 	unrequested := decodeReq(t, "gpt-5", provider.Request{}, true)
 	if _, present := unrequested["reasoning"]; present {
@@ -318,5 +319,33 @@ func TestReasoningEffortOffWithoutRequest(t *testing.T) {
 	nonReasoning := decodeReq(t, "some-chat-model", effortReq, false)
 	if _, present := nonReasoning["reasoning"]; present {
 		t.Errorf("reasoning = %v, want omitted for a non-reasoning model", nonReasoning["reasoning"])
+	}
+}
+
+// TestReasoningSupported pins the capability gate that decides which models
+// buildRequest is even allowed to send reasoning config for. It had no direct
+// coverage, so a regression here (e.g. treating unregistered ids as reasoning-
+// capable) would have left every other test in the package green while changing
+// what goes on the wire. The unregistered case is the load-bearing one:
+// Runner.SetEffort deliberately ADMITS unregistered ids, so this gate is the
+// only thing standing between an effort set on one and a rejected request.
+func TestReasoningSupported(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-5", true},
+		{"o4-mini", true},
+		{"some-chat-model", false},
+		{"gpt-5.6-sol", false}, // unregistered: UNKNOWN is treated as "no" here
+		{"", false},
+	}
+	p := New("gpt-5", provider.StaticCredentialSource{})
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := p.reasoningSupported(tc.model); got != tc.want {
+				t.Errorf("reasoningSupported(%q) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
 	}
 }

@@ -111,8 +111,11 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 		// An explicit budget is Anthropic's native unit and the more precise
 		// statement, so it wins; otherwise the effort level projects down to one.
 		// With neither, the floor stands in for "on, at the cheapest depth".
+		// Note an explicit budget outranks a level in BOTH directions: a small
+		// BudgetTokens beats a "high" effort, because the caller named the number.
 		budget := req.Params.Thinking.BudgetTokens
-		if budget == 0 {
+		derived := budget == 0
+		if derived {
 			switch req.Params.Thinking.Effort {
 			case provider.EffortLow:
 				budget = lowThinkingBudget
@@ -125,7 +128,19 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 		if budget < minThinkingBudget {
 			budget = minThinkingBudget
 		}
-		// max_tokens must exceed the thinking budget; leave room for output.
+		// A DERIVED budget must fit the output cap already resolved above, so
+		// shrink it to leave output headroom rather than raising the cap. The cap
+		// is either the caller's explicit MaxTokens or the model's registry
+		// maximum, and a level is only an approximation of caller intent — it has
+		// no business overriding either. Without this, an unregistered model
+		// (whose cap falls back to defaultMaxTokens, well under a high budget)
+		// would have max_tokens inflated past whatever the vendor actually allows
+		// for it, turning a valid request into a 400.
+		if derived && budget > wire.MaxTokens-defaultMaxTokens {
+			budget = max(wire.MaxTokens-defaultMaxTokens, minThinkingBudget)
+		}
+		// max_tokens must exceed the thinking budget; leave room for output. Only
+		// an explicit budget can push the cap up — see the clamp above.
 		if wire.MaxTokens <= budget {
 			wire.MaxTokens = budget + defaultMaxTokens
 		}

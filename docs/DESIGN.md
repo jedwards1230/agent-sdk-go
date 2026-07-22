@@ -148,10 +148,11 @@ client's op started the turn.
   never constructs `provider.Params` still gets reasoning on the wire from a
   bare `SetEffort`; requiring both fields is what made the setter inert through
   v0.17.0. Anthropic projects the level onto a thinking budget (an explicit
-  `BudgetTokens` outranks it), OpenAI sends it as its effort string.
-  `event.SessionSetEffort` is the wire op that
-  carries the swap, parallel to `session.set_model`. So a consuming TUI can
-  offer an effort axis orthogonal to model choice between turns. Still
+  `BudgetTokens` outranks it, and a level-derived budget shrinks to fit the
+  resolved `max_tokens` rather than inflating it), OpenAI sends it as its effort
+  string. `event.SessionSetEffort` is the wire op that carries the swap,
+  parallel to `session.set_model`. So a consuming TUI can offer an effort axis
+  orthogonal to model choice between turns. Still
   design-ahead: a declarative home — `compose.Load` parses only the manifest
   `model` today, so a `params.thinking` block should be parsed too, making
   effort expressible without code.

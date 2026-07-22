@@ -263,9 +263,15 @@ func TestRunner_SetEffort_ClearedIsInactive(t *testing.T) {
 // TestRunner_SetEffort_PreservesConstructionThinking is the backward-compat
 // guard for embedders that already configure reasoning themselves: a runner
 // built with an explicit Enabled + BudgetTokens must carry BOTH through onto
-// every turn untouched, so this fix cannot change the wire for them. It also
-// pins that clearing the level leaves their Enabled standing — the level is the
-// only thing SetEffort owns.
+// every turn untouched. It also pins that clearing the level leaves their
+// Enabled standing — the level is the only thing SetEffort owns.
+//
+// Scope, precisely: this covers the runner seam, and an explicit BudgetTokens
+// is the combination that is also wire-stable, because it outranks any level
+// downstream. It does NOT establish that the fix changes no embedder's wire.
+// One combination does change — Enabled with NO BudgetTokens plus a level now
+// sends that level's budget on Anthropic instead of the floor — which is the
+// documented, intended behavior change (see provider.Thinking).
 func TestRunner_SetEffort_PreservesConstructionThinking(t *testing.T) {
 	prov := &recordingEffortProvider{}
 	r := newEffortRunner(t, prov, provider.Params{

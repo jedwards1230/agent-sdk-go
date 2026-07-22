@@ -178,6 +178,23 @@ type Params struct {
 // Reasoning is on when [Thinking.Active] reports true — a non-empty Effort is
 // itself a request for reasoning, so naming a level is enough. See Active for
 // why the two fields are not independent.
+//
+// # Behavior change since v0.17.0
+//
+// Effort previously reached no vendor at all on Anthropic, and did not enable
+// reasoning on either vendor. Two configurations therefore send a different
+// request than they used to, both deliberately:
+//
+//   - Effort set with Enabled false now turns reasoning ON (it was ignored).
+//     On Anthropic that also drops any Temperature, which the API forbids
+//     alongside extended thinking.
+//   - Effort set with Enabled true now sends the level's budget on Anthropic
+//     rather than the minimum, UNLESS BudgetTokens pins one. A caller who set
+//     both fields to span two vendors — the old docs called Effort "the OpenAI
+//     reasoning effort" — gets deeper (slower, costlier) Anthropic thinking
+//     than before. Set BudgetTokens explicitly to pin the old budget.
+//
+// A configuration with Enabled and BudgetTokens and no Effort is unchanged.
 type Thinking struct {
 	// Enabled turns reasoning on without naming a level, leaving the depth to
 	// the provider's default. Setting Effort turns reasoning on too, so a
@@ -205,6 +222,13 @@ type Thinking struct {
 // reasoning off" is not a coherent request — so requiring Enabled alongside
 // Effort only created a state (Effort set, Enabled false) in which the level was
 // silently dropped by every adapter.
+//
+// BudgetTokens deliberately does NOT enable, even though "budget a reasoning
+// run, but with reasoning off" is just as incoherent as the Effort case. The
+// difference is portability, not coherence: Effort is the unified vocabulary
+// every provider understands, while BudgetTokens is Anthropic's native unit
+// that other vendors ignore. Enabling on it would make the same Params mean
+// "reasoning on" for one vendor and "reasoning off" for another.
 //
 // A provider still applies its own model-capability rules on top of this;
 // Active reports the caller's intent, not what the target model can serve.

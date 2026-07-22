@@ -436,3 +436,80 @@ func TestBuildBodyThinkingOffWithoutEffort(t *testing.T) {
 		t.Errorf("temperature = %v, want %v preserved when thinking is off", body.Temperature, temp)
 	}
 }
+
+// TestBuildBodyThinkingDerivedBudgetClamped covers the cases where the
+// effort-derived budget does NOT fit the output cap, and must shrink to fit
+// rather than inflating that cap. Without the clamp, a "high" level sends
+// max_tokens 36864 for any model whose cap the registry does not know — past
+// what several real Anthropic models allow, turning a request that was valid
+// before the effort projection existed into a 400.
+func TestBuildBodyThinkingDerivedBudgetClamped(t *testing.T) {
+	tests := []struct {
+		name          string
+		model         string
+		params        provider.Params
+		wantBudget    int
+		wantMaxTokens int
+	}{
+		{
+			// The cap falls back to defaultMaxTokens, leaving no headroom at all.
+			name:          "unregistered model falls back to the floor",
+			model:         "claude-3-5-haiku-latest",
+			params:        provider.Params{Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    minThinkingBudget,
+			wantMaxTokens: defaultMaxTokens,
+		},
+		{
+			// The caller's explicit cap is their most specific statement; a level
+			// is an approximation and must not override it.
+			name:          "caller max_tokens outranks the level",
+			model:         "claude-sonnet-5",
+			params:        provider.Params{MaxTokens: 4000, Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    minThinkingBudget,
+			wantMaxTokens: 4000,
+		},
+		{
+			// Enough headroom to seat the level's full budget under the cap.
+			name:          "cap with headroom keeps the full level budget",
+			model:         "claude-sonnet-5",
+			params:        provider.Params{MaxTokens: 40000, Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    highThinkingBudget,
+			wantMaxTokens: 40000,
+		},
+		{
+			// An EXPLICIT budget keeps the historical raise-the-cap behavior, so
+			// embedders that set one see no change from the clamp.
+			name:          "explicit budget still raises the cap",
+			model:         "claude-3-5-haiku-latest",
+			params:        provider.Params{Thinking: provider.Thinking{Enabled: true, BudgetTokens: 20000}},
+			wantBudget:    20000,
+			wantMaxTokens: 20000 + defaultMaxTokens,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(tc.model, provider.StaticCredentialSource{})
+			r, err := p.buildBody(provider.Request{
+				Messages: []provider.Message{provider.UserText("hi")},
+				Params:   tc.params,
+			}, provider.CredAPIKey)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			body := decodeBody(t, r)
+			if body.Thinking == nil {
+				t.Fatalf("thinking block missing")
+			}
+			if body.Thinking.BudgetTokens != tc.wantBudget {
+				t.Errorf("budget = %d, want %d", body.Thinking.BudgetTokens, tc.wantBudget)
+			}
+			if body.MaxTokens != tc.wantMaxTokens {
+				t.Errorf("max_tokens = %d, want %d", body.MaxTokens, tc.wantMaxTokens)
+			}
+			// The invariant the whole clamp exists to protect.
+			if body.MaxTokens <= body.Thinking.BudgetTokens {
+				t.Errorf("max_tokens %d <= budget %d: the API rejects this", body.MaxTokens, body.Thinking.BudgetTokens)
+			}
+		})
+	}
+}
