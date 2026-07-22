@@ -271,3 +271,81 @@ func TestWireRole(t *testing.T) {
 		}
 	}
 }
+
+// TestReasoningEffortEnables is the issue #88 regression at the OpenAI wire: a
+// named effort with Enabled left false — exactly the Params a Runner produces
+// for an embedder that never constructs provider.Params — must still emit the
+// reasoning config carrying that level, and opt into encrypted reasoning
+// content. Before the fix the config was omitted entirely, so Runner.SetEffort
+// could not reach the API.
+func TestReasoningEffortEnables(t *testing.T) {
+	for _, effort := range []string{provider.EffortLow, provider.EffortMedium, provider.EffortHigh} {
+		t.Run(effort, func(t *testing.T) {
+			req := provider.Request{Params: provider.Params{
+				Thinking: provider.Thinking{Effort: effort},
+			}}
+			m := decodeReq(t, "gpt-5", req, true)
+
+			rc, ok := m["reasoning"].(map[string]any)
+			if !ok {
+				t.Fatalf("reasoning config missing for effort %q — it never reached the wire", effort)
+			}
+			if rc["effort"] != effort {
+				t.Errorf("reasoning effort = %v, want %q", rc["effort"], effort)
+			}
+			include, ok := m["include"].([]any)
+			if !ok || len(include) != 1 || include[0] != "reasoning.encrypted_content" {
+				t.Errorf("include = %v, want [reasoning.encrypted_content]", m["include"])
+			}
+		})
+	}
+}
+
+// TestReasoningEffortOffWithoutRequest is the must-fire twin of the test above:
+// with neither Enabled nor an effort no reasoning config may appear, so a change
+// that enabled reasoning unconditionally cannot pass both tests. It also pins
+// that buildRequest's reasoningModel=false branch refuses an effort-only
+// request. Which models reach that branch is a separate question, decided by
+// Provider.reasoningSupported and pinned by TestReasoningSupported.
+func TestReasoningEffortOffWithoutRequest(t *testing.T) {
+	unrequested := decodeReq(t, "gpt-5", provider.Request{}, true)
+	if _, present := unrequested["reasoning"]; present {
+		t.Errorf("reasoning = %v, want omitted with reasoning unrequested", unrequested["reasoning"])
+	}
+
+	effortReq := provider.Request{Params: provider.Params{
+		Thinking: provider.Thinking{Effort: provider.EffortHigh},
+	}}
+	nonReasoning := decodeReq(t, "some-chat-model", effortReq, false)
+	if _, present := nonReasoning["reasoning"]; present {
+		t.Errorf("reasoning = %v, want omitted for a non-reasoning model", nonReasoning["reasoning"])
+	}
+}
+
+// TestReasoningSupported pins the capability gate that decides which models
+// buildRequest is even allowed to send reasoning config for. It had no direct
+// coverage, so a regression here (e.g. treating unregistered ids as reasoning-
+// capable) would have left every other test in the package green while changing
+// what goes on the wire. The unregistered case is the load-bearing one:
+// Runner.SetEffort deliberately ADMITS unregistered ids, so this gate is the
+// only thing standing between an effort set on one and a rejected request.
+func TestReasoningSupported(t *testing.T) {
+	tests := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-5", true},
+		{"o4-mini", true},
+		{"some-chat-model", false},
+		{"gpt-5.6-sol", false}, // unregistered: UNKNOWN is treated as "no" here
+		{"", false},
+	}
+	p := New("gpt-5", provider.StaticCredentialSource{})
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			if got := p.reasoningSupported(tc.model); got != tc.want {
+				t.Errorf("reasoningSupported(%q) = %v, want %v", tc.model, got, tc.want)
+			}
+		})
+	}
+}

@@ -347,3 +347,169 @@ func TestInfoFallbackFlagsUnregistered(t *testing.T) {
 		t.Errorf("Info(claude-sonnet-5).Unregistered = true, want false: %+v", reg)
 	}
 }
+
+// TestBuildBodyThinkingEffortEnables is the issue #88 regression at the
+// Anthropic wire: a named effort with Enabled left false — exactly the Params a
+// Runner produces for an embedder that never constructs provider.Params — must
+// still turn extended thinking on, and each level must project onto its own
+// budget. Before the fix every one of these cases emitted no thinking block at
+// all, so Runner.SetEffort could not reach the API.
+func TestBuildBodyThinkingEffortEnables(t *testing.T) {
+	tests := []struct {
+		name       string
+		thinking   provider.Thinking
+		wantBudget int
+	}{
+		{"low effort alone", provider.Thinking{Effort: provider.EffortLow}, lowThinkingBudget},
+		{"medium effort alone", provider.Thinking{Effort: provider.EffortMedium}, mediumThinkingBudget},
+		{"high effort alone", provider.Thinking{Effort: provider.EffortHigh}, highThinkingBudget},
+		{
+			"enabled plus effort agrees with effort alone",
+			provider.Thinking{Enabled: true, Effort: provider.EffortHigh},
+			highThinkingBudget,
+		},
+		{
+			"explicit budget outranks the level",
+			provider.Thinking{Effort: provider.EffortHigh, BudgetTokens: 5000},
+			5000,
+		},
+		{
+			"enabled with no level keeps the floor",
+			provider.Thinking{Enabled: true},
+			minThinkingBudget,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+			temp := 0.7
+			r, err := p.buildBody(provider.Request{
+				Messages: []provider.Message{provider.UserText("hi")},
+				Params:   provider.Params{Temperature: &temp, Thinking: tc.thinking},
+			}, provider.CredAPIKey)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			body := decodeBody(t, r)
+
+			if body.Thinking == nil {
+				t.Fatalf("thinking block missing for %+v — the effort never reached the wire", tc.thinking)
+			}
+			if body.Thinking.Type != "enabled" {
+				t.Errorf("thinking type = %q, want %q", body.Thinking.Type, "enabled")
+			}
+			if body.Thinking.BudgetTokens != tc.wantBudget {
+				t.Errorf("budget = %d, want %d", body.Thinking.BudgetTokens, tc.wantBudget)
+			}
+			// max_tokens must exceed the budget or the API rejects the request.
+			if body.MaxTokens <= body.Thinking.BudgetTokens {
+				t.Errorf("max_tokens = %d, want > budget %d", body.MaxTokens, body.Thinking.BudgetTokens)
+			}
+			// Anthropic forbids an explicit temperature alongside extended
+			// thinking, so enabling via effort must drop it just as Enabled does.
+			if body.Temperature != nil {
+				t.Errorf("temperature = %v, want nil once thinking is on", *body.Temperature)
+			}
+		})
+	}
+}
+
+// TestBuildBodyThinkingOffWithoutEffort is the must-fire twin of the test
+// above: with neither Enabled nor an effort, no thinking block may appear and
+// temperature must survive. Without it, a change that unconditionally enabled
+// thinking would pass every assertion in TestBuildBodyThinkingEffortEnables.
+func TestBuildBodyThinkingOffWithoutEffort(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	temp := 0.7
+	r, err := p.buildBody(provider.Request{
+		Messages: []provider.Message{provider.UserText("hi")},
+		Params:   provider.Params{Temperature: &temp, Thinking: provider.Thinking{}},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+	if body.Thinking != nil {
+		t.Errorf("thinking = %+v, want nil with reasoning unrequested", body.Thinking)
+	}
+	if body.Temperature == nil || *body.Temperature != temp {
+		t.Errorf("temperature = %v, want %v preserved when thinking is off", body.Temperature, temp)
+	}
+}
+
+// TestBuildBodyThinkingDerivedBudgetClamped covers the cases where the
+// effort-derived budget does NOT fit the output cap, and must shrink to fit
+// rather than inflating that cap. Without the clamp, a "high" level sends
+// max_tokens 36864 for any model whose cap the registry does not know — past
+// what several real Anthropic models allow, turning a request that was valid
+// before the effort projection existed into a 400.
+func TestBuildBodyThinkingDerivedBudgetClamped(t *testing.T) {
+	tests := []struct {
+		name          string
+		model         string
+		params        provider.Params
+		wantBudget    int
+		wantMaxTokens int
+	}{
+		{
+			// The cap falls back to defaultMaxTokens, leaving no headroom at all.
+			name:          "unregistered model falls back to the floor",
+			model:         "claude-3-5-haiku-latest",
+			params:        provider.Params{Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    minThinkingBudget,
+			wantMaxTokens: defaultMaxTokens,
+		},
+		{
+			// The caller's explicit cap is their most specific statement; a level
+			// is an approximation and must not override it.
+			name:          "caller max_tokens outranks the level",
+			model:         "claude-sonnet-5",
+			params:        provider.Params{MaxTokens: 4000, Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    minThinkingBudget,
+			wantMaxTokens: 4000,
+		},
+		{
+			// Enough headroom to seat the level's full budget under the cap.
+			name:          "cap with headroom keeps the full level budget",
+			model:         "claude-sonnet-5",
+			params:        provider.Params{MaxTokens: 40000, Thinking: provider.Thinking{Effort: provider.EffortHigh}},
+			wantBudget:    highThinkingBudget,
+			wantMaxTokens: 40000,
+		},
+		{
+			// An EXPLICIT budget keeps the historical raise-the-cap behavior, so
+			// embedders that set one see no change from the clamp.
+			name:          "explicit budget still raises the cap",
+			model:         "claude-3-5-haiku-latest",
+			params:        provider.Params{Thinking: provider.Thinking{Enabled: true, BudgetTokens: 20000}},
+			wantBudget:    20000,
+			wantMaxTokens: 20000 + defaultMaxTokens,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(tc.model, provider.StaticCredentialSource{})
+			r, err := p.buildBody(provider.Request{
+				Messages: []provider.Message{provider.UserText("hi")},
+				Params:   tc.params,
+			}, provider.CredAPIKey)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			body := decodeBody(t, r)
+			if body.Thinking == nil {
+				t.Fatalf("thinking block missing")
+			}
+			if body.Thinking.BudgetTokens != tc.wantBudget {
+				t.Errorf("budget = %d, want %d", body.Thinking.BudgetTokens, tc.wantBudget)
+			}
+			if body.MaxTokens != tc.wantMaxTokens {
+				t.Errorf("max_tokens = %d, want %d", body.MaxTokens, tc.wantMaxTokens)
+			}
+			// The invariant the whole clamp exists to protect.
+			if body.MaxTokens <= body.Thinking.BudgetTokens {
+				t.Errorf("max_tokens %d <= budget %d: the API rejects this", body.MaxTokens, body.Thinking.BudgetTokens)
+			}
+		})
+	}
+}

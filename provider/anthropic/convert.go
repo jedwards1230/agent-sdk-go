@@ -73,9 +73,20 @@ type thinkingConfig struct {
 // API requires input_schema to be a JSON Schema object.
 var emptySchema = json.RawMessage(`{"type":"object"}`)
 
-// minThinkingBudget is the Anthropic-mandated floor for an extended-thinking
-// budget; a smaller (or zero) budget is raised to it.
-const minThinkingBudget = 1024
+// Anthropic extended-thinking token budgets. minThinkingBudget is the
+// Anthropic-mandated floor; a smaller (or zero) budget is raised to it. The
+// per-level budgets are this adapter's projection of the unified effort
+// vocabulary ([provider.Thinking.Effort]) down to Anthropic's native unit —
+// the counterpart of the OpenAI adapter sending the level as an effort string.
+// They are deliberately well clear of the floor so the levels are actually
+// distinguishable, and well under every registered Anthropic model's max
+// output so the budget never crowds out the answer.
+const (
+	minThinkingBudget    = 1024
+	lowThinkingBudget    = 4_096
+	mediumThinkingBudget = 16_384
+	highThinkingBudget   = 32_768
+)
 
 // buildBody projects a provider.Request down to the Messages API wire format and
 // returns it as a ready-to-send JSON reader. credKind selects whether the OAuth
@@ -96,12 +107,40 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 
 	wire.MaxTokens = p.maxTokens(model, req.Params)
 
-	if req.Params.Thinking.Enabled {
+	if req.Params.Thinking.Active() {
+		// An explicit budget is Anthropic's native unit and the more precise
+		// statement, so it wins; otherwise the effort level projects down to one.
+		// With neither, the floor stands in for "on, at the cheapest depth".
+		// Note an explicit budget outranks a level in BOTH directions: a small
+		// BudgetTokens beats a "high" effort, because the caller named the number.
 		budget := req.Params.Thinking.BudgetTokens
+		derived := budget == 0
+		if derived {
+			switch req.Params.Thinking.Effort {
+			case provider.EffortLow:
+				budget = lowThinkingBudget
+			case provider.EffortMedium:
+				budget = mediumThinkingBudget
+			case provider.EffortHigh:
+				budget = highThinkingBudget
+			}
+		}
 		if budget < minThinkingBudget {
 			budget = minThinkingBudget
 		}
-		// max_tokens must exceed the thinking budget; leave room for output.
+		// A DERIVED budget must fit the output cap already resolved above, so
+		// shrink it to leave output headroom rather than raising the cap. The cap
+		// is either the caller's explicit MaxTokens or the model's registry
+		// maximum, and a level is only an approximation of caller intent — it has
+		// no business overriding either. Without this, an unregistered model
+		// (whose cap falls back to defaultMaxTokens, well under a high budget)
+		// would have max_tokens inflated past whatever the vendor actually allows
+		// for it, turning a valid request into a 400.
+		if derived && budget > wire.MaxTokens-defaultMaxTokens {
+			budget = max(wire.MaxTokens-defaultMaxTokens, minThinkingBudget)
+		}
+		// max_tokens must exceed the thinking budget; leave room for output. Only
+		// an explicit budget can push the cap up — see the clamp above.
 		if wire.MaxTokens <= budget {
 			wire.MaxTokens = budget + defaultMaxTokens
 		}

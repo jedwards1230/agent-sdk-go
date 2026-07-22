@@ -559,6 +559,22 @@ func (r *Runner) currentEffort() string {
 // what it cannot use, so the same call is meaningful across provider families —
 // unlike SetModel, effort carries no same-provider constraint.
 //
+// Setting a level TURNS REASONING ON: a non-empty effort satisfies
+// [provider.Thinking.Active], so a caller need not also have set
+// Params.Thinking.Enabled at construction. Clearing (effort == "") drops back to
+// whatever the construction-time Params.Thinking said — reasoning stays on at
+// the provider's default level if Enabled was set, and off if it was not.
+//
+// Three consequences are worth knowing. Turning reasoning on via a level DROPS
+// any Params.Temperature on Anthropic, whose API rejects the two together — so
+// an embedder that pinned a temperature for determinism loses it the moment a
+// user picks a level. And in two cases the level reaches the request but does
+// not move the wire: a construction-time Params.Thinking.BudgetTokens pins the
+// Anthropic budget and outranks any level set here (see [provider.Thinking]),
+// and the OpenAI adapter emits reasoning config only for a model its registry
+// knows reasons, so an unregistered OpenAI model — which this setter admits
+// (below) — still runs without it.
+//
 // Capability: a non-empty effort is rejected when the runner's CURRENT model is
 // one the registry KNOWS does not support reasoning. This mirrors SetModel's
 // permissiveness toward unregistered ids — an unregistered model's reasoning

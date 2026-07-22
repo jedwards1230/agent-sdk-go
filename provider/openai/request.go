@@ -98,7 +98,7 @@ func buildRequest(model string, req provider.Request, reasoningModel bool) ([]by
 	// Reasoning models take an effort level, not a temperature. Non-reasoning
 	// models take temperature but reject reasoning config.
 	if reasoningModel {
-		if req.Params.Thinking.Enabled {
+		if req.Params.Thinking.Active() {
 			effort := req.Params.Thinking.Effort
 			if effort == "" {
 				effort = "medium"

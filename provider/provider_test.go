@@ -163,3 +163,30 @@ func TestContentBlockConstructors(t *testing.T) {
 		t.Errorf("ToolResultBlock = %+v", tr)
 	}
 }
+
+// TestThinkingActive pins the enablement rule the adapters key on: a named
+// effort level is self-enabling, so a caller that only set Effort — the state
+// every embedder that never constructs provider.Params lands in — still gets
+// reasoning. Requiring Enabled alongside Effort is what made Runner.SetEffort
+// a no-op on the wire through v0.17.0 (issue #88).
+func TestThinkingActive(t *testing.T) {
+	tests := []struct {
+		name     string
+		thinking provider.Thinking
+		want     bool
+	}{
+		{"zero value is off", provider.Thinking{}, false},
+		{"enabled alone is on", provider.Thinking{Enabled: true}, true},
+		{"effort alone is on", provider.Thinking{Effort: provider.EffortHigh}, true},
+		{"low effort alone is on", provider.Thinking{Effort: provider.EffortLow}, true},
+		{"both is on", provider.Thinking{Enabled: true, Effort: provider.EffortMedium}, true},
+		{"budget alone does not enable", provider.Thinking{BudgetTokens: 8000}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.thinking.Active(); got != tc.want {
+				t.Errorf("Thinking%+v.Active() = %v, want %v", tc.thinking, got, tc.want)
+			}
+		})
+	}
+}
