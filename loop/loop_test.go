@@ -787,3 +787,162 @@ func (p *scriptProvider) Stream(_ context.Context, _ provider.Request) (provider
 	return provider.SliceStream(t...), nil
 }
 func (p scriptProvider) Info() provider.ModelInfo { return provider.ModelInfo{ID: "faux"} }
+
+// collectEvents drains every buffered concrete event from a subscription.
+// Like collectKinds, it relies on synchronous broker delivery: all events are
+// present once Run returns.
+func collectEvents(sub *event.Subscription) []event.Event {
+	var evs []event.Event
+	for {
+		select {
+		case e, ok := <-sub.C:
+			if !ok {
+				return evs
+			}
+			evs = append(evs, e)
+		default:
+			return evs
+		}
+	}
+}
+
+func kindsOf(evs []event.Event) []string {
+	kinds := make([]string, len(evs))
+	for i, e := range evs {
+		kinds[i] = e.Kind()
+	}
+	return kinds
+}
+
+// noDeltaToolTurn models a provider that seeds ToolCallStarted empty and streams
+// NO argument deltas, delivering the whole tool input only on End — the shape the
+// ChatGPT/Codex backend produces for a function call. Without a synthetic delta a
+// client would see only the empty Started seed until the post-execution finished
+// event (a bare `bash` with no command for the whole run).
+func noDeltaToolTurn(id, name, input string) []provider.StreamEvent {
+	return []provider.StreamEvent{
+		{Type: provider.StreamToolCallStart, Tool: &provider.ToolCall{ID: id, Name: name}},
+		{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: id, Name: name, Input: json.RawMessage(input)}},
+		{Type: provider.StreamFinished, StopReason: provider.StopToolUse, Usage: provider.Usage{InputTokens: 4, OutputTokens: 1}},
+	}
+}
+
+// TestNoDeltaToolInputSurfacedBeforeExecution covers the ChatGPT/Codex path: a
+// tool call whose arguments arrive only at End (empty Start seed, no streamed
+// deltas) must emit exactly one synthetic ToolCallDelta carrying the full
+// assembled input, BEFORE the tool executes — so a client accumulating deltas can
+// render the full `name(args)` invocation during the run rather than a bare name.
+func TestNoDeltaToolInputSurfacedBeforeExecution(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterAll, 256)
+
+	const args = `{"command":"for i in $(seq 1 10); do echo $i; done"}`
+	tool := &fakeTool{name: "bash", result: loop.ToolResult{Content: "ok"}}
+	cfg := baseConfig(b, scripted(
+		noDeltaToolTurn("t1", "bash", args),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	evs := collectEvents(sub)
+	var deltas []event.ToolCallDelta
+	deltaIdx, finishedIdx := -1, -1
+	for i, e := range evs {
+		switch ev := e.(type) {
+		case event.ToolCallDelta:
+			deltas = append(deltas, ev)
+			if deltaIdx == -1 {
+				deltaIdx = i
+			}
+		case event.ToolCallFinished:
+			if finishedIdx == -1 {
+				finishedIdx = i
+			}
+		}
+	}
+	if len(deltas) != 1 {
+		t.Fatalf("ToolCallDelta count = %d, want exactly 1 synthetic delta (events: %v)", len(deltas), kindsOf(evs))
+	}
+	if deltas[0].Delta != args {
+		t.Errorf("synthetic delta = %q, want full assembled args %q", deltas[0].Delta, args)
+	}
+	// The synthetic delta must reach clients before the tool executes; the
+	// finished event is published only after runTools, so delta-before-finished is
+	// the observable ordering proxy.
+	if deltaIdx < 0 || finishedIdx < 0 || deltaIdx >= finishedIdx {
+		t.Errorf("delta at %d, finished at %d: want the synthetic delta before the finished event (events: %v)", deltaIdx, finishedIdx, kindsOf(evs))
+	}
+}
+
+// TestStreamedToolDeltasGetNoSyntheticDelta asserts a provider that DOES stream
+// argument deltas is untouched: the client sees exactly the streamed fragments
+// and no extra synthetic full-input delta (which would double-count the args).
+func TestStreamedToolDeltasGetNoSyntheticDelta(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterAll, 256)
+
+	frags := []string{`{"command":"fo`, `o"}`}
+	tool := &fakeTool{name: "bash", result: loop.ToolResult{Content: "ok"}}
+	cfg := baseConfig(b, scripted(
+		[]provider.StreamEvent{
+			{Type: provider.StreamToolCallStart, Tool: &provider.ToolCall{ID: "t1", Name: "bash"}},
+			{Type: provider.StreamToolCallDelta, Tool: &provider.ToolCall{ID: "t1", Delta: frags[0]}},
+			{Type: provider.StreamToolCallDelta, Tool: &provider.ToolCall{ID: "t1", Delta: frags[1]}},
+			{Type: provider.StreamToolCallEnd, Tool: &provider.ToolCall{ID: "t1", Name: "bash", Input: json.RawMessage(`{"command":"foo"}`)}},
+			{Type: provider.StreamFinished, StopReason: provider.StopToolUse, Usage: provider.Usage{InputTokens: 4, OutputTokens: 1}},
+		},
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	var got []string
+	for _, e := range collectEvents(sub) {
+		if d, ok := e.(event.ToolCallDelta); ok {
+			got = append(got, d.Delta)
+		}
+	}
+	if !reflect.DeepEqual(got, frags) {
+		t.Errorf("ToolCallDelta fragments = %v, want exactly the 2 streamed fragments %v (no synthetic delta appended)", got, frags)
+	}
+}
+
+// TestSeededToolInputGetsNoSyntheticDelta asserts a provider that carries the
+// full input inline on Start (non-blank seed) gets no synthetic delta: the client
+// already has the arguments from ToolCallStarted, so a synthetic delta would be
+// redundant.
+func TestSeededToolInputGetsNoSyntheticDelta(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterAll, 256)
+
+	tool := &fakeTool{name: "bash", result: loop.ToolResult{Content: "ok"}}
+	cfg := baseConfig(b, scripted(
+		seedOnlyToolTurn("t1", "bash", `{"cmd":"ls -la"}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	n := 0
+	for _, e := range collectEvents(sub) {
+		if _, ok := e.(event.ToolCallDelta); ok {
+			n++
+		}
+	}
+	if n != 0 {
+		t.Errorf("ToolCallDelta count = %d, want 0 (input seeded at Start, no synthetic delta)", n)
+	}
+}
