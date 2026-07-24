@@ -4,6 +4,12 @@
 // a terminal finished event carrying the stop reason and usage), and supports
 // both credential kinds: an API key (x-api-key) and a subscription OAuth bearer
 // token (the Claude Code header convention).
+//
+// Prompt caching is on by default: each request carries cache_control
+// breakpoints on its stable prefix (tools, system prompt, and a rolling
+// conversation boundary) so Anthropic caches it and later turns read the cache
+// instead of re-billing the whole prompt. See applyPromptCache for the
+// placement strategy and WithPromptCaching to disable it.
 package anthropic
 
 import (
@@ -49,13 +55,14 @@ var oauthBetas = []string{"claude-code-20250219", "oauth-2025-04-20"}
 // Provider is an Anthropic Messages API backend for a single model. It is safe
 // for concurrent use; each Stream call is independent.
 type Provider struct {
-	model      string
-	creds      provider.CredentialSource
-	httpClient *http.Client
-	baseURL    string
-	version    string
-	cliVersion string
-	betas      []string
+	model         string
+	creds         provider.CredentialSource
+	httpClient    *http.Client
+	baseURL       string
+	version       string
+	cliVersion    string
+	betas         []string
+	promptCaching bool
 }
 
 // Option configures a [Provider].
@@ -88,16 +95,29 @@ func WithCLIVersion(v string) Option {
 	return func(p *Provider) { p.cliVersion = v }
 }
 
+// WithPromptCaching toggles Anthropic prompt caching. When enabled (the
+// default) the request builder stamps cache_control breakpoints on the stable
+// prefix — the tool block, the system prompt, and a rolling conversation
+// boundary — so Anthropic caches it and later turns read the cache instead of
+// re-billing the full prompt. Caching is strictly a cost win when the prefix is
+// stable, so it defaults on; pass false only to opt a Provider out entirely.
+// Prompt caching is generally available and needs no beta header; use WithBetas
+// only if a future model gates it behind one.
+func WithPromptCaching(enabled bool) Option {
+	return func(p *Provider) { p.promptCaching = enabled }
+}
+
 // New returns a Provider for the given model, resolving credentials from creds
 // under the "anthropic" provider id.
 func New(model string, creds provider.CredentialSource, opts ...Option) *Provider {
 	p := &Provider{
-		model:      model,
-		creds:      creds,
-		httpClient: http.DefaultClient,
-		baseURL:    defaultBaseURL,
-		version:    anthropicVersion,
-		cliVersion: defaultCLIVersion,
+		model:         model,
+		creds:         creds,
+		httpClient:    http.DefaultClient,
+		baseURL:       defaultBaseURL,
+		version:       anthropicVersion,
+		cliVersion:    defaultCLIVersion,
+		promptCaching: true,
 	}
 	for _, opt := range opts {
 		opt(p)

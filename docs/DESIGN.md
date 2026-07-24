@@ -120,6 +120,20 @@ client's op started the turn.
   `ModelInfo.Unregistered` marks a synthesized record, and
   `session.CostReport` carries `Unpriced` + `Complete()` so a partial total
   cannot be presented as the session's cost.
+
+  **Anthropic prompt caching** is a wire-level cost optimization distinct from
+  the "no caching" above (which concerns model *listings*): the Anthropic
+  adapter stamps `cache_control: {"type":"ephemeral"}` breakpoints on the stable
+  request prefix — the last tool, the last system block, and the last block of
+  the second-to-last message — so Anthropic caches the prefix and later turns
+  read it instead of re-billing the whole prompt. The rolling conversation
+  boundary sits on the last message *before* the newly-appended turn, so each
+  turn's cache write becomes the next turn's cache read (the marker never lands
+  on the mutating newest message). At most three markers are placed, within the
+  four-breakpoint API limit. On by default (a strict win when the prefix is
+  stable); `anthropic.WithPromptCaching(false)` opts a provider out. Cache hits
+  and writes surface via the existing `Usage.CacheReadTokens`/`CacheWriteTokens`
+  counters. OpenAI caches automatically and needs no wire markers.
 - **Credentials.** `provider.CredentialSource.Credential(ctx, providerID)
   (Credential, error)` decouples providers from the auth package. Kinds are
   `api_key` and `oauth`; `EnvCredentialSource` (API keys from env vars) ships in

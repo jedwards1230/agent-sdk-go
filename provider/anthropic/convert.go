@@ -23,12 +23,25 @@ type messagesRequest struct {
 	Stream      bool            `json:"stream"`
 }
 
+// cacheControl marks a block as a prompt-cache breakpoint. Anthropic caches
+// every block up to and including a marked one (ephemeral = 5-minute TTL), so a
+// marker on the stable request prefix turns a full-price prompt into a cache
+// read on the next turn. Only "ephemeral" is defined today.
+type cacheControl struct {
+	Type string `json:"type"` // always "ephemeral"
+}
+
+// ephemeralCache is the sole cache_control value; a shared pointer is safe since
+// callers only read it.
+var ephemeralCache = &cacheControl{Type: "ephemeral"}
+
 // systemBlock is one entry in the system prompt array. The API also accepts a
 // bare string, but the array form lets OAuth requests carry the mandatory Claude
 // Code identity block ahead of the caller's prompt.
 type systemBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text"`
+	Type         string        `json:"type"`
+	Text         string        `json:"text"`
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 // wireMessage is a conversation entry in Anthropic wire form.
@@ -54,13 +67,16 @@ type wireBlock struct {
 	ToolUseID string `json:"tool_use_id,omitempty"`
 	Content   string `json:"content,omitempty"`
 	IsError   bool   `json:"is_error,omitempty"`
+	// cache_control (any block type may carry a breakpoint)
+	CacheControl *cacheControl `json:"cache_control,omitempty"`
 }
 
 // wireTool is a tool specification in Anthropic wire form.
 type wireTool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	Name         string          `json:"name"`
+	Description  string          `json:"description,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema"`
+	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
 
 // thinkingConfig enables extended thinking with a token budget.
@@ -103,6 +119,10 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 		Messages: convertMessages(req.Messages),
 		Tools:    convertTools(req.Tools),
 		Stream:   true,
+	}
+
+	if p.promptCaching {
+		applyPromptCache(&wire)
 	}
 
 	wire.MaxTokens = p.maxTokens(model, req.Params)
@@ -155,6 +175,41 @@ func (p *Provider) buildBody(req provider.Request, credKind provider.CredKind) (
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 	return bytes.NewReader(buf), nil
+}
+
+// applyPromptCache stamps cache_control breakpoints on the stable prefix of the
+// request so Anthropic caches it. Anthropic caches every block up to and
+// including a marked one and allows at most four markers; this places at most
+// three (tools, system, one rolling conversation boundary), always within the
+// limit:
+//
+//   - Tools: the last tool. Tools are defined once and never change, so caching
+//     the whole tool block is a pure win.
+//   - System: the last system block. The system prompt is stable across a
+//     session, so it caches the same way.
+//   - Conversation: the last block of the SECOND-TO-LAST message — the last
+//     message BEFORE the newly-appended turn. This is the rolling boundary that
+//     yields the multi-turn saving: Anthropic matches the longest previously
+//     cached prefix, so turn N's cache WRITE (prefix ending at that boundary)
+//     becomes turn N+1's cache READ. The marked block is always a stable
+//     prior-turn block that recurs byte-identically in the next request's
+//     prefix. The newest message is deliberately NOT marked: it mutates every
+//     request, so a marker there would pay a cache write with no read benefit.
+//     With fewer than two messages the sole message IS the new turn, so no
+//     conversation marker is placed.
+func applyPromptCache(wire *messagesRequest) {
+	if n := len(wire.Tools); n > 0 {
+		wire.Tools[n-1].CacheControl = ephemeralCache
+	}
+	if n := len(wire.System); n > 0 {
+		wire.System[n-1].CacheControl = ephemeralCache
+	}
+	if n := len(wire.Messages); n >= 2 {
+		blocks := wire.Messages[n-2].Content
+		if b := len(blocks); b > 0 {
+			blocks[b-1].CacheControl = ephemeralCache
+		}
+	}
 }
 
 // maxTokens resolves the output cap: the caller's value, else the model's

@@ -513,3 +513,295 @@ func TestBuildBodyThinkingDerivedBudgetClamped(t *testing.T) {
 		})
 	}
 }
+
+// --- prompt caching (cache_control breakpoints) ---
+
+// countCacheMarkers totals cache_control markers across the whole request:
+// system blocks, tools, and every message content block. The Anthropic limit is
+// four; the builder must never exceed it.
+func countCacheMarkers(body messagesRequest) int {
+	n := 0
+	for _, s := range body.System {
+		if s.CacheControl != nil {
+			n++
+		}
+	}
+	for _, t := range body.Tools {
+		if t.CacheControl != nil {
+			n++
+		}
+	}
+	for _, m := range body.Messages {
+		for _, b := range m.Content {
+			if b.CacheControl != nil {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// lastBlockMarked reports whether the final content block of the message at idx
+// carries a cache_control marker.
+func lastBlockMarked(body messagesRequest, idx int) bool {
+	blocks := body.Messages[idx].Content
+	if len(blocks) == 0 {
+		return false
+	}
+	return blocks[len(blocks)-1].CacheControl != nil
+}
+
+// anyBlockMarked reports whether any block of the message at idx is marked.
+func anyBlockMarked(body messagesRequest, idx int) bool {
+	for _, b := range body.Messages[idx].Content {
+		if b.CacheControl != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func TestPromptCacheSystemMarkerAPIKey(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	r, err := p.buildBody(provider.Request{
+		System:   "be terse",
+		Messages: []provider.Message{provider.UserText("hi")},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	if len(body.System) != 1 {
+		t.Fatalf("system = %+v, want single block", body.System)
+	}
+	if body.System[0].CacheControl == nil || body.System[0].CacheControl.Type != "ephemeral" {
+		t.Errorf("system[0] cache_control = %+v, want ephemeral", body.System[0].CacheControl)
+	}
+}
+
+func TestPromptCacheSystemMarkerOAuthOnlyLastBlock(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	r, err := p.buildBody(provider.Request{
+		System:   "be terse",
+		Messages: []provider.Message{provider.UserText("hi")},
+	}, provider.CredOAuth)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	if len(body.System) != 2 {
+		t.Fatalf("system = %+v, want identity + caller block", body.System)
+	}
+	if body.System[0].CacheControl != nil {
+		t.Errorf("system[0] (identity) must NOT be marked; only the last block is")
+	}
+	if body.System[1].CacheControl == nil {
+		t.Errorf("system[1] (last block) must be marked")
+	}
+}
+
+func TestPromptCacheToolMarkerOnlyLast(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	r, err := p.buildBody(provider.Request{
+		Messages: []provider.Message{provider.UserText("go")},
+		Tools: []provider.ToolSpec{
+			{Name: "a"}, {Name: "b"}, {Name: "c"},
+		},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	if len(body.Tools) != 3 {
+		t.Fatalf("tools = %+v", body.Tools)
+	}
+	for i := 0; i < 2; i++ {
+		if body.Tools[i].CacheControl != nil {
+			t.Errorf("tool[%d] must NOT be marked; only the last tool is", i)
+		}
+	}
+	if body.Tools[2].CacheControl == nil || body.Tools[2].CacheControl.Type != "ephemeral" {
+		t.Errorf("tool[2] (last) cache_control = %+v, want ephemeral", body.Tools[2].CacheControl)
+	}
+}
+
+func TestPromptCacheNoToolsNoToolMarker(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	r, err := p.buildBody(provider.Request{
+		Messages: []provider.Message{provider.UserText("hi")},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+	if len(body.Tools) != 0 {
+		t.Fatalf("expected no tools, got %+v", body.Tools)
+	}
+}
+
+func TestPromptCacheRollingBoundarySecondToLast(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	msgs := []provider.Message{
+		provider.UserText("u1"),
+		provider.AssistantText("a1"),
+		provider.UserText("u2"), // newest turn — must stay unmarked
+	}
+	r, err := p.buildBody(provider.Request{Messages: msgs}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+
+	if len(body.Messages) != 3 {
+		t.Fatalf("messages = %d, want 3", len(body.Messages))
+	}
+	if !lastBlockMarked(body, 1) {
+		t.Errorf("second-to-last message (idx 1) last block must be marked")
+	}
+	if anyBlockMarked(body, 0) {
+		t.Errorf("message idx 0 must not be marked (only the rolling boundary is)")
+	}
+	if anyBlockMarked(body, 2) {
+		t.Errorf("newest message (idx 2) must NOT be marked — it mutates every request")
+	}
+}
+
+func TestPromptCacheSingleMessageNoConversationMarker(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	r, err := p.buildBody(provider.Request{
+		Messages: []provider.Message{provider.UserText("only turn")},
+	}, provider.CredAPIKey)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+	if anyBlockMarked(body, 0) {
+		t.Errorf("a single (newest) message must carry no conversation marker")
+	}
+}
+
+// TestPromptCacheMarkerCapNeverExceedsFour walks representative request shapes
+// and asserts the builder never places more than four cache_control markers
+// (the Anthropic maximum). The fixed strategy tops out at three.
+func TestPromptCacheMarkerCapNeverExceedsFour(t *testing.T) {
+	longHistory := make([]provider.Message, 0, 12)
+	for i := 0; i < 6; i++ {
+		longHistory = append(longHistory, provider.UserText("u"), provider.AssistantText("a"))
+	}
+	cases := []struct {
+		name string
+		req  provider.Request
+		cred provider.CredKind
+		want int
+	}{
+		{"bare user", provider.Request{Messages: []provider.Message{provider.UserText("hi")}}, provider.CredAPIKey, 0},
+		{"system only", provider.Request{System: "s", Messages: []provider.Message{provider.UserText("hi")}}, provider.CredAPIKey, 1},
+		{"tools+system", provider.Request{System: "s", Tools: []provider.ToolSpec{{Name: "a"}, {Name: "b"}}, Messages: []provider.Message{provider.UserText("hi")}}, provider.CredAPIKey, 2},
+		{"tools+system+oauth+long history", provider.Request{System: "s", Tools: []provider.ToolSpec{{Name: "a"}, {Name: "b"}}, Messages: longHistory}, provider.CredOAuth, 3},
+	}
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := p.buildBody(tc.req, tc.cred)
+			if err != nil {
+				t.Fatalf("buildBody: %v", err)
+			}
+			body := decodeBody(t, r)
+			got := countCacheMarkers(body)
+			if got > 4 {
+				t.Fatalf("markers = %d, exceeds the Anthropic limit of 4", got)
+			}
+			if got != tc.want {
+				t.Errorf("markers = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPromptCacheMultiTurnInvariant proves the rolling boundary yields
+// turn-over-turn reuse: as the conversation grows, the boundary marker advances
+// to the new second-to-last message, the previously-marked boundary content
+// remains in the (now longer) stable prefix, and the newest turn is never
+// marked. So turn N+1's cached prefix is a superset of turn N's.
+func TestPromptCacheMultiTurnInvariant(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{})
+
+	turnN := []provider.Message{
+		provider.UserText("u1"),
+		provider.AssistantText("a1"), // boundary this turn (idx 1)
+		provider.UserText("u2"),      // newest
+	}
+	turnN1 := []provider.Message{
+		provider.UserText("u1"),
+		provider.AssistantText("a1"),
+		provider.UserText("u2"),
+		provider.AssistantText("a2"), // boundary next turn (idx 3)
+		provider.UserText("u3"),      // newest
+	}
+
+	decode := func(msgs []provider.Message) messagesRequest {
+		r, err := p.buildBody(provider.Request{Messages: msgs}, provider.CredAPIKey)
+		if err != nil {
+			t.Fatalf("buildBody: %v", err)
+		}
+		return decodeBody(t, r)
+	}
+	bodyN := decode(turnN)
+	bodyN1 := decode(turnN1)
+
+	// Turn N: boundary at second-to-last (a1), newest (u2) unmarked.
+	if !lastBlockMarked(bodyN, len(bodyN.Messages)-2) {
+		t.Fatalf("turn N: expected boundary marker on second-to-last message")
+	}
+	if anyBlockMarked(bodyN, len(bodyN.Messages)-1) {
+		t.Fatalf("turn N: newest message must be unmarked")
+	}
+	if bodyN.Messages[1].Content[0].Text != "a1" {
+		t.Fatalf("turn N: expected boundary message text a1, got %q", bodyN.Messages[1].Content[0].Text)
+	}
+
+	// Turn N+1: boundary advanced to the new second-to-last (a2), newest (u3) unmarked.
+	if !lastBlockMarked(bodyN1, len(bodyN1.Messages)-2) {
+		t.Fatalf("turn N+1: expected boundary marker on second-to-last message")
+	}
+	if anyBlockMarked(bodyN1, len(bodyN1.Messages)-1) {
+		t.Fatalf("turn N+1: newest message must be unmarked")
+	}
+	if bodyN1.Messages[3].Content[0].Text != "a2" {
+		t.Fatalf("turn N+1: expected boundary message text a2, got %q", bodyN1.Messages[3].Content[0].Text)
+	}
+
+	// The prior boundary content (a1) is still present in turn N+1's prefix,
+	// now an interior stable element (unmarked) — so N+1's cached prefix ⊇ N's.
+	if bodyN1.Messages[1].Content[0].Text != "a1" {
+		t.Fatalf("turn N+1: prior boundary content a1 must persist in the prefix")
+	}
+	if anyBlockMarked(bodyN1, 1) {
+		t.Fatalf("turn N+1: the old boundary (a1) must now be an unmarked cached-prefix element")
+	}
+	// Boundary advanced strictly forward: 1 -> 3.
+	if got, want := len(bodyN1.Messages)-2, 3; got != want {
+		t.Fatalf("turn N+1 boundary index = %d, want %d", got, want)
+	}
+}
+
+func TestPromptCacheDisabledEmitsNoMarkers(t *testing.T) {
+	p := New("claude-sonnet-5", provider.StaticCredentialSource{}, WithPromptCaching(false))
+	r, err := p.buildBody(provider.Request{
+		System: "be terse",
+		Tools:  []provider.ToolSpec{{Name: "a"}, {Name: "b"}},
+		Messages: []provider.Message{
+			provider.UserText("u1"), provider.AssistantText("a1"), provider.UserText("u2"),
+		},
+	}, provider.CredOAuth)
+	if err != nil {
+		t.Fatalf("buildBody: %v", err)
+	}
+	body := decodeBody(t, r)
+	if got := countCacheMarkers(body); got != 0 {
+		t.Errorf("WithPromptCaching(false): markers = %d, want 0", got)
+	}
+}
