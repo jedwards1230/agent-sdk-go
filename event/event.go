@@ -639,7 +639,9 @@ func (e MessageFinished) withMeta(seq uint64, ts time.Time) Event {
 
 // --- tool call events ---
 
-// ToolCallStarted announces a tool invocation with its raw input.
+// ToolCallStarted announces a tool invocation with its start-of-block input
+// seed — an empty "{}" when the provider streams the arguments as delta
+// fragments. Read the authoritative arguments from tool.call.finished's Input.
 type ToolCallStarted struct {
 	meta
 	ID    string
@@ -682,8 +684,9 @@ func (e ToolCallStarted) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// ToolCallDelta carries an incremental chunk of a tool call's streaming output.
-// It rides the lossy tier.
+// ToolCallDelta carries an incremental chunk of a tool call's streaming input —
+// a fragment of the model's argument JSON, not the tool's result. It rides the
+// lossy tier; reconcile against tool.call.finished's authoritative Input.
 type ToolCallDelta struct {
 	meta
 	ID    string

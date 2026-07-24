@@ -521,6 +521,15 @@ func (r *Runner) currentModel() string {
 // applies is unspecified from the caller's point of view — a caller wanting
 // deterministic behavior calls SetModel between turns (i.e. after a Prompt
 // call returns).
+//
+// SetModel does NOT re-validate the standing reasoning effort. [SetEffort]
+// rejects an effort when the CURRENT model is registry-known-non-reasoning,
+// but the reverse is unguarded: setting an effort and then switching to a
+// non-reasoning model leaves the effort in place. What happens next is
+// provider-dependent — the OpenAI adapter's reasoning-model gate drops it,
+// while the Anthropic adapter's [provider.Thinking.Active] gate does not. A
+// caller moving to a model that cannot reason should clear the effort itself
+// (SetEffort("")).
 func (r *Runner) SetModel(model string) error {
 	next, err := provider.Resolve(model)
 	if err != nil {

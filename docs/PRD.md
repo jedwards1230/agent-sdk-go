@@ -101,11 +101,15 @@ socket, or network — same messages).
 (queues if busy) · `prompt.queue.list / .clear` ·
 `permission.reply{id, verdict, remember?}` · `turn.interrupt` ·
 `tool.cancel{id}` · `session.compact` · `session.set_model{model}` ·
-`session.kill` · `session.archive`.
+`session.set_effort{effort}` · `session.kill` · `session.archive`.
 
-*Design-ahead (M4/M5):* a `session.set_effort{effort}` op should parallel
+`session.set_effort` landed in M4 as the effort-axis parallel to
 `session.set_model` — a turn-boundary reasoning-effort swap validated against
-provider capability — and a manifest `params.thinking` block should make effort
+provider capability (`event.SessionSetEffort`, `runner.SetEffort`). Naming an
+effort is self-enabling: it turns reasoning on without a separate flag
+(`provider.Thinking.Active`).
+
+*Design-ahead (M5/M6):* a manifest `params.thinking` block should make effort
 declaratively expressible. See DESIGN *Provider parity & credentials*.
 
 **Two-tier broker**: deltas ride a lossy tier (drop under backpressure, drop

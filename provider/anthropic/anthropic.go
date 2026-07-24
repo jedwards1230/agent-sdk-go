@@ -83,8 +83,9 @@ func WithBaseURL(url string) Option {
 }
 
 // WithBetas appends additional anthropic-beta feature flags to every request
-// (e.g. prompt-caching or interleaved-thinking betas). For OAuth requests they
-// are appended after the mandatory Claude Code betas.
+// (e.g. the interleaved-thinking beta). For OAuth requests they are appended
+// after the mandatory Claude Code betas. Prompt caching does not belong here —
+// it is generally available and needs no beta header (see WithPromptCaching).
 func WithBetas(betas ...string) Option {
 	return func(p *Provider) { p.betas = append(p.betas, betas...) }
 }

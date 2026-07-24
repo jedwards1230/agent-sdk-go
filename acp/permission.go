@@ -74,6 +74,10 @@ func (o PermissionOutcomeSelected) MarshalJSON() ([]byte, error) {
 // approval row). The chosen option's [PermissionOptionKind] still decides
 // whether the amended allow is remembered, resolved by the daemon against the
 // original option set the same way a plain [PermissionOutcomeSelected] is.
+//
+// SDK extension beyond ACP v1: the published outcome union is only "selected"
+// | "cancelled", so a stock ACP client cannot decode outcome "amended". A nil
+// replacement Input is the unchanged plain allow/deny path.
 type PermissionOutcomeAmended struct {
 	// OptionID is the chosen allow [PermissionOption.OptionID].
 	OptionID string

@@ -51,8 +51,8 @@ func (a toolAdapter) Run(ctx context.Context, input json.RawMessage) (ToolResult
 	if err != nil {
 		return ToolResult{}, err
 	}
-	// tool.Result.Metadata.Diagnostics is an M3 slot the builtins never populate;
-	// it is not surfaced here at M1.
+	// tool.Result.Metadata.Diagnostics is an M3 slot the builtins never populate,
+	// so it is still not surfaced here.
 	var edits []event.FileEdit
 	if fc := res.Metadata.FileChange; fc != nil {
 		edits = []event.FileEdit{{Path: fc.Path, OldText: fc.OldText, NewText: fc.NewText}}
