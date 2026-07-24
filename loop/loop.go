@@ -748,6 +748,24 @@ func (c *converter) toolEnd(t *provider.ToolCall, meta map[string]string) {
 	}
 	a.meta = mergeMeta(a.meta, meta)
 	input := assembledInput(a, t.Input)
+	// Surface the assembled input to clients BEFORE the tool executes. A provider
+	// that delivers a call's arguments only at End — seeding ToolCallStarted empty
+	// and streaming no StreamToolCallDelta (the ChatGPT/Codex backend does this for
+	// function calls) — otherwise leaves every client with only the empty Started
+	// seed until runTools publishes ToolCallFinished AFTER the (arbitrarily long)
+	// execution: a live transcript shows a bare `bash` with no command for the
+	// whole run. Emit the assembled input as one ToolCallDelta fragment so a client
+	// accumulating deltas can render the full `name(args)` invocation during
+	// execution. Guarded to fire ONLY on that no-arguments-until-End path: a blank
+	// Start seed (nothing shown yet) AND no streamed deltas (buf empty, so this
+	// never double-counts a provider that already streamed fragments) AND a
+	// non-blank assembled input (something real to show). A provider that seeds the
+	// full input at Start, or streams argument deltas, is untouched.
+	if blankInput(a.seed) && a.buf.Len() == 0 && !blankInput(input) {
+		ev := event.NewToolCallDelta(c.sid, a.id, string(input))
+		ev.Agent = c.agent
+		c.broker.Publish(ev)
+	}
 	block := provider.ToolUseBlock(a.id, a.name, input)
 	block.Meta = a.meta
 	c.blocks = append(c.blocks, block)
