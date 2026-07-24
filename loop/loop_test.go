@@ -912,7 +912,7 @@ func TestStreamedToolDeltasGetNoSyntheticDelta(t *testing.T) {
 		}
 	}
 	if !reflect.DeepEqual(got, frags) {
-		t.Errorf("ToolCallDelta fragments = %v, want exactly the 2 streamed fragments %v (no synthetic delta appended)", got, frags)
+		t.Fatalf("ToolCallDelta fragments = %v, want exactly the 2 streamed fragments %v (no synthetic delta appended)", got, frags)
 	}
 }
 
