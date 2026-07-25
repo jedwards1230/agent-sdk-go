@@ -26,6 +26,7 @@ const (
 	// MethodSessionExplainPermission asks the agent why a tool call was gated:
 	// the client sends it while a request_permission is still pending to fetch
 	// the gating rationale, then re-prompts the human with the same options.
+	// SDK extension beyond ACP v1 — not in the published schema.
 	MethodSessionExplainPermission = "session/explain_permission"
 	// MethodSessionList lists existing sessions (session metadata + pagination).
 	MethodSessionList = "session/list"
@@ -35,5 +36,6 @@ const (
 	MethodSessionSetConfigOption = "session/set_config_option"
 	// MethodSessionRequestDecision asks the client to answer one or more
 	// structured questions (a decision) — distinct from a tool-call permission.
+	// SDK extension beyond ACP v1 — not in the published schema.
 	MethodSessionRequestDecision = "session/request_decision"
 )

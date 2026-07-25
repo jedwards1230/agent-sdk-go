@@ -7,6 +7,22 @@
 // any other ACP implementation. The protocol version targeted is
 // [ProtocolVersion] (1), the latest stable release at time of writing.
 //
+// # SDK extensions beyond ACP v1
+//
+// Three surfaces in this package are additive SDK extensions, NOT part of the
+// published v1 schema. A stock ACP client will not decode them, so an embedder
+// that talks to third-party clients should treat them as opt-in:
+//
+//   - [PermissionOutcomeAmended] — outcome "amended"; the v1 schema's outcome
+//     union is only "selected" | "cancelled".
+//   - [MethodSessionExplainPermission] ("session/explain_permission") — a
+//     read-only rationale query for a pending request_permission.
+//   - [MethodSessionRequestDecision] ("session/request_decision") — the
+//     agent-initiated structured-question surface.
+//
+// Each is additive: the unextended paths (plain selected/cancelled outcomes, no
+// explain query, no decision request) remain exactly the v1 behavior.
+//
 // This package is transport-agnostic by design: it owns message TYPES and
 // MAPPING FUNCTIONS only. It does no networking, no JSON-RPC framing, and
 // spawns no goroutines — stdlib only. The WebSocket transport and JSON-RPC

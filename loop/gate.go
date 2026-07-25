@@ -22,7 +22,7 @@ import (
 // consumed by the imminent Await for the same id (rather than lost). A reply
 // for an id that is never awaited (e.g. a request abandoned by a cancelled
 // turn) lingers in pending until the Gate is discarded — bounded by the unique
-// tool-call ids of a session; a TTL/GC lands with grant persistence in M4/M5.
+// tool-call ids of a session; a TTL/GC lands with grant persistence in M5/M6.
 type Gate struct {
 	mu      sync.Mutex
 	waiters map[string]chan Reply

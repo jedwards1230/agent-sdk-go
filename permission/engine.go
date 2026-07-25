@@ -51,7 +51,7 @@ func (e *Engine) Evaluate(req Request) (event.Verdict, Rule, bool) {
 }
 
 // Grant appends a runtime (session-scoped) rule — thin remember-grant
-// persistence for M3. TTL / anti-escalation / dangerous-downgrade are M4/M5.
+// persistence for M3. TTL / anti-escalation / dangerous-downgrade are M5/M6.
 func (e *Engine) Grant(r Rule) {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -1,7 +1,7 @@
 // Package permission is the SDK's format-agnostic permission rule engine: a
 // typed []Rule + evaluator the guard consults for the deny/allow-before-sandbox
 // step. Vendor-format loaders (Claude Code settings.json, native manifest) are
-// M4/M5 and deliberately NOT here yet.
+// M5/M6 and deliberately NOT here yet.
 package permission
 
 import "github.com/jedwards1230/agent-sdk-go/event"
