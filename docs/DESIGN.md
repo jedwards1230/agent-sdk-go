@@ -732,6 +732,41 @@ resuming**. As with `Options.Agent` and the session title, the SDK defines no
 vocabulary and attaches no behavior: it carries the value, the embedder owns its
 meaning.
 
+## Announce vocabulary (announce/)
+
+`announce.Payload` is the one type a server publishes to describe itself:
+identity (server id, account id, display name), candidate endpoints, coarse
+session summaries, an opaque credential, a `device.PublicKey`, and a capability
+`Scope`. Types only — the package imports no `net`, opens no socket, and knows
+nothing about rosters or fleets. Per the two-gate test, describing yourself is
+vocabulary a second SDK-based app needs unchanged; the mDNS browser, rendezvous
+client, device-code flow, and candidate racing are plumbing that lives in a
+separate module.
+
+**Endpoints are a list, not an address** — that is the load-bearing choice. A
+server is reachable by several paths at once and which works depends on where
+the client stands, so reachability is an ordered candidate list (lowest
+`Priority` first, SRV-style) with a string-backed **open** `EndpointKind`. A
+relay path arrives later as one more element, not a schema change; an
+unrecognized kind round-trips instead of failing to decode. `Endpoint.Address`
+is opaque: never parsed, resolved, validated, or dialed here.
+
+`Scope` has **no safe zero value** — the empty scope is rejected by `Validate`
+and `CanDrive()` is true only for `ScopeDriver` exactly, so a dropped or
+unrecognized scope can never read as drive access. The field ships now because
+adding it later is breaking, even though enforcement is the application's and
+gets refined over time. `Credential` is a slot the SDK carries and never
+fetches, refreshes, validates, or interprets.
+
+**Not in the compose manifest.** A manifest is static configuration an embedder
+*declares*; an announce payload is runtime state a server *emits* (endpoints
+depend on discovered interfaces, summaries change every turn, the credential is
+minted). There is also no consumer to wire it to. If a server later needs to be
+*told* its stable identity or advertised endpoints, that is a small manifest
+block naming those inputs — added then, against a real consumer.
+
+Additive: no new `event.Event` kind, no change to the Event/Op contract.
+
 ## Extension tiers
 
 Three tiers, by trust and coupling:
