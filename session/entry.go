@@ -26,10 +26,16 @@ const (
 	// EntryCompaction summarizes every ancestor entry before it; [Journal.Fold]
 	// stops walking ancestors once it reaches one.
 	EntryCompaction EntryType = "compaction"
-	// EntryMeta carries durable session-create metadata (currently the cwd).
-	// It is written as the first entry in a freshly created journal, so it is
-	// always the tree's root. It contributes nothing to [Journal.Fold].
+	// EntryMeta carries durable session-create metadata (currently the cwd and
+	// an optional embedder-owned role). It is written as the first entry in a
+	// freshly created journal, so it is always the tree's root. It contributes
+	// nothing to [Journal.Fold].
 	EntryMeta EntryType = "session_meta"
+	// EntryCheckpoint names a point in the journal so it can be addressed
+	// later by label (see [Checkpoints] and runner.Rewind). It is a marker,
+	// like [EntryForkPoint] and [EntryMeta]: it contributes nothing to
+	// [Journal.Fold], so a checkpoint never enters the model's context.
+	EntryCheckpoint EntryType = "checkpoint"
 )
 
 // Entry is one immutable node in a session's tree — the unit of one JSONL
@@ -49,7 +55,8 @@ type Entry struct {
 	// Usage is the token usage a turn-bearing entry consumed, if any.
 	Usage *provider.Usage `json:"usage,omitempty"`
 	// Payload is the type-specific body; unmarshal it via [Entry.Message],
-	// [Entry.ToolRound], [Entry.Compaction], or [Entry.Fork].
+	// [Entry.ToolRound], [Entry.Compaction], [Entry.Fork], [Entry.Meta], or
+	// [Entry.Checkpoint].
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -89,6 +96,15 @@ type ForkPayload struct {
 	From string `json:"from"`
 }
 
+// CheckpointPayload is the [Entry.Payload] shape for [EntryCheckpoint]
+// entries: the human-readable name given to this point in the journal. The
+// name lives in the append-only log rather than a consumer-side sidecar, so it
+// cannot desync from the entries it addresses.
+type CheckpointPayload struct {
+	// Label is the checkpoint's name, opaque to the SDK.
+	Label string `json:"label"`
+}
+
 // MetaPayload is the [Entry.Payload] shape for [EntryMeta] entries: durable
 // session-create metadata. Extensible — future session metadata rides here
 // alongside Cwd, as optional omitempty fields set through a [MetaOpt], so an
@@ -96,6 +112,15 @@ type ForkPayload struct {
 type MetaPayload struct {
 	// Cwd is the working directory the session was created for.
 	Cwd string `json:"cwd,omitempty"`
+	// Role is an opaque, embedder-owned classification of what kind of thing
+	// this session is (e.g. "monitor"), or empty when unclassified. It lets a
+	// roster classify a session from [ReadEntries] alone — without resuming or
+	// folding it.
+	//
+	// The SDK defines no vocabulary of roles and attaches no behavior to any
+	// value: it carries and surfaces the string, exactly as it does for the
+	// session title and runner.Options.Agent. The embedder owns its meaning.
+	Role string `json:"role,omitempty"`
 }
 
 // MetaOpt sets an optional field on the [MetaPayload] a [NewMetaEntry] builds.
@@ -103,9 +128,16 @@ type MetaPayload struct {
 // field never changes NewMetaEntry's signature.
 type MetaOpt func(*MetaPayload)
 
+// WithMetaRole sets the session's opaque, embedder-owned role (see
+// [MetaPayload.Role]). An empty role is the unclassified default and is
+// omitted from the journal.
+func WithMetaRole(role string) MetaOpt {
+	return func(p *MetaPayload) { p.Role = role }
+}
+
 // ErrEntryType indicates a typed accessor ([Entry.Message], [Entry.ToolRound],
-// [Entry.Compaction], [Entry.Fork]) was called on an entry of a different
-// [EntryType].
+// [Entry.Compaction], [Entry.Fork], [Entry.Meta], [Entry.Checkpoint]) was
+// called on an entry of a different [EntryType].
 var ErrEntryType = errors.New("session: entry type mismatch")
 
 // entryConfig collects [EntryOpt] settings before an entry is constructed.
@@ -197,6 +229,19 @@ func newForkPointEntry(at string) Entry {
 	}
 }
 
+// NewCheckpointEntry constructs a checkpoint entry naming the point in the
+// journal it is appended at. ID, Parent, and Time are left zero;
+// [Journal.Append] fills them in, so the checkpoint's parent is whatever HEAD
+// was when it was appended — that entry is the one a later rewind branches
+// from. It contributes nothing to [Journal.Fold].
+func NewCheckpointEntry(label string) Entry {
+	payload := CheckpointPayload{Label: label}
+	return Entry{
+		Type:    EntryCheckpoint,
+		Payload: marshalPayload(payload),
+	}
+}
+
 // NewMetaEntry constructs a session-metadata entry carrying cwd, plus
 // whatever optional metadata opts set. It is intended to be the first entry
 // appended to a freshly created journal (see [runner.New]), so it becomes the
@@ -262,6 +307,19 @@ func (e Entry) Fork() (ForkPayload, error) {
 	}
 	if err := json.Unmarshal(e.Payload, &p); err != nil {
 		return ForkPayload{}, fmt.Errorf("session: unmarshal fork_point payload of entry %s: %w", e.ID, err)
+	}
+	return p, nil
+}
+
+// Checkpoint unmarshals e's payload as a [CheckpointPayload]. It returns
+// [ErrEntryType] if e is not an [EntryCheckpoint].
+func (e Entry) Checkpoint() (CheckpointPayload, error) {
+	var p CheckpointPayload
+	if e.Type != EntryCheckpoint {
+		return p, fmt.Errorf("session: entry %s is %s, not %s: %w", e.ID, e.Type, EntryCheckpoint, ErrEntryType)
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return CheckpointPayload{}, fmt.Errorf("session: unmarshal checkpoint payload of entry %s: %w", e.ID, err)
 	}
 	return p, nil
 }
