@@ -77,6 +77,61 @@ func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 	if mp.Cwd != "/home/user/project" {
 		t.Errorf("Meta().Cwd = %q, want %q", mp.Cwd, "/home/user/project")
 	}
+	if mp.Role != "" {
+		t.Errorf("Meta().Role = %q, want empty (unclassified by default)", mp.Role)
+	}
+
+	ckpt := session.NewCheckpointEntry("before-refactor")
+	if ckpt.Type != session.EntryCheckpoint {
+		t.Fatalf("ckpt.Type = %q, want %q", ckpt.Type, session.EntryCheckpoint)
+	}
+	ckp, err := ckpt.Checkpoint()
+	if err != nil {
+		t.Fatalf("Checkpoint(): %v", err)
+	}
+	if ckp.Label != "before-refactor" {
+		t.Errorf("Checkpoint().Label = %q, want %q", ckp.Label, "before-refactor")
+	}
+}
+
+// TestMetaEntryRole asserts the additive MetaPayload.Role round-trips through
+// the entry payload when set via WithMetaRole, and is omitted from the wire
+// when unset — so an existing journal's meta entry is byte-identical to one
+// written before the field existed.
+func TestMetaEntryRole(t *testing.T) {
+	cases := []struct {
+		name     string
+		opts     []session.MetaOpt
+		wantRole string
+		wantWire bool // "role" expected present in the marshalled payload
+	}{
+		{name: "unset", wantRole: "", wantWire: false},
+		{name: "empty string", opts: []session.MetaOpt{session.WithMetaRole("")}, wantRole: "", wantWire: false},
+		{name: "monitor", opts: []session.MetaOpt{session.WithMetaRole("monitor")}, wantRole: "monitor", wantWire: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := session.NewMetaEntry("/home/user/project", tc.opts...)
+			mp, err := e.Meta()
+			if err != nil {
+				t.Fatalf("Meta(): %v", err)
+			}
+			if mp.Role != tc.wantRole {
+				t.Errorf("Meta().Role = %q, want %q", mp.Role, tc.wantRole)
+			}
+			if mp.Cwd != "/home/user/project" {
+				t.Errorf("Meta().Cwd = %q, want the cwd unchanged", mp.Cwd)
+			}
+			var raw map[string]any
+			if err := json.Unmarshal(e.Payload, &raw); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if _, ok := raw["role"]; ok != tc.wantWire {
+				t.Errorf(`payload "role" present = %v, want %v: %s`, ok, tc.wantWire, e.Payload)
+			}
+		})
+	}
 }
 
 // TestMetaEntryParent asserts the additive lineage fields round-trip through a
@@ -164,10 +219,21 @@ func TestEntryAccessorWrongTypeErrors(t *testing.T) {
 	if _, err := msg.Meta(); !errors.Is(err, session.ErrEntryType) {
 		t.Errorf("Meta() on message entry: err = %v, want ErrEntryType", err)
 	}
+	if _, err := msg.Checkpoint(); !errors.Is(err, session.ErrEntryType) {
+		t.Errorf("Checkpoint() on message entry: err = %v, want ErrEntryType", err)
+	}
 
 	comp := session.NewCompactionEntry("s", "")
 	if _, err := comp.Message(); !errors.Is(err, session.ErrEntryType) {
 		t.Errorf("Message() on compaction entry: err = %v, want ErrEntryType", err)
+	}
+
+	ckpt := session.NewCheckpointEntry("mark")
+	if _, err := ckpt.Message(); !errors.Is(err, session.ErrEntryType) {
+		t.Errorf("Message() on checkpoint entry: err = %v, want ErrEntryType", err)
+	}
+	if _, err := ckpt.Meta(); !errors.Is(err, session.ErrEntryType) {
+		t.Errorf("Meta() on checkpoint entry: err = %v, want ErrEntryType", err)
 	}
 }
 

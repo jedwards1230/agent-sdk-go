@@ -48,7 +48,7 @@ func TestUnmarshalRoundTrip(t *testing.T) {
 	}{
 		{"session.created", event.NewSessionCreated(sid)},
 		{"session.resumed", event.NewSessionResumed(sid)},
-		{"session.forked", event.NewSessionForked(sid)},
+		{"session.forked", event.NewSessionForked(sid, "entry-7", "before-refactor")},
 		{"session.compacted", event.NewSessionCompacted(sid)},
 		{"session.killed", event.NewSessionKilled(sid)},
 		{"session.archived", event.NewSessionArchived(sid)},

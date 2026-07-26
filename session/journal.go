@@ -197,8 +197,9 @@ func (j *Journal) Entries() []Entry {
 // toward the root, then renders in root-to-head order. An [EntryCompaction]
 // entry encountered while walking backward is the boundary: it is included —
 // rendered as a user-role message carrying its summary text, first in the
-// result — and no further ancestors are walked. [EntryForkPoint] and
-// [EntryMeta] entries are markers and contribute nothing. A malformed payload
+// result — and no further ancestors are walked. [EntryForkPoint], [EntryMeta],
+// and [EntryCheckpoint] entries are markers and contribute nothing — a
+// checkpoint's label never enters the model's context. A malformed payload
 // (which should not occur for entries built through the typed constructors)
 // is skipped rather than causing Fold to fail. Every content block's Meta
 // (e.g. a reasoning signature) is preserved verbatim, since it is stored
@@ -290,8 +291,13 @@ func fold(entries []Entry) []provider.Message {
 }
 
 // renderContext renders one entry into a [provider.Message] per the Fold
-// rendering rules. ok is false for fork_point entries (skipped) and for
-// entries whose payload fails to unmarshal.
+// rendering rules. ok is false for the marker entry types — fork_point,
+// session_meta, checkpoint — and for entries whose payload fails to
+// unmarshal. The default case skips any type this build does not know, so a
+// journal written by a newer producer degrades to dropping the unknown entry
+// rather than mis-rendering it into the model's context; the marker types are
+// still listed explicitly, because a contract should not rest on falling
+// through.
 func renderContext(e Entry) (provider.Message, bool) {
 	switch e.Type {
 	case EntryMessage:
@@ -315,6 +321,8 @@ func renderContext(e Entry) (provider.Message, bool) {
 	case EntryForkPoint:
 		return provider.Message{}, false
 	case EntryMeta:
+		return provider.Message{}, false
+	case EntryCheckpoint:
 		return provider.Message{}, false
 	default:
 		return provider.Message{}, false

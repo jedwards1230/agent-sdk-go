@@ -122,22 +122,47 @@ func (e SessionResumed) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// SessionForked is emitted when a session branches from another.
-type SessionForked struct{ meta }
+// SessionForked is emitted when a session branches at an earlier entry — the
+// event behind runner.Fork / runner.Rewind. The branch is ADDITIVE: the
+// journal keeps every entry it had, and the abandoned tail simply drops out of
+// the folded context (see runner.Rewind for the full semantics).
+//
+// At and Label tell a client WHERE the session branched, so it can re-render
+// the transcript from the new branch instead of merely knowing that something
+// forked.
+type SessionForked struct {
+	meta
+	// At is the id of the journal entry the new branch is parented on.
+	At string
+	// Label is the checkpoint label the fork was resolved from, or empty when
+	// the caller forked at a raw entry id.
+	Label string
+}
 
-// NewSessionForked builds a session.forked event.
-func NewSessionForked(session string) SessionForked {
-	return SessionForked{meta{session: session}}
+// NewSessionForked builds a session.forked event for a branch parented on
+// entry at. label names the checkpoint the fork resolved from, or is empty for
+// a fork at a raw entry id.
+func NewSessionForked(session, at, label string) SessionForked {
+	return SessionForked{meta: meta{session: session}, At: at, Label: label}
 }
 
 // Kind returns KindSessionForked.
 func (SessionForked) Kind() string { return KindSessionForked }
 
-// Tier returns TierMustDeliver.
+// Tier returns TierMustDeliver: a fork moves the session's HEAD, so a client
+// that misses it renders the wrong branch.
 func (SessionForked) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope.
-func (e SessionForked) MarshalJSON() ([]byte, error) { return marshalBare(e) }
+// MarshalJSON encodes the envelope plus {at?, label?}. Both are omitempty, so
+// a fork with neither is wire-identical to the bare envelope this event
+// carried before the fields existed.
+func (e SessionForked) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		At    string `json:"at,omitempty"`
+		Label string `json:"label,omitempty"`
+	}{baseEnvelope(e), e.At, e.Label})
+}
 
 func (e SessionForked) withMeta(seq uint64, ts time.Time) Event {
 	e.seq, e.ts = seq, ts
