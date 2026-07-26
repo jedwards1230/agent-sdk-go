@@ -5,6 +5,35 @@
 // This package is types only. It opens no socket, fetches no key, and knows
 // nothing about accounts, rosters, or pairing — those are the consuming
 // application's concerns.
+//
+// # Construction
+//
+// Envelopes use NaCl box (golang.org/x/crypto/nacl/box): X25519 key agreement
+// plus XSalsa20-Poly1305 authenticated encryption, pairwise from a sender
+// keypair to a recipient public key. No key derivation, framing, or handshake
+// is invented here.
+//
+// # Revocation: an assumption, not a settled decision
+//
+// The vocabulary in this package ASSUMES revocation means dropping a revoked
+// device's public key from the account's authorized set. The authorized set is
+// the consuming application's data — this package deliberately ships no account
+// model, no roster, and no key store. PublicKey.ID is the handle a revocation
+// list would use.
+//
+// That assumption is cheap but has a real cost: dropping a key needs no
+// re-fetch and no coordination, yet gives NO forward secrecy. A stolen device
+// can still open every envelope it already holds, and remains able to open
+// anything sent to it until the drop propagates to every sender. The
+// alternative — rotating a shared group key on revocation — gives forward
+// secrecy against a stolen device but forces every remaining device to re-fetch
+// the new key before it can talk again.
+//
+// This is an open protocol commitment that the project owner must confirm
+// before the wire format is fixed. Nothing here forecloses either answer: Seal
+// and Open are pairwise (sender keypair to recipient public key) and assume no
+// single long-lived per-account key, so group-key rotation remains
+// implementable on top without changing these types.
 package device
 
 import (
