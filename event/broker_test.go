@@ -206,6 +206,8 @@ func TestTierOf(t *testing.T) {
 		{event.KindMessageFinished, event.TierMustDeliver},
 		{event.KindTurnStarted, event.TierMustDeliver},
 		{event.KindSessionCreated, event.TierMustDeliver},
+		{event.KindSessionSpawned, event.TierMustDeliver},
+		{event.KindSessionForked, event.TierMustDeliver},
 		{event.KindPermissionRequested, event.TierMustDeliver},
 	}
 	for _, tt := range tests {

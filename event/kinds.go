@@ -23,6 +23,7 @@ const (
 	KindSessionCompacted = "session.compacted"
 	KindSessionKilled    = "session.killed"
 	KindSessionArchived  = "session.archived"
+	KindSessionSpawned   = "session.spawned"
 	KindSessionInfo      = "session.info"
 	KindSessionConfig    = "session.config"
 	KindPlan             = "plan"

@@ -56,13 +56,15 @@ func Unmarshal(data []byte) (Event, error) {
 	case KindSessionResumed:
 		return SessionResumed{m}, nil
 	case KindSessionForked:
-		return SessionForked{m}, nil
+		return SessionForked{meta: m, At: w.At, Label: w.Label}, nil
 	case KindSessionCompacted:
 		return SessionCompacted{m}, nil
 	case KindSessionKilled:
 		return SessionKilled{m}, nil
 	case KindSessionArchived:
 		return SessionArchived{m}, nil
+	case KindSessionSpawned:
+		return SessionSpawned{meta: m, ChildID: w.ChildID, Agent: w.Agent, Depth: w.Depth}, nil
 	case KindSessionInfo:
 		return SessionInfoUpdated{meta: m, Title: w.Title}, nil
 	case KindSessionConfig:
@@ -136,9 +138,18 @@ type wireEvent struct {
 	Seq       uint64 `json:"seq"`
 	Time      string `json:"time"`
 
+	// session.forked
+	At    string `json:"at"`
+	Label string `json:"label"`
+
 	// session.error
 	Err   string `json:"error"`
 	Fatal bool   `json:"fatal"`
+
+	// session.spawned (its "agent" is the Agent field in the tool-call group
+	// below — one field decodes both kinds' identically-named key)
+	ChildID string `json:"child_id"`
+	Depth   int    `json:"depth"`
 
 	// session.info
 	Title string `json:"title"`

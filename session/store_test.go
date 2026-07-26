@@ -403,6 +403,103 @@ func TestReadEntriesMissingFile(t *testing.T) {
 	}
 }
 
+// TestMetaOf asserts MetaOf finds the first meta entry in an append-order
+// slice and decodes its lineage, and reports false — rather than an empty
+// payload — when there is no meta entry or its payload will not decode.
+func TestMetaOf(t *testing.T) {
+	msg := session.NewMessageEntry(provider.UserText("hi"))
+	broken := session.NewMetaEntry("/work/proj")
+	broken.Payload = json.RawMessage(`"not an object"`)
+
+	tests := []struct {
+		name    string
+		entries []session.Entry
+		wantOK  bool
+		want    session.MetaPayload
+	}{
+		{
+			name:    "root session",
+			entries: []session.Entry{session.NewMetaEntry("/work/proj"), msg},
+			wantOK:  true,
+			want:    session.MetaPayload{Cwd: "/work/proj"},
+		},
+		{
+			name: "child session carries lineage",
+			entries: []session.Entry{
+				session.NewMetaEntry("/work/proj", session.WithMetaParent("parent-session", 3)),
+				msg,
+			},
+			wantOK: true,
+			want:   session.MetaPayload{Cwd: "/work/proj", ParentID: "parent-session", Depth: 3},
+		},
+		{
+			name: "meta entry not first is still found",
+			entries: []session.Entry{
+				msg,
+				session.NewMetaEntry("/work/proj", session.WithMetaParent("parent-session", 1)),
+			},
+			wantOK: true,
+			want:   session.MetaPayload{Cwd: "/work/proj", ParentID: "parent-session", Depth: 1},
+		},
+		{
+			name:    "no meta entry",
+			entries: []session.Entry{msg},
+		},
+		{
+			name:    "empty slice",
+			entries: nil,
+		},
+		{
+			name:    "undecodable payload",
+			entries: []session.Entry{broken},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := session.MetaOf(tc.entries)
+			if ok != tc.wantOK {
+				t.Fatalf("MetaOf ok = %t, want %t (payload %+v)", ok, tc.wantOK, got)
+			}
+			if got != tc.want {
+				t.Errorf("MetaOf = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMetaOfLegacyJournal asserts a journal written BEFORE the lineage fields
+// existed still reads back cleanly: the hand-written meta line carries only a
+// cwd, and MetaOf decodes it as a root session at depth 0 — which is what it
+// is. This is the backward-compatibility guarantee the omitempty fields buy.
+func TestMetaOfLegacyJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.jsonl")
+	const legacy = `{"id":"e1","type":"session_meta","time":"2026-01-01T00:00:00Z","payload":{"cwd":"/work/proj"}}
+{"id":"e2","parent":"e1","type":"message","time":"2026-01-01T00:00:01Z","payload":{"role":"user","blocks":[{"type":"text","text":"hi"}]}}
+`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatalf("write legacy journal: %v", err)
+	}
+
+	entries, err := session.ReadEntries(path)
+	if err != nil {
+		t.Fatalf("ReadEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ReadEntries: got %d entries, want 2: %+v", len(entries), entries)
+	}
+	meta, ok := session.MetaOf(entries)
+	if !ok {
+		t.Fatal("MetaOf on a legacy journal: ok = false, want true")
+	}
+	if meta.Cwd != "/work/proj" {
+		t.Errorf("Cwd = %q, want /work/proj", meta.Cwd)
+	}
+	if meta.ParentID != "" || meta.Depth != 0 {
+		t.Errorf("lineage = {%q, %d}, want a root session {\"\", 0}", meta.ParentID, meta.Depth)
+	}
+}
+
 // TestFileStoreTornWriteInteriorCorruption asserts an interior corrupt line
 // (not the final line) is treated as real corruption, not a torn write.
 func TestFileStoreTornWriteInteriorCorruption(t *testing.T) {

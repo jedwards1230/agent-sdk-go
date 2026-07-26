@@ -122,22 +122,47 @@ func (e SessionResumed) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// SessionForked is emitted when a session branches from another.
-type SessionForked struct{ meta }
+// SessionForked is emitted when a session branches at an earlier entry — the
+// event behind runner.Fork / runner.Rewind. The branch is ADDITIVE: the
+// journal keeps every entry it had, and the abandoned tail simply drops out of
+// the folded context (see runner.Rewind for the full semantics).
+//
+// At and Label tell a client WHERE the session branched, so it can re-render
+// the transcript from the new branch instead of merely knowing that something
+// forked.
+type SessionForked struct {
+	meta
+	// At is the id of the journal entry the new branch is parented on.
+	At string
+	// Label is the checkpoint label the fork was resolved from, or empty when
+	// the caller forked at a raw entry id.
+	Label string
+}
 
-// NewSessionForked builds a session.forked event.
-func NewSessionForked(session string) SessionForked {
-	return SessionForked{meta{session: session}}
+// NewSessionForked builds a session.forked event for a branch parented on
+// entry at. label names the checkpoint the fork resolved from, or is empty for
+// a fork at a raw entry id.
+func NewSessionForked(session, at, label string) SessionForked {
+	return SessionForked{meta: meta{session: session}, At: at, Label: label}
 }
 
 // Kind returns KindSessionForked.
 func (SessionForked) Kind() string { return KindSessionForked }
 
-// Tier returns TierMustDeliver.
+// Tier returns TierMustDeliver: a fork moves the session's HEAD, so a client
+// that misses it renders the wrong branch.
 func (SessionForked) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope.
-func (e SessionForked) MarshalJSON() ([]byte, error) { return marshalBare(e) }
+// MarshalJSON encodes the envelope plus {at?, label?}. Both are omitempty, so
+// a fork with neither is wire-identical to the bare envelope this event
+// carried before the fields existed.
+func (e SessionForked) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		At    string `json:"at,omitempty"`
+		Label string `json:"label,omitempty"`
+	}{baseEnvelope(e), e.At, e.Label})
+}
 
 func (e SessionForked) withMeta(seq uint64, ts time.Time) Event {
 	e.seq, e.ts = seq, ts
@@ -206,6 +231,65 @@ func (SessionArchived) Tier() Tier { return TierMustDeliver }
 func (e SessionArchived) MarshalJSON() ([]byte, error) { return marshalBare(e) }
 
 func (e SessionArchived) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
+// SessionSpawned is emitted on the PARENT session when it spawns a child
+// session. A subagent is a real session, not a sub-object: the child has its
+// own UUIDv7 journal, and this event is the link between the two. It rides the
+// parent's stream because that is the stream a roster already watches, so an
+// observer learns a child appeared without polling the store.
+//
+// It is must-deliver. Architecture invariant 4 puts every lifecycle session.*
+// event on that tier, and a spawn notice is the clearest case for it: only
+// stream deltas are lossy, and they are lossy precisely because a settled
+// *.finished payload reconciles whatever was dropped. Nothing reconciles a
+// dropped spawn — no later event re-announces the child — so the drop would
+// strand a live child session invisible to every client. That is unrecoverable
+// state divergence, not a recoverable lossy delta.
+//
+// [SessionID] is the parent's id; ChildID is the child's own session id, which
+// a client can address directly (resume it, subscribe to it, render it under
+// the parent in a tree). Agent names the agent the child runs as, when the
+// spawner attributed one; it is omitempty, so an un-attributed spawn is compact
+// on the wire. Depth is the child's parent-chain length — a root session is 0 —
+// and is NOT omitempty: a depth is meaningful at every value including zero, so
+// it is always present rather than left for a consumer to infer from an absent
+// key.
+type SessionSpawned struct {
+	meta
+	ChildID string
+	Agent   string
+	Depth   int
+}
+
+// NewSessionSpawned builds a session.spawned event for the parent session,
+// naming the child it spawned, the agent that child runs as (empty when
+// un-attributed), and the child's depth.
+func NewSessionSpawned(session, childID, agent string, depth int) SessionSpawned {
+	return SessionSpawned{meta: meta{session: session}, ChildID: childID, Agent: agent, Depth: depth}
+}
+
+// Kind returns KindSessionSpawned.
+func (SessionSpawned) Kind() string { return KindSessionSpawned }
+
+// Tier returns TierMustDeliver.
+func (SessionSpawned) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {child_id, agent?, depth}. agent is
+// omitempty (an un-attributed spawn carries no key); depth is always present,
+// since 0 is a meaningful depth.
+func (e SessionSpawned) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		ChildID string `json:"child_id"`
+		Agent   string `json:"agent,omitempty"`
+		Depth   int    `json:"depth"`
+	}{baseEnvelope(e), e.ChildID, e.Agent, e.Depth})
+}
+
+func (e SessionSpawned) withMeta(seq uint64, ts time.Time) Event {
 	e.seq, e.ts = seq, ts
 	return e
 }
