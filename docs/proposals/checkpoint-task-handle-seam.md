@@ -1,11 +1,15 @@
 # Proposal: task-handle / checkpoint seam
 
-Status: **proposal / spike** — not committed. Resolves the open question stubbed
-in [`../PRD.md`](../PRD.md) ("Open question — in-process background-task handle")
+Status: **ratified — Option C adopted; items 1–3 shipped**, item 4 (the spawn
+seam) tracked separately. Resolves the open question stubbed in
+[`../PRD.md`](../PRD.md) ("Open question — in-process background-task handle")
 and tracked as [agent-sdk-go#80](https://github.com/jedwards1230/agent-sdk-go/issues/80).
 Consumers: gofer [#182](https://github.com/jedwards1230/gofer/issues/182)
 (persistent background tasks / monitors) and
 [#183](https://github.com/jedwards1230/gofer/issues/183) (checkpoint / rewind).
+
+The analysis below is preserved as written (it is the argument that produced the
+decision); [**What shipped**](#what-shipped) at the end records the outcome.
 
 ## The question
 
@@ -70,7 +74,9 @@ and unusually clean. Every claim below is in the current tree.
   rewind — expressed additively, without deleting a line. Caveat: dropped
   entries stay in the log and **still count toward `Cost`**
   (`session/cost.go:73-77`), and the reserved `session.forked` event
-  (`event/event.go:126`) is **defined but never emitted** — no code publishes it.
+  (`event/event.go:126`) was **defined but never emitted** — no code published
+  it. (`Runner.Fork`/`Rewind` are now that producer; see
+  [What shipped](#what-shipped).)
 
 - **Extensibility already reserved.** `MetaPayload` is explicitly extensible
   (`session/entry.go:92-98`). The spawn seam — must-deliver
@@ -166,7 +172,7 @@ versioning in gofer (Option B), and close exactly the gaps that otherwise force
 gofer to reach past the contract. Each item is additive and backward-compatible,
 and each passes both gates on its own.
 
-1. **Surface fork/rewind at the runner level, and emit the event.** Add
+1. ✅ **Shipped.** **Surface fork/rewind at the runner level, and emit the event.** Add
    `Runner.Fork(at string) error` (or `Rewind`) delegating to `Journal.Fork`,
    and make it publish the already-reserved `session.forked`
    (`event/event.go:126`) so every client sees a rewind the same way it sees a
@@ -174,13 +180,13 @@ and each passes both gates on its own.
    touching `session.Journal` directly. *Membership*: any app offering undo needs
    it. *Seam*: it exposes an existing primitive, not a new one.
 
-2. **A named-anchor entry (optional checkpoint label).** Either a new
+2. ✅ **Shipped.** **A named-anchor entry (optional checkpoint label).** Either a new
    `EntryType` ("checkpoint") or a label field so a fork point / anchor can carry
    a human name. Subsumes #183's "lightweight named timeline anchors, which fall
    out for free." Small, and it keeps the name *in the append-only log* rather
    than in a gofer sidecar that can desync from the journal.
 
-3. **A session role/kind in metadata.** Extend the already-extensible
+3. ✅ **Shipped.** **A session role/kind in metadata.** Extend the already-extensible
    `MetaPayload` (`session/entry.go:92-98`) with an optional role (e.g.
    `"monitor"`) so `Store.List`/`ReadEntries` can classify a background task for
    the roster **without folding**. This is what lets #182's monitor "surface in
@@ -229,15 +235,66 @@ owns the durable, event-sourced substrate and the seams; gofer owns the policy.
   fields so existing journals read back unchanged (they will — `MetaPayload` is
   already extensible and JSON-omitempty).
 
-## Open question for the user to ratify
+## Open question — ratified
 
-**Is rewind additive or destructive?** The append-only tenet + auditability
-argue for keeping rewind as `Fork` (audit-preserving; abandoned tail retained
-and still cost-counted). The alternative — a destructive `Truncate`/`Rewind`
-that drops the tail and reclaims cost — is more intuitive as "undo" but breaks
-the journal's strict append-only invariant and its torn-write recovery model.
-The recommendation assumes **additive** (Fork-as-rewind). Ratifying that — vs.
-asking for a destructive primitive — is the one decision that changes the shape
-of items 1–2 above. A secondary point to confirm: that **task id == session id**
-is acceptable (this proposal assumes it is; a distinct task-id namespace is the
-only reason Option A's surface would return).
+**Is rewind additive or destructive? → ADDITIVE.** Rewind appends a fork point;
+it never truncates the journal, removes entries, or shortens the file. A
+destructive `Truncate` was considered and **rejected**: it would trade away the
+journal's append-only auditability (every model call the session ever made stays
+reconstructable) and its torn-write recovery, which repairs a crash by dropping a
+bad *final* line and cannot survive in-place rewrites of earlier entries. The
+consequences are intended behavior, documented on `Runner.Rewind`: the abandoned
+tail stays in the log, stays readable, and **keeps counting toward
+`Runner.Cost()`** — a rewind reclaims no spend, because the provider was already
+paid for those calls. Only the folded context changes.
+
+**Secondary point — task id == session id: confirmed.** No distinct task-id
+namespace; a monitor is a session with a pinned `Options.SessionID`.
+
+## What shipped
+
+Items 1–3, additive and backward-compatible. Item 4 (spawn seam) is unchanged
+design-ahead work and is not part of this change.
+
+**1. Runner-level fork/rewind, and a `session.forked` producer** (`runner/runner.go`).
+
+```go
+func (r *Runner) Fork(at string) error   // branch at an entry id
+func (r *Runner) Rewind(ref string) error // checkpoint label, else raw entry id
+```
+
+Both delegate to `Journal.Fork` and then publish the (previously
+defined-but-never-emitted) `session.forked`. The event grew two omitempty
+fields — `at` (the entry the branch is parented on) and `label` (set when the
+fork resolved from a checkpoint) — so a client learns *where* a session
+branched, not just that it did; it stays `TierMustDeliver`. Changing
+`NewSessionForked`'s signature broke no producer, because there was none.
+
+Two behaviors worth naming: **label collisions resolve to the most recent
+matching checkpoint in append order** (so a label works as a moving bookmark),
+and both methods drain the runner's existing `awaitJournaled` barrier first, so a
+fork right after a turn is parented on that turn's last entry rather than a stale
+HEAD. Forking *while* a `Prompt` is in flight remains a caller-side precondition
+— a run still publishing would land its remaining entries on the new branch —
+and is documented as such.
+
+**2. A checkpoint entry type** (`session/entry.go`, `session/checkpoint.go`).
+`EntryCheckpoint` / `CheckpointPayload{Label}` / `NewCheckpointEntry` /
+`Entry.Checkpoint()`, following the existing entry-type pattern. It is a marker:
+`renderContext` skips it explicitly (not by falling through its default), so a
+checkpoint label never enters the model's context. The name lives in the
+append-only log rather than a consumer sidecar, exactly as argued above.
+
+Runner surface: `Checkpoint(label) (string, error)` (blank label rejected) and
+`Checkpoints() []session.Checkpoint`. The listing helper is
+`session.Checkpoints(entries []Entry)`, so the roster read path is
+`session.Checkpoints(session.ReadEntries(path))` — **no resume, no fold**.
+
+**3. A session role in metadata** (`session/entry.go`, `runner/runner.go`).
+`MetaPayload.Role` (omitempty, so existing journals read back unchanged) set via
+the `WithMetaRole` `MetaOpt`, threaded through `runner.Options.Role` →
+`New`'s root meta entry → `Runner.Role()`, and restored by `Resume` from the
+journal's root meta entry (the durable record wins; a journal without one falls
+back to `Options.Role`). The SDK defines no vocabulary of roles and attaches no
+behavior to any value — same discipline as `Options.Agent` and the session
+title.

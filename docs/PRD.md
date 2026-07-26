@@ -81,7 +81,7 @@ socket, or network — same messages).
 
 | Event | Delivery |
 |---|---|
-| `session.created / .resumed / .forked / .compacted / .killed / .archived` | must-deliver |
+| `session.created / .resumed / .forked{at?, label?} / .compacted / .killed / .archived` | must-deliver |
 | `session.info{title}` (embedder-set title change) | must-deliver |
 | `session.config{options}` (embedder config-option snapshot, e.g. current model) | must-deliver |
 | `plan{entries}` (agent task-plan snapshot via `update_plan`) | must-deliver |
@@ -222,13 +222,30 @@ M0–M3 are what shipped here.
 - No hosted service, no central registry, no telemetry.
 - No UI in this repo; TUI and supervision live in the consuming application.
 
-**Open question — in-process background-task handle.** A consuming app (gofer)
-wants a first-class long-running background-task primitive: persistent,
-task-id-keyed, re-attachable across turns. Whether the SDK offers a **task-handle
-seam** (task ids + persistence layered atop resumable sessions) or leaves it
-purely application-layer atop `runner.Resume` + the JSONL journal is undecided —
-recorded, not committed. This is an *in-process* handle: it does **not** reopen
-the "no hosted service / central registry" non-goal above, which forecloses a
-hosted registry, not an in-process task id. Fuller analysis, options, and a
-recommendation (gofer-native atop the journal, plus a small additive SDK seam):
+**Settled — no task-handle subsystem; a checkpoint/rewind seam instead.** A
+consuming app (gofer) wanted a first-class long-running background-task
+primitive: persistent, task-id-keyed, re-attachable across turns. The SDK does
+**not** grow one. A `Task`/`TaskHandle`/`TaskStore` subsystem and a distinct
+task-id namespace were rejected — they fail both gates (persistence,
+supervision, and rosters are application concerns per invariant #1), and the
+pinnable session id plus the durable journal already provide the capability:
+**the task id is the session id**. Persistence, supervision, and the roster stay
+in the application; the SDK shipped only the seams that otherwise force a
+consumer to reach past the contract:
+
+- `Runner.Fork(at)` / `Runner.Rewind(ref)`, the first producer of
+  `session.forked{at?, label?}`.
+- A `checkpoint` journal entry type (a marker — it never enters the model's
+  context) with `Runner.Checkpoint`/`Checkpoints`, listable off disk via
+  `session.Checkpoints(session.ReadEntries(path))` without resuming.
+- An optional embedder-owned `role` on session metadata
+  (`runner.Options.Role` → `Runner.Role()`), so a roster can classify a session
+  without folding it.
+
+**Rewind is additive, ratified.** It appends a fork point; the journal is never
+truncated and no entry is ever deleted. The abandoned branch stays in the log
+and **still counts toward `Runner.Cost()`** — undo does not reclaim spend.
+Destructive truncation was rejected: it would break the append-only
+auditability tenet and the torn-write recovery model that rests on it. Full
+analysis, the rejected options, and what shipped:
 [`proposals/checkpoint-task-handle-seam.md`](proposals/checkpoint-task-handle-seam.md).

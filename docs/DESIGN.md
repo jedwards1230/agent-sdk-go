@@ -635,6 +635,50 @@ carries `parent_id`, the SDK can auto-populate it from the spawning child/agent
 id, so a consumer can attribute "which worker ran this tool" across a session
 tree without correlating out-of-band. Absent id ⇒ un-attributed rendering.
 
+## Checkpoint & rewind seam (M5)
+
+Checkpoint/rewind is **not** a new subsystem: it is the journal's existing
+fork/fold machinery pointed at undo, surfaced on `*runner.Runner` so a consumer
+never has to reach past the contract into `session.Journal`. The boundary
+decision (no `Task`/`TaskHandle`/`TaskStore`, task id == session id) is settled
+in the [PRD](PRD.md) and argued in
+[`proposals/checkpoint-task-handle-seam.md`](proposals/checkpoint-task-handle-seam.md).
+
+**Rewind is additive — the journal is never truncated.** `Runner.Fork(at)` and
+`Runner.Rewind(ref)` append a `fork_point` parented on the target entry and move
+HEAD there. Nothing is deleted, shortened, or rewritten: the abandoned tail
+stays in the log, stays readable on disk, and **still counts toward
+`Runner.Cost()`** — the provider was already paid for those calls. Only the
+folded context changes. This falls out of the two properties the whole journal
+design rests on: append-only auditability (every model call stays
+reconstructable) and torn-write recovery, which repairs a crash by dropping a
+bad *final* line and so cannot survive in-place edits of earlier entries. A
+destructive `Truncate` was considered and rejected.
+
+Both publish the must-deliver `session.forked{at?, label?}` — the event's first
+producer — so every client sees a rewind the way it sees a resume, and knows
+*where* the branch landed. Both drain the runner's `awaitJournaled` barrier
+first, so a fork immediately after a turn is parented on that turn's last entry
+rather than a stale HEAD; forking while a `Prompt` is still in flight remains a
+caller-side precondition (the run would go on appending onto the new branch).
+
+**A checkpoint is a named marker in the log, not a sidecar.** `EntryCheckpoint`
+carries a label and contributes nothing to `Journal.Fold` — like `fork_point`
+and `session_meta`, and explicitly cased in `renderContext` rather than left to
+fall through, so a label can never enter the model's context. Keeping the name
+in the append-only log is the point: a consumer-side sidecar can desync from the
+entries it addresses. `Runner.Rewind` resolves a label to its entry id, falling
+back to treating the ref as a raw entry id; with duplicate labels the **most
+recent in append order wins**, which makes a label usable as a moving bookmark.
+
+**Session role.** `MetaPayload.Role` is an optional, omitempty, embedder-owned
+string on the root `session_meta` entry (`runner.Options.Role` → `Runner.Role()`,
+restored by `Resume` from the journal). It lets `Store.List`/`ReadEntries`
+classify a session — a monitor, say — for a roster **without folding or
+resuming**. As with `Options.Agent` and the session title, the SDK defines no
+vocabulary and attaches no behavior: it carries the value, the embedder owns its
+meaning.
+
 ## Extension tiers
 
 Three tiers, by trust and coupling:

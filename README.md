@@ -86,7 +86,7 @@ r, err := runner.New(ctx, runner.Options{
 | `tool/` | Builtin tool registry: bash/read/edit/write/grep/glob/ls |
 | `session/` | Session identity (UUIDv7), turn execution, event emission · pluggable journal `Store`: `FileStore` (on-disk JSONL, default) and `MemStore` (in-memory, opt-in) |
 | `compose/` | Agent manifest (YAML) → wired session |
-| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`) assembling provider + tools + broker + loop + journal; `Options.ExtraTools` adds custom tools alongside the builtins, `Options.Store` swaps the journal store |
+| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`/`Checkpoint`/`Fork`/`Rewind`) assembling provider + tools + broker + loop + journal; `Options.ExtraTools` adds custom tools alongside the builtins, `Options.Store` swaps the journal store |
 | `acp/` | Clean-room Agent Client Protocol adapter (stdlib-only), a pure Event/Op projection; `session/new` accepts an optional `model` field |
 | `permission/` | Format-agnostic rule engine (`Rule`/`Engine`): deny > ask > allow, unmatched ⇒ ask, runtime grants |
 | `lsp/` | Server registry + JSON-RPC-over-stdio client + diagnostics seam |
@@ -104,6 +104,16 @@ turn's `tool_result` round when the assistant message carrying the matching
 is dropped whole and the error surfaces; `Close` reports any failure no `Prompt`
 boundary already did. `session.WithMemJournalWriter` substitutes a `MemStore`'s
 sink so an embedder can exercise its own handling of that path.
+
+Checkpoint and rewind ride on the same journal. `Runner.Checkpoint(label)`
+appends a named marker (invisible to the model), and `Runner.Rewind(label)` —
+or `Runner.Fork(entryID)` — branches there and publishes `session.forked`, so a
+later `Prompt` continues with the context as of that point. **Rewind is
+additive**: it appends a fork point rather than truncating, so the abandoned
+branch stays in the log, stays greppable, and still counts toward
+`Runner.Cost()` — undo does not reclaim spend. A session's checkpoints are
+readable off disk without resuming it, via
+`session.Checkpoints(session.ReadEntries(path))`.
 
 Planned: `skill/`, `plugin/`, `mcp/` (M5).
 
