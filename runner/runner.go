@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -71,6 +72,21 @@ type Options struct {
 	// onto every tool-call event the runner emits so a consumer can attribute
 	// tool calls to the agent that ran them. Empty ⇒ un-attributed (the default).
 	Agent string
+	// Role classifies what KIND of thing this session is (e.g. "monitor"), for
+	// an embedder that runs more than one. [New] persists it into the journal's
+	// root session_meta entry (see [session.MetaPayload.Role]), so
+	// [session.ReadEntries] can classify the session for a roster without
+	// resuming or folding it, and [Resume] restores it.
+	//
+	//   - The SDK defines no vocabulary of roles and attaches no behavior to any
+	//     value — it carries and surfaces the string, exactly as it does for
+	//     Agent and the session title. The embedder owns its meaning.
+	//   - Empty (the default) ⇒ unclassified; the field is omitted from the
+	//     journal, so an existing journal reads back unchanged.
+	//   - Used only by New. Resume reads the role from the journal it opens (the
+	//     durable record wins); this field is only the fallback for a journal
+	//     written before the field existed.
+	Role string
 
 	// Guard decides how each tool call is handled before execution
 	// (run-contained / ask / deny). Nil ⇒ every tool runs uncontained, the
@@ -124,6 +140,11 @@ type Runner struct {
 	effort   string
 	maxIters int
 	agent    string
+	// role is the session's opaque, embedder-owned classification, seeded from
+	// Options.Role by New and restored from the journal's root meta entry by
+	// Resume. It is immutable after construction (there is no setter), so
+	// [Runner.Role] reads it without synchronization.
+	role string
 
 	provider provider.Provider
 	tools    loop.ToolRegistry
@@ -175,11 +196,16 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 		}
 		return nil, fmt.Errorf("runner: create session: %w", err)
 	}
-	// Persist the cwd as the journal's first (root) entry so it survives a
-	// daemon restart — session/list on a disk-only session needs it to
-	// cwd-filter without resuming. Resume never hits this path: it opens an
-	// existing journal that already has its meta entry.
-	if _, err := journal.Append(session.NewMetaEntry(opts.Cwd)); err != nil {
+	// Persist the cwd (and the optional role) as the journal's first (root)
+	// entry so it survives a daemon restart — session/list on a disk-only
+	// session needs it to cwd-filter and classify without resuming. Resume never
+	// hits this path: it opens an existing journal that already has its meta
+	// entry.
+	var metaOpts []session.MetaOpt
+	if opts.Role != "" {
+		metaOpts = append(metaOpts, session.WithMetaRole(opts.Role))
+	}
+	if _, err := journal.Append(session.NewMetaEntry(opts.Cwd, metaOpts...)); err != nil {
 		_ = journal.Close()
 		if opts.Store == nil {
 			_ = store.Close()
@@ -212,7 +238,34 @@ func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 		}
 		return nil, fmt.Errorf("runner: open session %s: %w", id, err)
 	}
+	// The journal is the durable record of what this session IS, so its root
+	// meta entry — not the caller's Options — decides the resumed session's
+	// role. A journal written before the field existed (or by a New that set no
+	// role) carries none, and the resumed runner falls back to opts.Role, which
+	// is empty unless the caller supplied one.
+	if role := journalRole(journal); role != "" {
+		opts.Role = role
+	}
 	return build(opts, store, journal, prov, tools, true), nil
+}
+
+// journalRole returns the role recorded in the journal's root session_meta
+// entry, or "" when the journal has no meta entry (an older journal, or one
+// not created by [New]) or its payload does not decode. It scans for the first
+// meta entry rather than indexing entry 0, so it holds even if a journal ever
+// grows a preceding entry.
+func journalRole(j *session.Journal) string {
+	for _, e := range j.Entries() {
+		if e.Type != session.EntryMeta {
+			continue
+		}
+		p, err := e.Meta()
+		if err != nil {
+			return ""
+		}
+		return p.Role
+	}
+	return ""
 }
 
 // resolveProvider returns the test-injected provider when set, else builds the
@@ -286,6 +339,7 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 		effort:      opts.Params.Thinking.Effort,
 		maxIters:    opts.MaxIters,
 		agent:       opts.Agent,
+		role:        opts.Role,
 		provider:    prov,
 		tools:       tools,
 		guard:       opts.Guard,
@@ -310,6 +364,13 @@ func (r *Runner) ID() string { return r.journal.ID() }
 
 // JournalPath returns the session journal's JSONL file path.
 func (r *Runner) JournalPath() string { return r.journal.Path() }
+
+// Role returns the session's opaque, embedder-owned classification (see
+// [Options.Role]), or "" when unclassified. It is the same value the journal's
+// root session_meta entry carries, so a live runner and an off-line
+// [session.ReadEntries] read of the same session agree. The SDK attaches no
+// behavior to any value.
+func (r *Runner) Role() string { return r.role }
 
 // Fold returns the session's current folded context as provider messages —
 // the same context Prompt feeds the provider, exposed for read-only
@@ -482,6 +543,117 @@ func (r *Runner) Emit(e event.Event) { r.broker.Publish(e) }
 // priced against the embedded provider model registry. An unknown (or faux)
 // model still has its tokens summed, with a zero priced cost.
 func (r *Runner) Cost() session.CostReport { return r.journal.Cost(session.RegistryPricing{}) }
+
+// Checkpoint appends a named marker at the journal's current HEAD and returns
+// the marker entry's id — the id [Runner.Fork] takes, and the id
+// [Runner.Rewind] resolves label to. The marker contributes nothing to the
+// folded context, so naming a point never changes what the model sees.
+//
+// label must be non-blank: an unnamed checkpoint is indistinguishable from the
+// fork points the journal already contains, and nothing could address it.
+// The label is stored verbatim and is opaque to the SDK — duplicates are
+// allowed (see Rewind for how they resolve).
+//
+// Checkpoint drains the journaling handshake first (see awaitJournaled), so a
+// checkpoint taken right after a [Runner.Prompt] returns is parented on that
+// turn's last entry rather than on a stale HEAD.
+func (r *Runner) Checkpoint(label string) (string, error) {
+	if strings.TrimSpace(label) == "" {
+		return "", fmt.Errorf("runner: checkpoint label must not be blank")
+	}
+	r.awaitJournaled()
+	e, err := r.journal.Append(session.NewCheckpointEntry(label))
+	if err != nil {
+		return "", fmt.Errorf("runner: append checkpoint %q: %w", label, err)
+	}
+	return e.ID, nil
+}
+
+// Checkpoints lists the session's checkpoints in append order, read off the
+// journal's full log (every branch, not just the folded path).
+//
+// The same listing is available WITHOUT a live runner —
+// session.Checkpoints(session.ReadEntries(path)) — which is the path a roster
+// uses to show a persisted session's checkpoints without resuming it.
+func (r *Runner) Checkpoints() []session.Checkpoint {
+	return session.Checkpoints(r.journal.Entries())
+}
+
+// Fork branches the session at entry at and makes the branch HEAD, then
+// publishes a must-deliver [event.SessionForked] carrying at. Subsequent turns
+// chain onto the branch, so [Runner.Fold] walks the tree through at and the
+// entries that followed at drop out of the model's context.
+//
+// Fork is ADDITIVE — nothing is deleted; see [Runner.Rewind] for the full
+// semantics and the reasons. at must be an existing entry id (any entry, on
+// any branch): an unknown id returns an error wrapping
+// [session.ErrEntryNotFound] with HEAD untouched and no event published.
+//
+// Precondition: do not call Fork while a [Runner.Prompt] is in flight on
+// another goroutine. Fork drains the journaling handshake first (see
+// awaitJournaled), so it branches from a HEAD that already includes everything
+// published so far — but a run still in progress goes on publishing, and those
+// entries would land on the new branch. Fork between turns.
+func (r *Runner) Fork(at string) error { return r.forkAt(at, "") }
+
+// Rewind resolves ref — a checkpoint label, else a raw entry id — and forks
+// there, publishing a must-deliver [event.SessionForked] carrying the resolved
+// entry id and, when ref named a checkpoint, its label. It is the ergonomic
+// spelling of [Runner.Fork] for undo; every caveat below is Fork's too.
+//
+// # Rewind is additive: nothing is ever deleted
+//
+// Rewind APPENDS a fork_point parented on the target entry. It does not
+// truncate the journal, drop entries, or shorten the file:
+//
+//   - The abandoned tail REMAINS in the log. It is still in
+//     [session.Journal.Entries], still visible to anything reading the JSONL
+//     file, and still recoverable by forking back to it.
+//   - It still counts toward [Runner.Cost], which aggregates every branch. A
+//     rewind reclaims no spend — cost measures tokens the provider was already
+//     paid for, and those calls happened.
+//   - Only the FOLDED CONTEXT changes: the tail drops out of what the model
+//     sees on the next turn.
+//
+// This is a ratified design decision, not an implementation shortcut. The
+// journal is strictly append-only, and two properties rest on that: its
+// auditability tenet (every model call the session ever made is reconstructable
+// from the log) and its torn-write recovery, which repairs a crash by dropping
+// a bad FINAL line — a model that cannot survive an in-place rewrite of earlier
+// entries. A destructive rewind would trade both away for the intuition that
+// undo reclaims cost. It does not.
+//
+// # Resolution and label collisions
+//
+// ref is matched against checkpoint labels first, and only falls back to being
+// treated as a raw entry id when no checkpoint carries it. When SEVERAL
+// checkpoints share a label, the MOST RECENT one in append order wins:
+// "rewind to before-refactor" means the latest such mark, which is also what
+// makes a label reusable as a moving bookmark.
+func (r *Runner) Rewind(ref string) error {
+	at, label := ref, ""
+	// Last match wins: Checkpoints is in append order, so scanning forward and
+	// overwriting lands on the most recent checkpoint carrying the label.
+	for _, cp := range r.Checkpoints() {
+		if cp.Label == ref {
+			at, label = cp.ID, cp.Label
+		}
+	}
+	return r.forkAt(at, label)
+}
+
+// forkAt is the shared body of Fork and Rewind: drain the journaling handshake
+// so the branch is parented against an up-to-date HEAD, append the fork point,
+// and announce it. The event publishes only after the fork is durable, so a
+// client never sees a fork the journal does not have.
+func (r *Runner) forkAt(at, label string) error {
+	r.awaitJournaled()
+	if _, err := r.journal.Fork(at); err != nil {
+		return fmt.Errorf("runner: fork session at %s: %w", at, err)
+	}
+	r.broker.Publish(event.NewSessionForked(r.journal.ID(), at, label))
+	return nil
+}
 
 // currentModel returns the model this runner currently uses, synchronized
 // against [SetModel]. Every read of the model — Prompt's loop.Config and
