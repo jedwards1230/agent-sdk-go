@@ -52,6 +52,7 @@ func TestUnmarshalRoundTrip(t *testing.T) {
 		{"session.compacted", event.NewSessionCompacted(sid)},
 		{"session.killed", event.NewSessionKilled(sid)},
 		{"session.archived", event.NewSessionArchived(sid)},
+		{"session.spawned", event.NewSessionSpawned(sid, "child-session", "researcher", 2)},
 		{"session.info", event.NewSessionInfoUpdated(sid, "Debug auth timeout")},
 		{"session.config", event.NewConfigOptionsUpdated(sid, []event.ConfigOption{
 			{

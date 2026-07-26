@@ -96,12 +96,38 @@ type ForkPayload struct {
 type MetaPayload struct {
 	// Cwd is the working directory the session was created for.
 	Cwd string `json:"cwd,omitempty"`
+	// ParentID is the id of the session that spawned this one, or empty for a
+	// root session. Set through [WithMetaParent]; see [Depth].
+	ParentID string `json:"parent_id,omitempty"`
+	// Depth is this session's parent-chain length: 0 for a root session, 1 for a
+	// session spawned by a root, and so on. It is persisted rather than derived
+	// so a spawn-depth cap survives a process restart without walking the chain
+	// (each ancestor journal would have to be opened to recompute it). Set
+	// through [WithMetaParent].
+	Depth int `json:"depth,omitempty"`
 }
 
 // MetaOpt sets an optional field on the [MetaPayload] a [NewMetaEntry] builds.
 // Metadata fields are additive: each rides here as its own option so a new
 // field never changes NewMetaEntry's signature.
 type MetaOpt func(*MetaPayload)
+
+// WithMetaParent records that the session was spawned by parentID and sits at
+// depth in the session tree. The two travel as one option because they are one
+// fact — a child's link to its parent and how far down the chain that link sits.
+// Setting either alone is meaningless: a parent id with no depth cannot be
+// capped without re-walking the chain, and a depth with no parent id names no
+// tree.
+//
+// Both fields are omitempty, so a root session (the caller simply does not pass
+// this option) writes exactly the metadata it wrote before these fields existed,
+// and an older journal reads back unchanged.
+func WithMetaParent(parentID string, depth int) MetaOpt {
+	return func(p *MetaPayload) {
+		p.ParentID = parentID
+		p.Depth = depth
+	}
+}
 
 // ErrEntryType indicates a typed accessor ([Entry.Message], [Entry.ToolRound],
 // [Entry.Compaction], [Entry.Fork]) was called on an entry of a different
