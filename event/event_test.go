@@ -108,6 +108,90 @@ func TestSessionInfoUpdatedMarshal(t *testing.T) {
 	}
 }
 
+// TestSessionSpawnedMarshal asserts the session.spawned event reports the right
+// kind, rides the must-deliver tier (a dropped spawn notice would strand an
+// invisible child), carries the PARENT as its session_id, and puts child_id /
+// agent / depth on the wire — with agent omitted when un-attributed and depth
+// present even at 0.
+func TestSessionSpawnedMarshal(t *testing.T) {
+	const parent, child = "parent-session", "child-session"
+
+	t.Run("kind and tier", func(t *testing.T) {
+		ev := event.NewSessionSpawned(parent, child, "researcher", 1)
+		if ev.Kind() != event.KindSessionSpawned {
+			t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionSpawned)
+		}
+		if ev.Tier() != event.TierMustDeliver {
+			t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+		}
+		if got := event.TierOf(event.KindSessionSpawned); got != event.TierMustDeliver {
+			t.Errorf("TierOf(%q) = %v, want must-deliver", event.KindSessionSpawned, got)
+		}
+		if ev.SessionID() != parent {
+			t.Errorf("SessionID() = %q, want the parent %q (the event rides the parent's stream)", ev.SessionID(), parent)
+		}
+	})
+
+	tests := []struct {
+		name  string
+		ev    event.SessionSpawned
+		want  map[string]any
+		noKey []string
+	}{
+		{
+			name: "attributed child",
+			ev:   event.NewSessionSpawned(parent, child, "researcher", 2),
+			want: map[string]any{
+				"type":       event.KindSessionSpawned,
+				"session_id": parent,
+				"child_id":   child,
+				"agent":      "researcher",
+				"depth":      float64(2),
+			},
+		},
+		{
+			name: "un-attributed spawn omits agent",
+			ev:   event.NewSessionSpawned(parent, child, "", 1),
+			want: map[string]any{
+				"child_id": child,
+				"depth":    float64(1),
+			},
+			noKey: []string{"agent"},
+		},
+		{
+			name: "depth 0 is present, not omitted",
+			ev:   event.NewSessionSpawned(parent, child, "", 0),
+			want: map[string]any{
+				"child_id": child,
+				"depth":    float64(0),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := json.Marshal(tc.ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			for k, want := range tc.want {
+				if got, ok := m[k]; !ok || !equalJSON(got, want) {
+					t.Errorf("envelope[%q] = %v (present=%t), want %v: %s", k, got, ok, want, raw)
+				}
+			}
+			for _, k := range tc.noKey {
+				if _, ok := m[k]; ok {
+					t.Errorf("%q present but should be omitted: %s", k, raw)
+				}
+			}
+		})
+	}
+}
+
 // TestPlanUpdatedMarshal asserts the plan event carries its entries on the wire,
 // is must-deliver, reports the right kind, and marshals an empty plan to an
 // entries array rather than null.

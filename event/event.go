@@ -235,6 +235,65 @@ func (e SessionArchived) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
+// SessionSpawned is emitted on the PARENT session when it spawns a child
+// session. A subagent is a real session, not a sub-object: the child has its
+// own UUIDv7 journal, and this event is the link between the two. It rides the
+// parent's stream because that is the stream a roster already watches, so an
+// observer learns a child appeared without polling the store.
+//
+// It is must-deliver. Architecture invariant 4 puts every lifecycle session.*
+// event on that tier, and a spawn notice is the clearest case for it: only
+// stream deltas are lossy, and they are lossy precisely because a settled
+// *.finished payload reconciles whatever was dropped. Nothing reconciles a
+// dropped spawn — no later event re-announces the child — so the drop would
+// strand a live child session invisible to every client. That is unrecoverable
+// state divergence, not a recoverable lossy delta.
+//
+// [SessionID] is the parent's id; ChildID is the child's own session id, which
+// a client can address directly (resume it, subscribe to it, render it under
+// the parent in a tree). Agent names the agent the child runs as, when the
+// spawner attributed one; it is omitempty, so an un-attributed spawn is compact
+// on the wire. Depth is the child's parent-chain length — a root session is 0 —
+// and is NOT omitempty: a depth is meaningful at every value including zero, so
+// it is always present rather than left for a consumer to infer from an absent
+// key.
+type SessionSpawned struct {
+	meta
+	ChildID string
+	Agent   string
+	Depth   int
+}
+
+// NewSessionSpawned builds a session.spawned event for the parent session,
+// naming the child it spawned, the agent that child runs as (empty when
+// un-attributed), and the child's depth.
+func NewSessionSpawned(session, childID, agent string, depth int) SessionSpawned {
+	return SessionSpawned{meta: meta{session: session}, ChildID: childID, Agent: agent, Depth: depth}
+}
+
+// Kind returns KindSessionSpawned.
+func (SessionSpawned) Kind() string { return KindSessionSpawned }
+
+// Tier returns TierMustDeliver.
+func (SessionSpawned) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {child_id, agent?, depth}. agent is
+// omitempty (an un-attributed spawn carries no key); depth is always present,
+// since 0 is a meaningful depth.
+func (e SessionSpawned) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		ChildID string `json:"child_id"`
+		Agent   string `json:"agent,omitempty"`
+		Depth   int    `json:"depth"`
+	}{baseEnvelope(e), e.ChildID, e.Agent, e.Depth})
+}
+
+func (e SessionSpawned) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
 // SessionInfoUpdated is emitted when a session's mutable metadata changes —
 // currently its human-readable title. It is the seam an embedder uses to push
 // a session title to clients live (it projects to an ACP session_info_update).

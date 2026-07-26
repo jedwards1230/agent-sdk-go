@@ -612,28 +612,63 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   the `available_commands_update`/`current_mode_update` registries — modeled as
   they acquire a stable spec surface and a producer.
 
-## Session tree & spawn seam (design-ahead, M5)
+## Session tree & spawn seam
 
 A subagent is a real session, not a sub-object: its own UUIDv7 journal, linked
-to its parent. The SDK will ship the spawn seam and the linking events — the
-parent journal recording a must-deliver `session.spawned{child_id, agent}`,
-child metadata carrying `parent_id`, and depth (parent-chain length) capped at 5
-and enforced at spawn. The application wires this to its supervisor/roster (tree
-view, peek/attach into any child). Ships M5; recorded here so the session and
-event contracts leave room for it now.
+to its parent. **Shipped (M5).** `Runner.Spawn(ctx, Options) (*Runner, error)`
+is the whole seam — the SDK links, caps, and announces; it does not supervise.
 
-**Tool-call agent attribution (carrier ships; auto-population follows this seam).**
-Tool events (`tool.call.started`/`delta`/`finished`) nest under the run span by
-call `id`, and the instrumentation seam (*The Event/Op stream is the span/metric
-source*) adds no `turn_id` on purpose. The **carrier** now exists: each of the
-three tool-call events carries an optional `agent` field (omitempty, so an
-un-attributed call is wire-identical to before the field existed), stamped at
-emit time from `loop.Config.Agent` — surfaced end-to-end through
-`runner.Options.Agent` and `compose.LoopDeps.Agent`. An embedder that knows which
-agent a loop drives sets it today; once the spawn seam lands and a child session
-carries `parent_id`, the SDK can auto-populate it from the spawning child/agent
-id, so a consumer can attribute "which worker ran this tool" across a session
-tree without correlating out-of-band. Absent id ⇒ un-attributed rendering.
+- **Linking.** A child's root meta entry carries `parent_id` and `depth`
+  (`session.WithMetaParent`), both omitempty so a root session's metadata — and
+  every journal written before the fields existed — is byte-identical to before.
+  `session.MetaOf(entries)` decodes that entry off a `session.ReadEntries` slice,
+  so a roster classifies a disk session (root or child, and how deep) **without
+  resuming or folding it**. `Resume` restores both onto the Runner
+  (`ParentID()`/`Depth()`), so lineage survives a daemon restart rather than
+  resetting to depth 0.
+- **Depth cap.** `runner.DefaultMaxDepth` = 5, overridable per-Runner via
+  `Options.MaxDepth` and inherited by a spawned child, so one value governs a
+  whole chain. Enforced *before* anything is created: an over-cap spawn returns
+  an error matching `errors.Is(err, runner.ErrMaxDepth)` and leaves no orphan
+  journal on disk. `Depth()` is exported so an embedder enforcing its own
+  delegation policy reads the depth before it asks, instead of discovering the
+  cap by attempting a spawn.
+- **Announcement.** The parent's stream carries the must-deliver
+  `session.spawned{child_id, agent?, depth}` (`event.SessionSpawned`, whose
+  `session_id` is the **parent** — that is the stream a roster already watches).
+  Must-deliver because nothing reconciles a dropped spawn: no later event
+  re-announces the child, so the drop would leave it live and invisible. `agent`
+  is omitempty; `depth` is always present, since 0 is a meaningful depth.
+- **Authority.** `Spawn` overwrites `Options.ParentID`/`Depth` with its own id
+  and depth+1 — the parent is authoritative, or a child could name its way
+  around the cap.
+- **Store ownership.** A child spawned without its own `Options.Store` shares the
+  parent's store and does not own it, so `child.Close()` never closes a store the
+  parent is still using.
+
+The durable record of lineage is the **child's** meta entry, not a parent-journal
+entry: the parent's journal is a turn-structured transcript whose assistant
+`tool_use` blocks and their `tool_result` round must not be interleaved, and an
+agent-initiated spawn lands squarely in that window. The must-deliver event
+covers the live view; `ReadEntries` + `MetaOf` covers the after-restart view.
+
+The application wires this to its supervisor/roster (tree view, peek/attach into
+any child) and owns the child's lifecycle — the caller must `Close()` the
+returned Runner. Closing a parent does not close its children.
+
+**Tool-call agent attribution.** Tool events
+(`tool.call.started`/`delta`/`finished`) nest under the run span by call `id`,
+and the instrumentation seam (*The Event/Op stream is the span/metric source*)
+adds no `turn_id` on purpose. Each carries an optional `agent` field (omitempty,
+so an un-attributed call is wire-identical to before the field existed), stamped
+at emit time from `loop.Config.Agent` — surfaced end-to-end through
+`runner.Options.Agent` and `compose.LoopDeps.Agent`. With the spawn seam shipped
+this composes: the spawner sets the child's `Options.Agent`, so every tool call
+that child runs is already attributed, and the `session.spawned{agent}` notice
+tells a consumer which agent the child is before its first tool call — no
+out-of-band correlation across the tree. The SDK still invents no id: an
+un-attributed spawn stays un-attributed, and absent id ⇒ un-attributed
+rendering.
 
 ## Checkpoint & rewind seam (M5)
 

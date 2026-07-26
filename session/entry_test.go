@@ -134,6 +134,74 @@ func TestMetaEntryRole(t *testing.T) {
 	}
 }
 
+// TestMetaEntryParent asserts the additive lineage fields round-trip through a
+// meta entry when [session.WithMetaParent] sets them, and that a meta entry
+// built without the option is wire-identical to one built before the fields
+// existed — no parent_id/depth keys at all — so an existing journal reads back
+// unchanged.
+func TestMetaEntryParent(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      []session.MetaOpt
+		wantPar   string
+		wantDepth int
+		wantKeys  bool // parent_id/depth present in the marshaled payload
+	}{
+		{
+			name:     "root session omits both fields",
+			wantKeys: false,
+		},
+		{
+			name:      "child records parent and depth",
+			opts:      []session.MetaOpt{session.WithMetaParent("parent-session", 2)},
+			wantPar:   "parent-session",
+			wantDepth: 2,
+			wantKeys:  true,
+		},
+		{
+			name: "depth 0 with a parent still names the parent",
+			// Depth 0 is omitempty, so a depth-0 child's wire form carries
+			// parent_id only — and still decodes back to depth 0.
+			opts:     []session.MetaOpt{session.WithMetaParent("parent-session", 0)},
+			wantPar:  "parent-session",
+			wantKeys: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := session.NewMetaEntry("/work/proj", tc.opts...)
+			mp, err := e.Meta()
+			if err != nil {
+				t.Fatalf("Meta(): %v", err)
+			}
+			if mp.Cwd != "/work/proj" {
+				t.Errorf("Cwd = %q, want /work/proj", mp.Cwd)
+			}
+			if mp.ParentID != tc.wantPar {
+				t.Errorf("ParentID = %q, want %q", mp.ParentID, tc.wantPar)
+			}
+			if mp.Depth != tc.wantDepth {
+				t.Errorf("Depth = %d, want %d", mp.Depth, tc.wantDepth)
+			}
+
+			var raw map[string]any
+			if err := json.Unmarshal(e.Payload, &raw); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			_, hasParent := raw["parent_id"]
+			if hasParent != tc.wantKeys {
+				t.Errorf("parent_id present = %t, want %t: %s", hasParent, tc.wantKeys, e.Payload)
+			}
+			if !tc.wantKeys {
+				if _, ok := raw["depth"]; ok {
+					t.Errorf("depth present on a root session's metadata: %s", e.Payload)
+				}
+			}
+		})
+	}
+}
+
 // TestEntryAccessorWrongTypeErrors asserts calling a typed accessor on a
 // mismatched entry type returns a wrapped ErrEntryType.
 func TestEntryAccessorWrongTypeErrors(t *testing.T) {
