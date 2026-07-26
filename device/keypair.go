@@ -78,6 +78,10 @@ func KeyPairFromPrivate(priv [KeySize]byte) (*KeyPair, error) {
 // reach: it exists for durable storage at pairing time only (write it to the
 // daemon's key file, restore it with KeyPairFromPrivate). It must never be
 // logged, sent over a wire, or included in a diagnostic bundle.
+//
+// The returned array is a copy, so mutating it does not affect the keypair —
+// and equally, zeroing it does not scrub the original. The caller owns the
+// copy's lifetime and is responsible for not leaving it somewhere durable.
 func (kp *KeyPair) PrivateBytes() [KeySize]byte { return kp.private }
 
 // MarshalJSON emits only the public half, as {"public":"<base64>"}. The private
