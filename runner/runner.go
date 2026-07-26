@@ -31,6 +31,21 @@ const defaultSubBuffer = 256
 // session.resumed.
 const defaultReplay = 256
 
+// DefaultMaxDepth is the spawn-depth cap a Runner uses when
+// [Options.MaxDepth] is unset: a root session may spawn a child (depth 1), that
+// child another (depth 2), and so on down to depth 5, at which point [Spawn]
+// refuses. It bounds runaway self-spawning — an agent that spawns an agent that
+// spawns an agent — to a chain a human can still reason about, while leaving
+// room for the two or three levels a real delegation tree uses.
+const DefaultMaxDepth = 5
+
+// ErrMaxDepth is returned (wrapped, with the offending depth and cap) by
+// [Runner.Spawn] when the child would sit deeper than the runner's
+// [Runner.MaxDepth]. It is a sentinel so an embedder can match it with
+// [errors.Is] and render "depth cap reached" as its own outcome — a policy
+// refusal the operator can act on — rather than as an opaque failure.
+var ErrMaxDepth = errors.New("runner: spawn depth cap reached")
+
 // Options configures a Runner. Model, Cwd, and (for a fresh session) Root are
 // the only fields a caller normally sets; Provider, IDGen, and Clock are test
 // seams.
@@ -71,6 +86,33 @@ type Options struct {
 	// onto every tool-call event the runner emits so a consumer can attribute
 	// tool calls to the agent that ran them. Empty ⇒ un-attributed (the default).
 	Agent string
+
+	// ParentID is the id of the session that spawned this one, or empty for a
+	// root session. [Runner.Spawn] sets it (overriding whatever the caller put
+	// here), but an embedder that creates a child out-of-band — an operator
+	// running "new session, parented on that one" rather than an agent spawning
+	// its own worker — sets it directly instead. It is persisted in the
+	// journal's root meta entry, so the link survives a process restart and a
+	// roster can read it back with [session.MetaOf] without resuming the
+	// session. Pair it with Depth: the two are written as one fact (see
+	// [session.WithMetaParent]).
+	ParentID string
+	// Depth is this session's own parent-chain length — 0 for a root session,
+	// 1 for a session spawned by a root, and so on. It is the value MaxDepth is
+	// checked against at spawn time, and like ParentID it is persisted in the
+	// root meta entry and restored by [Resume], so the cap keeps holding across
+	// a daemon restart instead of silently resetting to 0. Set it directly only
+	// alongside ParentID, when creating a child out-of-band; [Runner.Spawn]
+	// computes it (parent depth + 1) and overrides whatever is here.
+	Depth int
+	// MaxDepth caps how deep [Runner.Spawn] will grow the session tree: a spawn
+	// whose child would sit deeper than this is refused with [ErrMaxDepth]
+	// before anything is created. <= 0 (the default) uses [DefaultMaxDepth].
+	// The cap is policy, not journal state — it comes from these Options on
+	// every New AND Resume, so an embedder can change it between runs — and
+	// [Runner.Spawn] propagates it to a child that does not set its own, so one
+	// value governs a whole chain rather than resetting at each level.
+	MaxDepth int
 
 	// Guard decides how each tool call is handled before execution
 	// (run-contained / ask / deny). Nil ⇒ every tool runs uncontained, the
@@ -124,6 +166,13 @@ type Runner struct {
 	effort   string
 	maxIters int
 	agent    string
+
+	// parentID and depth are this session's lineage, read back from the
+	// journal's root meta entry at construction (see build); maxDepth is the
+	// spawn cap, resolved from Options.
+	parentID string
+	depth    int
+	maxDepth int
 
 	provider provider.Provider
 	tools    loop.ToolRegistry
@@ -179,7 +228,18 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 	// daemon restart — session/list on a disk-only session needs it to
 	// cwd-filter without resuming. Resume never hits this path: it opens an
 	// existing journal that already has its meta entry.
-	if _, err := journal.Append(session.NewMetaEntry(opts.Cwd)); err != nil {
+	//
+	// A child session additionally records its lineage there, so a roster can
+	// classify it with session.MetaOf after a restart. The option is passed
+	// ONLY when there is a parent: a root session's metadata stays byte-for-byte
+	// what it was before these fields existed rather than carrying
+	// parent_id:""/depth:0 noise (omitempty would elide it anyway — this makes
+	// the intent explicit at the call site).
+	var metaOpts []session.MetaOpt
+	if opts.ParentID != "" {
+		metaOpts = append(metaOpts, session.WithMetaParent(opts.ParentID, opts.Depth))
+	}
+	if _, err := journal.Append(session.NewMetaEntry(opts.Cwd, metaOpts...)); err != nil {
 		_ = journal.Close()
 		if opts.Store == nil {
 			_ = store.Close()
@@ -192,6 +252,11 @@ func New(ctx context.Context, opts Options) (*Runner, error) {
 // Resume builds a Runner around the existing journal for id, publishing
 // session.resumed once the runner is live. The provider is resolved before the
 // journal is opened so a credential misconfiguration fails before session.resumed.
+//
+// A resumed child session recovers its lineage — [Runner.ParentID] and
+// [Runner.Depth] — from the journal's root meta entry, so the spawn-depth cap
+// still holds after a daemon restart. The cap itself (Options.MaxDepth) is
+// policy and comes from opts, not the journal.
 func Resume(ctx context.Context, id string, opts Options) (*Runner, error) {
 	prov, err := resolveProvider(ctx, opts)
 	if err != nil {
@@ -279,6 +344,22 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 	broker := event.NewBroker(event.WithReplay(defaultReplay))
 	journalSub := broker.Subscribe(event.FilterMustDeliver, defaultSubBuffer)
 
+	// Lineage comes from the journal's root meta entry, not from opts, so New
+	// and Resume cannot disagree: New wrote that entry from opts moments ago,
+	// and for Resume the journal is the ONLY record of a child's parent and
+	// depth — reading it here is what keeps a resumed child from reporting depth
+	// 0 and silently defeating the spawn cap across a restart. A journal with no
+	// meta entry, or one written before these fields existed, yields the zero
+	// value: a root session at depth 0, which is what it is.
+	meta, _ := session.MetaOf(journal.Entries())
+	// MaxDepth is policy rather than journal state, so it comes from opts on
+	// both paths — an embedder can raise or lower the cap between runs of the
+	// same session.
+	maxDepth := opts.MaxDepth
+	if maxDepth <= 0 {
+		maxDepth = DefaultMaxDepth
+	}
+
 	r := &Runner{
 		model:       opts.Model,
 		system:      opts.System,
@@ -286,6 +367,9 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 		effort:      opts.Params.Thinking.Effort,
 		maxIters:    opts.MaxIters,
 		agent:       opts.Agent,
+		parentID:    meta.ParentID,
+		depth:       meta.Depth,
+		maxDepth:    maxDepth,
 		provider:    prov,
 		tools:       tools,
 		guard:       opts.Guard,
@@ -310,6 +394,83 @@ func (r *Runner) ID() string { return r.journal.ID() }
 
 // JournalPath returns the session journal's JSONL file path.
 func (r *Runner) JournalPath() string { return r.journal.Path() }
+
+// ParentID returns the id of the session that spawned this one, or "" when this
+// is a root session. It is restored from the journal on [Resume], so it is
+// accurate for a session recovered after a restart.
+func (r *Runner) ParentID() string { return r.parentID }
+
+// Depth returns this session's parent-chain length: 0 for a root session, 1 for
+// a session spawned by a root, and so on. Like [Runner.ParentID] it survives
+// [Resume].
+//
+// It is exported because the SDK is not the only place a depth decision gets
+// made: an embedder that enforces its own spawn policy — a supervisor deciding
+// whether an agent may delegate at all — reads the current depth BEFORE it asks
+// for a child, instead of discovering the cap by attempting a spawn and catching
+// [ErrMaxDepth].
+func (r *Runner) Depth() int { return r.depth }
+
+// MaxDepth returns the spawn-depth cap in force for this runner: [Options.MaxDepth]
+// when set, else [DefaultMaxDepth].
+func (r *Runner) MaxDepth() int { return r.maxDepth }
+
+// Spawn creates a child session parented on r: a full session in its own right
+// — its own UUIDv7 journal, broker, provider, and tools, built by [New] from
+// opts — linked to this one. It is the seam a RUNNING agent's embedder uses to
+// delegate work to a subagent, and the SDK's whole contribution to the session
+// tree: it links, caps, and announces. It does not supervise.
+//
+// Four things are decided here rather than by the caller:
+//
+//   - Depth. The child sits at r.Depth()+1. If that exceeds [Runner.MaxDepth],
+//     Spawn returns an error wrapping [ErrMaxDepth] and creates NOTHING — the
+//     check runs before any journal exists, mirroring [New]'s fail-fast
+//     discipline (no orphan journal on disk for a refused spawn).
+//   - Lineage. opts.ParentID and opts.Depth are OVERWRITTEN with r.ID() and the
+//     computed depth. The parent is authoritative about its own children; a
+//     caller-supplied value is not honored, because a child that could name its
+//     own parent or depth could route around the cap.
+//   - The cap itself. opts.MaxDepth is inherited from the parent when the caller
+//     left it zero, so the cap propagates down a chain instead of resetting to
+//     [DefaultMaxDepth] at every level. A caller that deliberately sets it keeps
+//     its value.
+//   - Store ownership. When opts.Store is nil the child is given the PARENT's
+//     store, so the tree's journals land together and — load-bearing — the child
+//     gets ownsStore == false and will not close a store the parent owns (see
+//     [Options.Store]: an injected store's lifecycle belongs to its caller).
+//     Without this, the first child.Close() would tear the store out from under
+//     the parent.
+//
+// On success Spawn publishes a must-deliver [event.SessionSpawned] on the
+// PARENT's stream naming the child, its agent, and its depth — the notice a
+// roster watches to learn a child appeared.
+//
+// The caller owns the returned child's lifecycle and MUST Close it; closing the
+// parent does not close its children. Supervision — restart policy, cancellation
+// fan-out, the tree view — is application business logic and lives in the
+// embedder, not here.
+func (r *Runner) Spawn(ctx context.Context, opts Options) (*Runner, error) {
+	childDepth := r.Depth() + 1
+	if childDepth > r.MaxDepth() {
+		return nil, fmt.Errorf("runner: spawn child of session %s: %w: child depth %d exceeds cap %d", r.ID(), ErrMaxDepth, childDepth, r.MaxDepth())
+	}
+	opts.ParentID = r.ID()
+	opts.Depth = childDepth
+	if opts.MaxDepth <= 0 {
+		opts.MaxDepth = r.MaxDepth()
+	}
+	if opts.Store == nil {
+		opts.Store = r.store
+	}
+
+	child, err := New(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	r.broker.Publish(event.NewSessionSpawned(r.ID(), child.ID(), opts.Agent, childDepth))
+	return child, nil
+}
 
 // Fold returns the session's current folded context as provider messages —
 // the same context Prompt feeds the provider, exposed for read-only

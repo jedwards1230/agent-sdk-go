@@ -355,6 +355,37 @@ func ReadEntries(path string) ([]Entry, error) {
 	return readJournal(path, nil)
 }
 
+// MetaOf returns the decoded [MetaPayload] of the first [EntryMeta] entry in
+// entries — an append-order slice as [ReadEntries] or [Journal.Entries] returns
+// it — reporting false when the slice holds no meta entry or its payload fails
+// to decode.
+//
+// It is the read path that classifies a session WITHOUT resuming or folding it:
+// pair it with [ReadEntries] to learn a disk session's cwd, and whether it is a
+// root session or a child (ParentID/Depth), for a roster or tree view built
+// after a process restart. Resuming every session just to read its first line
+// would be the alternative.
+//
+// A journal written before a metadata field existed decodes with that field
+// zero — every [MetaPayload] field is omitempty — so an older session reads back
+// as a root session at depth 0, which is exactly what it is. A journal with no
+// meta entry at all (older still, or one built by hand) reports false rather
+// than an empty payload, so a caller can tell "no metadata recorded" from
+// "metadata recorded as empty".
+func MetaOf(entries []Entry) (MetaPayload, bool) {
+	for _, e := range entries {
+		if e.Type != EntryMeta {
+			continue
+		}
+		p, err := e.Meta()
+		if err != nil {
+			return MetaPayload{}, false
+		}
+		return p, true
+	}
+	return MetaPayload{}, false
+}
+
 // find scans every project directory under the store root for id + ".jsonl",
 // returning its path and owning project slug.
 func (s *FileStore) find(id string) (path, slug string, err error) {

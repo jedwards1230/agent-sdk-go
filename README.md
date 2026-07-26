@@ -86,7 +86,7 @@ r, err := runner.New(ctx, runner.Options{
 | `tool/` | Builtin tool registry: bash/read/edit/write/grep/glob/ls |
 | `session/` | Session identity (UUIDv7), turn execution, event emission · pluggable journal `Store`: `FileStore` (on-disk JSONL, default) and `MemStore` (in-memory, opt-in) |
 | `compose/` | Agent manifest (YAML) → wired session |
-| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`) assembling provider + tools + broker + loop + journal; `Options.ExtraTools` adds custom tools alongside the builtins, `Options.Store` swaps the journal store |
+| `runner/` | Batteries-included drivable session (`New`/`Resume`/`Prompt`/`Events`/`Fold`/`Cost`/`SetModel`/`Spawn`) assembling provider + tools + broker + loop + journal; `Options.ExtraTools` adds custom tools alongside the builtins, `Options.Store` swaps the journal store, `Spawn` parents a child session (depth-capped, announced as `session.spawned`) |
 | `acp/` | Clean-room Agent Client Protocol adapter (stdlib-only), a pure Event/Op projection; `session/new` accepts an optional `model` field |
 | `permission/` | Format-agnostic rule engine (`Rule`/`Engine`): deny > ask > allow, unmatched ⇒ ask, runtime grants |
 | `lsp/` | Server registry + JSON-RPC-over-stdio client + diagnostics seam |
@@ -116,7 +116,7 @@ Planned: `skill/`, `plugin/`, `mcp/` (M5).
 | **M2 · the daemon** ✅ | (in the consuming application) supervisor + TUI + native ACP; SDK ships `acp/` + `runner/` |
 | **M3 · guardrails** ✅ | Sandbox/approval seam, binary containment policy, tool-output spill files, headless exec, LSP diagnostics |
 | M4 · ACP v1 featureset expansion | Session-method projection (`session/list` dispatch, resume, modeled `set_config_option`), producers for the modeled rich blocks (`diff` from the edit/write tools), model-discovery types, capability modeling for the stretch set |
-| M5 · ecosystem | MCP client (tool-search-first), SKILL.md skills, plugin subprocess host, session tree / subagent spawn seam, vendor settings adapters, provider breadth |
+| M5 · ecosystem | MCP client (tool-search-first), SKILL.md skills, plugin subprocess host, session tree / subagent spawn seam ✅ (`Runner.Spawn`), vendor settings adapters, provider breadth |
 | M6 · auto + polish | Reviewer pipeline, WASM plugin tier, asset import, mDNS pairing |
 
 Point releases are cut between milestones; `docs/PRD.md` carries the per-release
