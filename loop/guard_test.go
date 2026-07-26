@@ -3,6 +3,7 @@ package loop_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jedwards1230/agent-sdk-go/event"
@@ -15,10 +16,18 @@ import (
 type stubGuard struct {
 	decision loop.Decision
 	rule     string
-	granted  []loop.ToolCall
+	// reEval, when non-nil, is returned by every Evaluate after the first —
+	// i.e. the loop's re-evaluation of an amended call.
+	reEval    *loop.Guarding
+	evaluated []loop.ToolCall
+	granted   []loop.ToolCall
 }
 
-func (g *stubGuard) Evaluate(_ context.Context, _ loop.ToolCall) loop.Guarding {
+func (g *stubGuard) Evaluate(_ context.Context, call loop.ToolCall) loop.Guarding {
+	g.evaluated = append(g.evaluated, call)
+	if g.reEval != nil && len(g.evaluated) > 1 {
+		return *g.reEval
+	}
 	return loop.Guarding{Decision: g.decision, Rule: g.rule}
 }
 
@@ -253,50 +262,130 @@ func TestGuardAskApprovedWithRememberGrants(t *testing.T) {
 	}
 }
 
-func TestGuardAskAmendedRunsToolWithReplacementInput(t *testing.T) {
-	b := event.NewBroker()
-	defer b.Close()
-	defer b.Subscribe(event.FilterAll, 256).Close()
-
-	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
-	cfg := gatedToolConfig(b, tool) // model's original input is {"a":1}
-	cfg.Guard = &stubGuard{decision: loop.DecisionAsk, rule: "ask echo"}
+// TestGuardAskAmendedReEvaluated covers the amend contract: replacement input
+// is re-evaluated through the guard as a fresh request, a deny on
+// re-evaluation rejects the call outright (no re-prompt), and Remember is
+// never honored for an amend.
+func TestGuardAskAmendedReEvaluated(t *testing.T) {
 	amended := json.RawMessage(`{"a":2}`)
-	cfg.Approver = stubApprover{reply: loop.Reply{Verdict: event.VerdictAllow, Input: amended}}
+	tests := []struct {
+		name        string
+		reEval      loop.Guarding
+		remember    bool
+		wantRuns    int
+		wantVerdict event.Verdict
+		wantRule    string
+		wantBlocked string // substring of the blocked tool_result; "" ⇒ ran
+	}{
+		{
+			name:        "re-evaluated ask proceeds with the amended input",
+			reEval:      loop.Guarding{Decision: loop.DecisionAsk, Rule: "ask echo"},
+			wantRuns:    1,
+			wantVerdict: event.VerdictAllow,
+			wantRule:    "amended: ask echo",
+		},
+		{
+			name:        "re-evaluated contained proceeds with the amended input",
+			reEval:      loop.Guarding{Decision: loop.DecisionRunContained, Rule: "allow echo"},
+			wantRuns:    1,
+			wantVerdict: event.VerdictAllow,
+			wantRule:    "amended: allow echo",
+		},
+		{
+			name:        "re-evaluated deny rejects without re-prompting",
+			reEval:      loop.Guarding{Decision: loop.DecisionDeny, Rule: "deny echo"},
+			wantRuns:    0,
+			wantVerdict: event.VerdictDeny,
+			wantRule:    "amend-denied: deny echo",
+			wantBlocked: "amended input denied by policy",
+		},
+		{
+			name:        "remember is dropped on an allowed amend",
+			reEval:      loop.Guarding{Decision: loop.DecisionAsk, Rule: "ask echo"},
+			remember:    true,
+			wantRuns:    1,
+			wantVerdict: event.VerdictAllow,
+			wantRule:    "amended: ask echo (remember ignored: amended)",
+		},
+		{
+			name:        "remember is dropped on a denied amend",
+			reEval:      loop.Guarding{Decision: loop.DecisionDeny, Rule: "deny echo"},
+			remember:    true,
+			wantRuns:    0,
+			wantVerdict: event.VerdictDeny,
+			wantRule:    "amend-denied: deny echo",
+			wantBlocked: "amended input denied by policy",
+		},
+		{
+			name:        "unrecognized re-evaluated decision fails closed",
+			reEval:      loop.Guarding{Decision: loop.Decision(99), Rule: "bogus"},
+			wantRuns:    0,
+			wantVerdict: event.VerdictDeny,
+			wantRule:    "amend-denied: bogus",
+			wantBlocked: "unknown guard decision on amended input",
+		},
+	}
 
-	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	if tool.runs != 1 {
-		t.Fatalf("tool.runs = %d, want 1 (amended allow runs the tool)", tool.runs)
-	}
-	if string(tool.gotIn) != string(amended) {
-		t.Errorf("tool input = %s, want the amended input %s", tool.gotIn, amended)
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := event.NewBroker()
+			defer b.Close()
+			sub := b.Subscribe(event.FilterAll, 256)
 
-func TestGuardAskAmendedRememberGrantsAmendedCall(t *testing.T) {
-	b := event.NewBroker()
-	defer b.Close()
-	defer b.Subscribe(event.FilterAll, 256).Close()
+			tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
+			guard := &stubGuard{decision: loop.DecisionAsk, rule: "ask echo", reEval: &tt.reEval}
+			cfg := gatedToolConfig(b, tool) // model's original input is {"a":1}
+			cfg.Guard = guard
+			cfg.Approver = stubApprover{reply: loop.Reply{
+				Verdict:  event.VerdictAllow,
+				Remember: tt.remember,
+				Input:    amended,
+			}}
 
-	tool := &fakeTool{name: "echo", result: loop.ToolResult{Content: "ok"}}
-	guard := &stubGuard{decision: loop.DecisionAsk, rule: "ask echo"}
-	cfg := gatedToolConfig(b, tool)
-	cfg.Guard = guard
-	amended := json.RawMessage(`{"a":2}`)
-	cfg.Approver = stubApprover{reply: loop.Reply{Verdict: event.VerdictAllow, Remember: true, Input: amended}}
+			res, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(guard.evaluated) != 2 {
+				t.Fatalf("guard evaluated %d call(s), want 2 (original + amended)", len(guard.evaluated))
+			}
+			if string(guard.evaluated[1].Input) != string(amended) {
+				t.Errorf("re-evaluated input = %s, want the amended input %s", guard.evaluated[1].Input, amended)
+			}
+			if tool.runs != tt.wantRuns {
+				t.Errorf("tool.runs = %d, want %d", tool.runs, tt.wantRuns)
+			}
+			if tt.wantRuns > 0 && string(tool.gotIn) != string(amended) {
+				t.Errorf("tool input = %s, want the amended input %s", tool.gotIn, amended)
+			}
+			// An amend is never remembered, whatever the re-evaluation says.
+			if len(guard.granted) != 0 {
+				t.Errorf("granted = %+v, want no grant for an amended call", guard.granted)
+			}
 
-	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	// A remembered amend grants the call the human approved (amended input),
-	// not the model's original.
-	if len(guard.granted) != 1 {
-		t.Fatalf("granted = %+v, want exactly one grant", guard.granted)
-	}
-	if string(guard.granted[0].Input) != string(amended) {
-		t.Errorf("granted input = %s, want the amended input %s", guard.granted[0].Input, amended)
+			trBlock := res.Messages[2].Content[0]
+			if tt.wantBlocked != "" {
+				if !trBlock.IsError {
+					t.Errorf("expected an error tool_result for the rejected amend, got %+v", trBlock)
+				}
+				if !strings.Contains(trBlock.ToolResult, tt.wantBlocked) {
+					t.Errorf("tool_result = %q, want it to mention %q", trBlock.ToolResult, tt.wantBlocked)
+				}
+			} else if trBlock.IsError {
+				t.Errorf("expected a successful tool_result, got %+v", trBlock)
+			}
+
+			d := drainSub(sub)
+			if countKind(d.kinds, event.KindPermissionRequested) != 1 {
+				t.Errorf("want exactly 1 permission.requested (a deny must not re-prompt), got %v", d.kinds)
+			}
+			if len(d.resolved) != 1 {
+				t.Fatalf("resolved = %+v, want exactly 1", d.resolved)
+			}
+			if d.resolved[0].Verdict != tt.wantVerdict || d.resolved[0].Rule != tt.wantRule {
+				t.Errorf("resolved = {%v, %q}, want {%v, %q}", d.resolved[0].Verdict, d.resolved[0].Rule, tt.wantVerdict, tt.wantRule)
+			}
+		})
 	}
 }
 
