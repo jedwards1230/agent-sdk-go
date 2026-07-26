@@ -484,10 +484,10 @@ func (r *runner) gate(ctx context.Context, call ToolCall) (ToolCall, provider.Co
 
 // awaitApproval emits permission.requested and, if an Approver is configured,
 // awaits its reply; both a missing Approver and an Await error fail closed
-// (deny). On an amended allow (reply carries replacement Input) it returns the
-// call with the human-edited input substituted, so the tool runs with the
-// arguments the human approved rather than the model's original ones — the
-// human's edit is a deliberate override of the input the guard evaluated.
+// (deny). A plain allow/deny resolves against the guarding g already computed.
+// An amended allow (reply carries replacement Input) is NOT a modifier on this
+// settled decision: it is handed to approveAmended, which re-evaluates the
+// amended call through the guard before anything is published or run.
 func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (ToolCall, provider.ContentBlock, bool) {
 	spec := g.Spec
 	if spec == nil {
@@ -503,21 +503,62 @@ func (r *runner) awaitApproval(ctx context.Context, call ToolCall, g Guarding) (
 		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, g.Rule))
 		return call, r.finishBlocked(call, "permission await: "+err.Error()), false
 	}
-	r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, reply.Verdict, g.Rule))
-	if reply.Verdict == event.VerdictAllow {
-		// Substitute the amended input first so a remembered amend grants the
-		// call the human actually approved, not the model's original.
-		if len(reply.Input) > 0 {
-			call.Input = reply.Input
-		}
-		if reply.Remember {
-			if gr, ok := r.cfg.Guard.(Granter); ok {
-				gr.Grant(call)
-			}
-		}
-		return call, provider.ContentBlock{}, true
+	// Re-evaluate an amend BEFORE resolving, so a client never sees
+	// resolved(allow) followed by a blocked call.
+	if reply.Verdict == event.VerdictAllow && len(reply.Input) > 0 {
+		return r.approveAmended(ctx, call, reply)
 	}
-	return call, r.finishBlocked(call, "denied by user"), false
+	r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, reply.Verdict, g.Rule))
+	if reply.Verdict != event.VerdictAllow {
+		return call, r.finishBlocked(call, "denied by user"), false
+	}
+	if reply.Remember {
+		if gr, ok := r.cfg.Guard.(Granter); ok {
+			gr.Grant(call)
+		}
+	}
+	return call, provider.ContentBlock{}, true
+}
+
+// approveAmended handles an allow reply carrying replacement input: the
+// amended call is re-evaluated through the guard as a fresh request, and only
+// then resolved.
+//
+// A deny on re-evaluation rejects the call outright rather than re-prompting:
+// a deny rule is a policy floor the static-deny path never offers a human
+// either, so re-prompting would hand the operator a decision the policy says
+// is not theirs. A DecisionAsk on re-evaluation is already satisfied — the
+// operator authored and approved this exact input in the same round trip,
+// which is what an ask resolves — so it proceeds like DecisionRunContained.
+// An unrecognized decision fails closed, exactly like gate's default.
+//
+// Remember is never honored for an amend: Engine.Grant is append-only,
+// unattributed and untimed, and the remember affordance the operator saw was
+// scoped to the prompt describing the ORIGINAL call, so a mistaken standing
+// grant on an amended command would be unrecoverable for the session. The
+// dropped bit is surfaced on the resolved event's rule label rather than
+// silently ignored.
+func (r *runner) approveAmended(ctx context.Context, call ToolCall, reply Reply) (ToolCall, provider.ContentBlock, bool) {
+	amended := call
+	amended.Input = reply.Input
+	reEval := r.cfg.Guard.Evaluate(ctx, amended)
+	switch reEval.Decision {
+	case DecisionRunContained, DecisionAsk:
+		// The executed call was assessed under the re-evaluated rule; report
+		// that one, not the rule the original call matched.
+		label := "amended: " + reEval.Rule
+		if reply.Remember {
+			label += " (remember ignored: amended)"
+		}
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictAllow, label))
+		return amended, provider.ContentBlock{}, true
+	case DecisionDeny:
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, "amend-denied: "+reEval.Rule))
+		return amended, r.finishBlocked(amended, "amended input denied by policy"), false
+	default:
+		r.broker().Publish(event.NewPermissionResolved(r.cfg.SessionID, call.ID, event.VerdictDeny, "amend-denied: "+reEval.Rule))
+		return amended, r.finishBlocked(amended, "unknown guard decision on amended input"), false
+	}
 }
 
 // finishBlocked emits tool.call.finished for a gated-off call and returns the

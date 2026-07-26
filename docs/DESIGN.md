@@ -287,8 +287,9 @@ raises an approval request. There is no third "run uncontained" outcome.
   - `DecisionAsk` — the loop publishes `permission.requested`, then (if
     `Config.Approver` is set) blocks on `Approver.Await(ctx, call.ID)` for the
     matching `permission.reply`, then publishes `permission.resolved{verdict}`.
-    An allow reply lets the call proceed (and grants a remember, if asked); a
-    deny reply blocks it the same way a static deny does.
+    A plain allow reply lets the call proceed (and grants a remember, if asked);
+    a deny reply blocks it the same way a static deny does; an *amended* allow
+    is re-evaluated through the guard first (see AMEND below).
 - **Fail-closed everywhere permission is uncertain**: a nil `Config.Approver`
   under `DecisionAsk` denies immediately after emitting the request (nothing
   can await a reply); an `Approver.Await` error (including a cancelled ctx)
@@ -309,10 +310,27 @@ why":
   allows the *amended* call. It resolves like the allow option it names (the
   chosen kind still decides remember-ness), but the replacement input rides
   along: `acp.ToPermissionReply` projects it onto `event.PermissionReply.Input`
-  → `loop.Reply.Input`, and the loop substitutes it into the call before exec
-  (a deliberate human override of the input the guard evaluated). A remembered
-  amend grants the amended call, not the model's original. A nil `Input` is the
-  unchanged plain allow/deny path — the whole extension is additive.
+  → `loop.Reply.Input`. An amend is **not** an override of the guard: the loop
+  re-evaluates the amended call through `Guard.Evaluate` as a *fresh* request
+  before running it (`runner.approveAmended`).
+  - `DecisionDeny` on re-evaluation **rejects** the call — no re-prompt. A deny
+    rule is a policy floor the static-deny path never offers a human either, so
+    re-prompting would hand the operator a decision the policy says is not
+    theirs. The loop publishes `permission.resolved{deny, "amend-denied: <rule>"}`
+    then a blocked `tool.call.finished`.
+  - `DecisionAsk` / `DecisionRunContained` proceed — an ask is already satisfied
+    (the operator authored *and* approved this exact input in one round trip).
+    The loop publishes `permission.resolved{allow, "amended: <rule>"}`, carrying
+    the **re-evaluated** rule, since that is what the executed call was assessed
+    under. An unrecognized decision fails closed like `gate`'s default.
+  - **`Remember` is not honored for an amend**: `Engine.Grant` is append-only,
+    unattributed and untimed, and the remember affordance the operator saw was
+    scoped to the prompt describing the *original* call. The dropped bit is made
+    legible on the label (`"amended: <rule> (remember ignored: amended)"`) rather
+    than silently ignored. A plain allow keeps `Remember` unchanged.
+  - Re-evaluation happens **before** `permission.resolved` is published, so a
+    client never sees `resolved{allow}` followed by a blocked call. A nil `Input`
+    is the unchanged plain allow/deny path — the whole extension is additive.
 - **Explain** — `session/explain_permission` is a read-only rationale query
   (`acp.ExplainPermissionRequest`/`ExplainPermissionResponse` +
   `PermissionRationale{Reason, Policy, Source, Trace}`) the client sends while a
