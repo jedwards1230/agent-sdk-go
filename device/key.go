@@ -74,8 +74,17 @@ func ParsePublicKey(s string) (PublicKey, error) {
 	return k, nil
 }
 
-// Valid reports whether k is a non-zero key. The all-zero key is rejected: it
-// is the X25519 identity element, whose shared secret is degenerate.
+// Valid reports whether k is a non-zero key.
+//
+// Parsing and validity are deliberately separate. ParsePublicKey accepts the
+// all-zero key — it is a well-formed 32-byte encoding, and callers use it to
+// mean "no key advertised" (see the announce payload, where a key is optional).
+// What the zero key is not is *usable*: it is the X25519 identity element,
+// whose shared secret is degenerate, so Seal and Open reject it at the point of
+// key agreement.
+//
+// So: the zero key parses, reports Valid() == false, and never reaches a
+// cryptographic operation. Test presence with Valid, not with a parse error.
 func (k PublicKey) Valid() bool { return k != PublicKey{} }
 
 // String returns the raw URL-safe unpadded base64 encoding of k, the wire form
