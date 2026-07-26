@@ -91,11 +91,17 @@ type ForkPayload struct {
 
 // MetaPayload is the [Entry.Payload] shape for [EntryMeta] entries: durable
 // session-create metadata. Extensible — future session metadata rides here
-// alongside Cwd.
+// alongside Cwd, as optional omitempty fields set through a [MetaOpt], so an
+// older journal reads back unchanged.
 type MetaPayload struct {
 	// Cwd is the working directory the session was created for.
 	Cwd string `json:"cwd,omitempty"`
 }
+
+// MetaOpt sets an optional field on the [MetaPayload] a [NewMetaEntry] builds.
+// Metadata fields are additive: each rides here as its own option so a new
+// field never changes NewMetaEntry's signature.
+type MetaOpt func(*MetaPayload)
 
 // ErrEntryType indicates a typed accessor ([Entry.Message], [Entry.ToolRound],
 // [Entry.Compaction], [Entry.Fork]) was called on an entry of a different
@@ -191,12 +197,16 @@ func newForkPointEntry(at string) Entry {
 	}
 }
 
-// NewMetaEntry constructs a session-metadata entry carrying cwd. It is
-// intended to be the first entry appended to a freshly created journal (see
-// [runner.New]), so it becomes the tree's root. ID, Parent, and Time are left
-// zero; [Journal.Append] fills them in.
-func NewMetaEntry(cwd string) Entry {
+// NewMetaEntry constructs a session-metadata entry carrying cwd, plus
+// whatever optional metadata opts set. It is intended to be the first entry
+// appended to a freshly created journal (see [runner.New]), so it becomes the
+// tree's root. ID, Parent, and Time are left zero; [Journal.Append] fills them
+// in.
+func NewMetaEntry(cwd string, opts ...MetaOpt) Entry {
 	payload := MetaPayload{Cwd: cwd}
+	for _, o := range opts {
+		o(&payload)
+	}
 	return Entry{
 		Type:    EntryMeta,
 		Payload: marshalPayload(payload),
