@@ -65,10 +65,10 @@ func ParsePublicKey(s string) (PublicKey, error) {
 	var k PublicKey
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return k, fmt.Errorf("device: parse public key: %w", err)
+		return k, fmt.Errorf("device: parse public key: %w: %w", ErrInvalidKey, err)
 	}
 	if len(b) != KeySize {
-		return k, fmt.Errorf("device: parse public key: got %d bytes, want %d", len(b), KeySize)
+		return k, fmt.Errorf("device: parse public key: %w: got %d bytes, want %d", ErrInvalidKey, len(b), KeySize)
 	}
 	copy(k[:], b)
 	return k, nil
