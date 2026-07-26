@@ -138,7 +138,9 @@ type PermissionReply struct {
 	// Input, when non-nil, is replacement tool input supplied with an amended
 	// allow (the ACP amend-before-approve outcome): an allow whose call runs
 	// with this input in place of the model's original arguments. It is nil for
-	// a plain allow/deny, and is ignored unless Verdict is VerdictAllow.
+	// a plain allow/deny, and is ignored unless Verdict is VerdictAllow. The
+	// amended call is re-evaluated by the guard as a fresh request (a deny
+	// rejects it), and Remember is not honored alongside it.
 	Input json.RawMessage
 }
 

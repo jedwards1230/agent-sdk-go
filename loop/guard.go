@@ -43,7 +43,8 @@ type Guard interface {
 }
 
 // Granter is an optional Guard capability: record a remembered allow so future
-// identical calls skip the ask. Persistence policy is the guard's concern.
+// identical calls skip the ask. Persistence policy is the guard's concern. The
+// loop calls Grant only for a plain (non-amended) allow — see Reply.Input.
 type Granter interface {
 	Grant(call ToolCall)
 }
@@ -57,6 +58,11 @@ type Reply struct {
 	// allow: the call runs with this input in place of the model's original
 	// arguments. It is honored only when Verdict is event.VerdictAllow; a nil
 	// Input leaves the original call unchanged (the plain allow/deny path).
+	//
+	// An amend is not an override of the guard: the amended call is
+	// re-evaluated as a fresh request, and a DecisionDeny on re-evaluation
+	// rejects it outright (no re-prompt). Remember is NOT honored for an
+	// amend — the loop never Grants an amended call.
 	Input json.RawMessage
 }
 
