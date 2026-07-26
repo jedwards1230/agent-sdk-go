@@ -5,6 +5,35 @@
 // This package is types only. It opens no socket, fetches no key, and knows
 // nothing about accounts, rosters, or pairing — those are the consuming
 // application's concerns.
+//
+// # Construction
+//
+// Envelopes use NaCl box (golang.org/x/crypto/nacl/box): X25519 key agreement
+// plus XSalsa20-Poly1305 authenticated encryption, pairwise from a sender
+// keypair to a recipient public key. No key derivation, framing, or handshake
+// is invented here.
+//
+// # Revocation: an assumption, not a settled decision
+//
+// The vocabulary in this package ASSUMES revocation means dropping a revoked
+// device's public key from the account's authorized set. The authorized set is
+// the consuming application's data — this package deliberately ships no account
+// model, no roster, and no key store. PublicKey.ID is the handle a revocation
+// list would use.
+//
+// That assumption is cheap but has a real cost: dropping a key needs no
+// re-fetch and no coordination, yet gives NO forward secrecy. A stolen device
+// can still open every envelope it already holds, and remains able to open
+// anything sent to it until the drop propagates to every sender. The
+// alternative — rotating a shared group key on revocation — gives forward
+// secrecy against a stolen device but forces every remaining device to re-fetch
+// the new key before it can talk again.
+//
+// This is an open protocol commitment that the project owner must confirm
+// before the wire format is fixed. Nothing here forecloses either answer: Seal
+// and Open are pairwise (sender keypair to recipient public key) and assume no
+// single long-lived per-account key, so group-key rotation remains
+// implementable on top without changing these types.
 package device
 
 import (
@@ -36,17 +65,26 @@ func ParsePublicKey(s string) (PublicKey, error) {
 	var k PublicKey
 	b, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return k, fmt.Errorf("device: parse public key: %w", err)
+		return k, fmt.Errorf("device: parse public key: %w: %w", ErrInvalidKey, err)
 	}
 	if len(b) != KeySize {
-		return k, fmt.Errorf("device: parse public key: got %d bytes, want %d", len(b), KeySize)
+		return k, fmt.Errorf("device: parse public key: %w: got %d bytes, want %d", ErrInvalidKey, len(b), KeySize)
 	}
 	copy(k[:], b)
 	return k, nil
 }
 
-// Valid reports whether k is a non-zero key. The all-zero key is rejected: it
-// is the X25519 identity element, whose shared secret is degenerate.
+// Valid reports whether k is a non-zero key.
+//
+// Parsing and validity are deliberately separate. ParsePublicKey accepts the
+// all-zero key — it is a well-formed 32-byte encoding, and callers use it to
+// mean "no key advertised" (see the announce payload, where a key is optional).
+// What the zero key is not is *usable*: it is the X25519 identity element,
+// whose shared secret is degenerate, so Seal and Open reject it at the point of
+// key agreement.
+//
+// So: the zero key parses, reports Valid() == false, and never reaches a
+// cryptographic operation. Test presence with Valid, not with a parse error.
 func (k PublicKey) Valid() bool { return k != PublicKey{} }
 
 // String returns the raw URL-safe unpadded base64 encoding of k, the wire form
