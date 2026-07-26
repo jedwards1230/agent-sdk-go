@@ -56,7 +56,7 @@ func Unmarshal(data []byte) (Event, error) {
 	case KindSessionResumed:
 		return SessionResumed{m}, nil
 	case KindSessionForked:
-		return SessionForked{m}, nil
+		return SessionForked{meta: m, At: w.At, Label: w.Label}, nil
 	case KindSessionCompacted:
 		return SessionCompacted{m}, nil
 	case KindSessionKilled:
@@ -135,6 +135,10 @@ type wireEvent struct {
 	SessionID string `json:"session_id"`
 	Seq       uint64 `json:"seq"`
 	Time      string `json:"time"`
+
+	// session.forked
+	At    string `json:"at"`
+	Label string `json:"label"`
 
 	// session.error
 	Err   string `json:"error"`

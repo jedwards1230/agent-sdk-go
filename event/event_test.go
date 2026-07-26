@@ -8,6 +8,73 @@ import (
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
 
+// TestSessionForkedMarshal asserts the session.forked event reports the right
+// kind and tier, carries the branch point (at) and the checkpoint label it was
+// resolved from on the wire, and omits each when empty — so a fork with
+// neither is wire-identical to the bare envelope the event carried before the
+// fields existed.
+func TestSessionForkedMarshal(t *testing.T) {
+	cases := []struct {
+		name       string
+		at, label  string
+		want       map[string]any // wire fields expected present, with their values
+		wantAbsent []string       // wire fields expected omitted entirely
+	}{
+		{
+			name:  "at and label",
+			at:    "entry-7",
+			label: "before-refactor",
+			want:  map[string]any{"at": "entry-7", "label": "before-refactor"},
+		},
+		{
+			name:       "at only (raw entry id)",
+			at:         "entry-7",
+			want:       map[string]any{"at": "entry-7"},
+			wantAbsent: []string{"label"},
+		},
+		{
+			name:       "neither (bare envelope)",
+			wantAbsent: []string{"at", "label"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ev := event.NewSessionForked(sid, tc.at, tc.label)
+			if ev.Kind() != event.KindSessionForked {
+				t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionForked)
+			}
+			if ev.Tier() != event.TierMustDeliver {
+				t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+			}
+			raw, err := json.Marshal(ev)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var m map[string]any
+			if err := json.Unmarshal(raw, &m); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if m["type"] != event.KindSessionForked {
+				t.Errorf("type = %v, want %q", m["type"], event.KindSessionForked)
+			}
+			if m["session_id"] != sid {
+				t.Errorf("session_id = %v, want %q", m["session_id"], sid)
+			}
+			for k, want := range tc.want {
+				if got := m[k]; got != want {
+					t.Errorf("%s = %v, want %v: %s", k, got, want, raw)
+				}
+			}
+			for _, k := range tc.wantAbsent {
+				if _, ok := m[k]; ok {
+					t.Errorf("%s present for empty value: %s", k, raw)
+				}
+			}
+		})
+	}
+}
+
 // TestSessionInfoUpdatedMarshal asserts the additive session.info event carries
 // its title on the wire, is must-deliver, and reports the right kind.
 func TestSessionInfoUpdatedMarshal(t *testing.T) {
