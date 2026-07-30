@@ -19,7 +19,7 @@ is unchanged.
 
 | # | Piece | State | PR |
 |---|---|---|---|
-| 1 | `Runner.Compact` seam (`#89`) | in flight | — |
+| 1 | `Runner.Compact` seam (`#89`) | in review | [#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
 | 4 | Search `Provider` interface + Brave / SearXNG | pending | — |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
