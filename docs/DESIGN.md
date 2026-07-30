@@ -492,6 +492,54 @@ discipline as tool/MCP index-first discovery.
   as a `Diagnostic`); a frontmatter `name` containing a path separator or a
   `.`/`..` segment is rejected at load time, before it can become a landmine
   for any embedder-side code that later joins it onto a path.
+## Web search providers (M7)
+
+`search/` is an optional SDK package (extension tier 2 — see *Extension
+tiers*): it performs real network I/O, so nothing in the SDK core imports it.
+It ships a vendor-neutral `Provider` interface, two backend implementations,
+and a name-keyed factory registry that lets a third backend be added without
+touching this package.
+
+- **Interface.** `Provider` is `Search(ctx, query string, opts Options)
+  (*Results, error)` plus `Name() string`. `Options{MaxResults int}` (zero =
+  provider default) configures one call. `Results{Query, Provider, Items
+  []Result, Truncated bool}` and `Result{Rank, Title, URL, Snippet}` are
+  designed to serve both a human-rendered view and a lossless projection into
+  a model-facing tool result — nothing on `Results` requires a caller to go
+  back to the provider for context.
+- **Bounding (context transparency).** A search returning many full-text
+  snippets is a context bomb if unbounded. `DefaultMaxResults` (10) is the
+  per-call default absent config; `MaxResultsCeiling` (25) is a hard clamp
+  `ClampMaxResults` applies regardless of what `Config.MaxResults` or
+  `Options.MaxResults` request, so a misconfigured value cannot blow the
+  budget — a caller needing more results pages via repeated calls instead.
+  `DefaultSnippetLimit` (400 runes) bounds each `Result.Snippet` via
+  `TruncateSnippet`, so one verbose backend description cannot dominate a
+  payload the way an unbounded count would. Both implementations apply these
+  before returning.
+- **Credentials/endpoint are `Config`, never SDK-chosen.** `Config{APIKey,
+  BaseURL, HTTPClient, MaxResults}` is the only way a backend learns its
+  auth material and endpoint — no package reads an environment variable of
+  its own choosing, and no backend defaults `BaseURL` to a real instance.
+  `brave.New` requires `APIKey` (Brave rejects unauthenticated requests);
+  `searxng.New` requires `BaseURL` (a self-hosted instance has no universal
+  default) and treats `APIKey`, when set, as a bearer token for an
+  auth-proxied deployment — SearXNG itself has no native key concept.
+- **Registry.** `search.Register(name string, factory Factory)` adds a named
+  constructor to a package-level map; `search.Build(name, cfg)` dispatches to
+  it. Each backend calls `Register` from its own `init()`, so an embedder
+  wanting `"brave"` blank-imports `search/brave` and never touches a switch
+  statement inside `search` — the extension point `providers.Build`
+  approximates with a hardcoded dispatch, made fully open here. Registering a
+  duplicate name panics at init time (the `database/sql.Register` contract).
+- **Errors.** `*Error{Provider, Kind, StatusCode, Err}` classifies a failure
+  (`ErrKindConfig`/`Request`/`HTTP`/`Decode`) and unwraps to the underlying
+  cause, so `errors.Is(err, context.Canceled)` reaches through a cancelled
+  in-flight request the same way it does elsewhere in the SDK.
+- **Not wired anywhere.** This package defines the interface, backends, and
+  registry only — no `tool_search` tool, no loop/registry integration, no
+  MCP or skill surface. That projection (turning `*Results` into a model-
+  facing tool call) is a separate, not-yet-landed piece.
 
 ## Bulk-payload spill (M3)
 
@@ -863,6 +911,58 @@ strategy that made no model call still marshals a valid, mostly-empty event.
 `Instructions` field mirroring the method signature — additive, omitempty, so
 an existing bare `{session_id}` request is unaffected.
 
+## Index-first tool registry (M7, `toolindex/`)
+
+Federating many tool sources (MCP servers, plugins, builtins) into one
+`req.Tools = r.cfg.Tools.Specs()` call must not mean every schema rides every
+model call — that is the "context transparency" tenet applied to tool
+surfaces. `toolindex.Index` is the seam: a decorator satisfying `loop.
+ToolRegistry` (`Get` + `Specs`), so it drops straight into `Config.Tools` with
+zero loop changes. `tool.Tool` and `tool.Registry` are untouched; the decorator
+never even sees a `tool.Tool`, only the `provider.ToolSpec`s the wrapped
+registry's `Specs()` already returns — uniformity (builtin vs MCP vs plugin)
+is structural, not conventional, because the decorator has no way to tell
+them apart.
+
+**Two-phase construction.** `toolindex.New(opts)` builds the Index; `Index.
+SearchTool()` returns a `tool.Tool` for `tool_search` that the caller registers
+into the base `tool.Registry` **before** `Index.Wrap(base)` snapshots that
+registry's `Specs()` into the index's entries — otherwise `tool_search` itself
+would be unknown to the base. `Wrap` also fixes the always-resident name set
+(`Options.Resident`, plus `tool_search` itself forced resident — the discovery
+mechanism can never go dark) and panics on a second call, matching `tool.
+NewRegistry`'s construction-time-error contract.
+
+**`Specs()` ordering is the cache-safety property.** It returns resident
+(sorted) ++ promoted (promotion order) — appended, never merged into sorted
+order — so indices `[0..len(resident)-1]` stay byte-identical across a
+promotion; a provider's longest-cached-prefix match only has to reprice the
+promoted tail. Residency is monotonic: `Options.Resident` is fixed at `Wrap`,
+and the promoted set only grows.
+
+**`Get(name)`** delegates to the base for any name it knows, auto-promoting a
+non-resident hit — a model that already guessed a valid tool name is served,
+not punished for skipping search. Promotion is otherwise driven by
+`tool_search`'s `Run`, which batches its whole result set through one
+`Promote` call (N discoveries, one `Specs()`-tail rewrite) and states in its
+result text that those tools' schemas resolve starting next turn — never the
+schemas themselves, which would double-bill the tokens this package exists to
+save. `Rehydrate` gives a session-resume path the same monotonic promotion
+without replaying a search.
+
+**`Hint()` is two-tiered and returns a string, never injects.** At or below
+`Options.InlineMax` entries it inlines the whole `name — summary` index; above
+it, a per-`Source` roster (count + sample names) plus the `tool_search`
+instruction — a flat index over hundreds of federated tools runs to
+thousands of tokens on its own, so the roster tier keeps `Hint` itself small
+regardless of federated surface size. The embedder composes, replaces, or
+drops the returned string; that is how the "nothing enters context the
+embedder can't see and override" tenet is upheld here.
+
+**Deferred, by ratified scope.** No auditability layer (`turn.started.
+Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
+public surface expands to support it; that is a follow-on PR.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
@@ -905,7 +1005,8 @@ Three tiers, by trust and coupling:
 1. **Core** — hot path, security, or contract; compiled in (loop, broker,
    permission engine, session).
 2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
-   import (`mcp/` and the vendor settings loaders, both planned for M5).
+   import (`search/` ships M7; `mcp/` and the vendor settings loaders are
+   planned for M5).
    First-party and trusted, but not forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
    over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
