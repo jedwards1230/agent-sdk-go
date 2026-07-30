@@ -58,7 +58,14 @@ func Unmarshal(data []byte) (Event, error) {
 	case KindSessionForked:
 		return SessionForked{meta: m, At: w.At, Label: w.Label}, nil
 	case KindSessionCompacted:
-		return SessionCompacted{m}, nil
+		return SessionCompacted{
+			meta:              m,
+			ReplacesThrough:   w.ReplacesThrough,
+			MessagesCompacted: w.MessagesCompacted,
+			Model:             w.Model,
+			Usage:             w.Usage,
+			Summary:           w.Summary,
+		}, nil
 	case KindSessionKilled:
 		return SessionKilled{m}, nil
 	case KindSessionArchived:
@@ -141,6 +148,12 @@ type wireEvent struct {
 	// session.forked
 	At    string `json:"at"`
 	Label string `json:"label"`
+
+	// session.compacted (Usage below is shared with turn.finished)
+	ReplacesThrough   string `json:"replaces_through"`
+	MessagesCompacted int    `json:"messages_compacted"`
+	Model             string `json:"model"`
+	Summary           string `json:"summary"`
 
 	// session.error
 	Err   string `json:"error"`

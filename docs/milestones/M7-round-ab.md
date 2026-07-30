@@ -19,7 +19,7 @@ is unchanged.
 
 | # | Piece | State | PR |
 |---|---|---|---|
-| 1 | `Runner.Compact` seam (`#89`) | in flight | — |
+| 1 | `Runner.Compact` seam (`#89`) | in review | [#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
 | 4 | Search `Provider` interface + Brave / SearXNG | in flight | — |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
@@ -30,8 +30,11 @@ wiring and live verification are the deliverable there.
 
 ## Scope guards
 
-- **The SDK never imports application code.** `rg -rn gofer --include='*.go'` must
-  stay at zero hits, docs included. CI builds the SDK standalone.
+- **The SDK never imports application code.** `rg -n 'jedwards1230/gofer' -g '*.go' .`
+  and `go list -deps ./... | grep gofer` must both stay at zero hits — the build
+  graph, not the word: naming the consuming application in doc prose is fine and
+  often clarifying (see `docs/DESIGN.md`, `docs/PRD.md`). CI builds the SDK
+  standalone.
 - **MCP and search live as *optional* packages**, per the settled M3
   extension-tier decision (core → optional SDK package → subprocess plugin). Go
   compiles only what you import, so an optional networked package does not

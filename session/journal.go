@@ -224,6 +224,38 @@ func (j *Journal) Cost(reg PriceLookup) CostReport {
 	return cost(entries, reg)
 }
 
+// LastUsage returns the model and token usage of the most recently completed
+// turn-bearing entry within the session's CURRENT folded context — the same
+// walk [Journal.Fold] performs (HEAD back to root, or a compaction boundary),
+// so a fork-abandoned branch is never reported here even though it still
+// counts toward [Journal.Cost].
+//
+// It is the synchronous complement to a live turn-finished event on the
+// broker (which carries the identical usage the moment a turn settles, plus
+// the model's context-window size via the provider registry): a caller that
+// has not observed one yet in this process — most notably right after a
+// resume, before any new turn has run — reads it here instead. Pair the
+// returned model with the provider registry for a context-window size, the
+// same way a live turn-finished event derives one.
+//
+// ok is false when no entry in the current context carries usage: a fresh
+// session, or one whose only turns were dropped by a fork.
+func (j *Journal) LastUsage() (model string, usage provider.Usage, ok bool) {
+	j.mu.Lock()
+	entries := make([]Entry, len(j.entries))
+	copy(entries, j.entries)
+	j.mu.Unlock()
+
+	// chainFromHead is child→root order, so the first entry carrying usage IS
+	// the most recent one.
+	for _, e := range chainFromHead(entries) {
+		if e.Usage != nil {
+			return e.Model, *e.Usage, true
+		}
+	}
+	return "", provider.Usage{}, false
+}
+
 // Close closes the journal's append handle. It is idempotent: closing an
 // already-closed journal returns nil. Once closed, Append and Fork return
 // [ErrJournalClosed].
@@ -253,9 +285,13 @@ func (j *Journal) reopen(w JournalWriter) {
 	}
 }
 
-// fold implements the pure, lock-free half of [Journal.Fold] over a snapshot
-// of entries in append order.
-func fold(entries []Entry) []provider.Message {
+// chainFromHead walks parent links from HEAD back toward the root, collecting
+// in child→root order, and stops at (but includes) a compaction boundary —
+// exactly the entries that make up the session's CURRENT context. It is the
+// shared walk behind [fold] and [Journal.LastUsage], so both agree on what
+// "current context" means without duplicating the walk. Returns nil for an
+// empty journal.
+func chainFromHead(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return nil
 	}
@@ -265,8 +301,6 @@ func fold(entries []Entry) []provider.Message {
 		byID[e.ID] = i
 	}
 
-	// Walk parent links from HEAD back toward the root, collecting in
-	// child→root order; stop at (but include) a compaction boundary.
 	chain := make([]Entry, 0, len(entries))
 	cur := entries[len(entries)-1]
 	for {
@@ -279,6 +313,16 @@ func fold(entries []Entry) []provider.Message {
 			break // dangling parent: stop walking defensively
 		}
 		cur = entries[idx]
+	}
+	return chain
+}
+
+// fold implements the pure, lock-free half of [Journal.Fold] over a snapshot
+// of entries in append order.
+func fold(entries []Entry) []provider.Message {
+	chain := chainFromHead(entries)
+	if len(chain) == 0 {
+		return nil
 	}
 
 	out := make([]provider.Message, 0, len(chain))

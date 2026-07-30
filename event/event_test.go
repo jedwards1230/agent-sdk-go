@@ -75,6 +75,74 @@ func TestSessionForkedMarshal(t *testing.T) {
 	}
 }
 
+// TestSessionCompactedMarshal asserts the session.compacted event reports the
+// right kind and tier, carries the boundary/count/model/usage/summary a
+// renderer needs on the wire, and that usage is always present (unlike the
+// other fields, which are omitempty) since its zero value ("no model call was
+// made") is itself meaningful.
+func TestSessionCompactedMarshal(t *testing.T) {
+	usage := provider.Usage{InputTokens: 900, OutputTokens: 120}
+	ev := event.NewSessionCompacted(sid, "entry-9", 4, "test-model", usage, "condensed summary")
+
+	if ev.Kind() != event.KindSessionCompacted {
+		t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionCompacted)
+	}
+	if ev.Tier() != event.TierMustDeliver {
+		t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+	}
+
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]any{
+		"type":               event.KindSessionCompacted,
+		"session_id":         sid,
+		"replaces_through":   "entry-9",
+		"messages_compacted": float64(4),
+		"model":              "test-model",
+		"summary":            "condensed summary",
+	}
+	for k, v := range want {
+		if got := m[k]; got != v {
+			t.Errorf("%s = %v, want %v: %s", k, got, v, raw)
+		}
+	}
+	usageMap, ok := m["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("usage missing or wrong shape: %s", raw)
+	}
+	if got, want := usageMap["input_tokens"], float64(900); got != want {
+		t.Errorf("usage.input_tokens = %v, want %v", got, want)
+	}
+	if got, want := usageMap["output_tokens"], float64(120); got != want {
+		t.Errorf("usage.output_tokens = %v, want %v", got, want)
+	}
+
+	t.Run("no model call omits optional fields but keeps zero usage", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewSessionCompacted(sid, "", 0, "", provider.Usage{}, ""))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for _, k := range []string{"replaces_through", "messages_compacted", "model", "summary"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("%s present for empty/zero value: %s", k, raw)
+			}
+		}
+		if _, ok := m["usage"]; !ok {
+			t.Errorf("usage missing; want it present even when zero: %s", raw)
+		}
+	})
+}
+
 // TestSessionInfoUpdatedMarshal asserts the additive session.info event carries
 // its title on the wire, is must-deliver, and reports the right kind.
 func TestSessionInfoUpdatedMarshal(t *testing.T) {
