@@ -185,14 +185,27 @@ func (o ToolCancel) MarshalJSON() ([]byte, error) {
 	}{opEnvelope{o.Kind()}, o.SessionID, o.ID})
 }
 
-// SessionCompact requests compaction of a session's history.
-type SessionCompact struct{ SessionID string }
+// SessionCompact requests compaction of a session's history — the wire op
+// behind runner.Runner.Compact. Instructions, when non-empty, is threaded
+// through to the runner's summarization strategy (see runner.Summarizer,
+// runner.SummarizeRequest.Instructions) as guidance for what the summary
+// should preserve; empty uses the strategy's own default.
+type SessionCompact struct {
+	SessionID    string
+	Instructions string
+}
 
 // Kind returns OpSessionCompact.
 func (SessionCompact) Kind() string { return OpSessionCompact }
 
-// MarshalJSON encodes the envelope plus {session_id}.
-func (o SessionCompact) MarshalJSON() ([]byte, error) { return marshalSessionOp(o, o.SessionID) }
+// MarshalJSON encodes the envelope plus {session_id, instructions?}.
+func (o SessionCompact) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		opEnvelope
+		SessionID    string `json:"session_id"`
+		Instructions string `json:"instructions,omitempty"`
+	}{opEnvelope{o.Kind()}, o.SessionID, o.Instructions})
+}
 
 // SessionSetModel changes the model bound to a session.
 type SessionSetModel struct {
