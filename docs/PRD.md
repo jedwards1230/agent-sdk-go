@@ -66,6 +66,7 @@ plugin/      subprocess JSON-RPC host                 (M5)
 lsp/         server registry · diagnostics            (M3)
 mcp/         client (official go-sdk)                 (M5)
 search/      Provider iface · Brave + SearXNG backends · name-keyed registry (M7, optional)
+toolindex/   index-first loop.ToolRegistry decorator + tool_search  (M7)
 compose/     manifest → wired session
 acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```

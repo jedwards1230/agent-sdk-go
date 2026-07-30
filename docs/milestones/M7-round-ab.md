@@ -23,7 +23,7 @@ is unchanged.
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
 | 4 | Search `Provider` interface + Brave / SearXNG | **merged** | [#113](https://github.com/jedwards1230/agent-sdk-go/pull/113) |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
-| — | Index-first tool-registry contract | designed, not built | — |
+| — | Index-first tool-registry contract | **merged** | [#114](https://github.com/jedwards1230/agent-sdk-go/pull/114) |
 | — | Tool-index auditability layer | deferred to a follow-on PR — see Decisions | — |
 
 `lsp/` shipped in M3 and needs no SDK change this round — the application-side
