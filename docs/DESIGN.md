@@ -819,6 +819,58 @@ strategy that made no model call still marshals a valid, mostly-empty event.
 `Instructions` field mirroring the method signature — additive, omitempty, so
 an existing bare `{session_id}` request is unaffected.
 
+## Index-first tool registry (M7, `toolindex/`)
+
+Federating many tool sources (MCP servers, plugins, builtins) into one
+`req.Tools = r.cfg.Tools.Specs()` call must not mean every schema rides every
+model call — that is the "context transparency" tenet applied to tool
+surfaces. `toolindex.Index` is the seam: a decorator satisfying `loop.
+ToolRegistry` (`Get` + `Specs`), so it drops straight into `Config.Tools` with
+zero loop changes. `tool.Tool` and `tool.Registry` are untouched; the decorator
+never even sees a `tool.Tool`, only the `provider.ToolSpec`s the wrapped
+registry's `Specs()` already returns — uniformity (builtin vs MCP vs plugin)
+is structural, not conventional, because the decorator has no way to tell
+them apart.
+
+**Two-phase construction.** `toolindex.New(opts)` builds the Index; `Index.
+SearchTool()` returns a `tool.Tool` for `tool_search` that the caller registers
+into the base `tool.Registry` **before** `Index.Wrap(base)` snapshots that
+registry's `Specs()` into the index's entries — otherwise `tool_search` itself
+would be unknown to the base. `Wrap` also fixes the always-resident name set
+(`Options.Resident`, plus `tool_search` itself forced resident — the discovery
+mechanism can never go dark) and panics on a second call, matching `tool.
+NewRegistry`'s construction-time-error contract.
+
+**`Specs()` ordering is the cache-safety property.** It returns resident
+(sorted) ++ promoted (promotion order) — appended, never merged into sorted
+order — so indices `[0..len(resident)-1]` stay byte-identical across a
+promotion; a provider's longest-cached-prefix match only has to reprice the
+promoted tail. Residency is monotonic: `Options.Resident` is fixed at `Wrap`,
+and the promoted set only grows.
+
+**`Get(name)`** delegates to the base for any name it knows, auto-promoting a
+non-resident hit — a model that already guessed a valid tool name is served,
+not punished for skipping search. Promotion is otherwise driven by
+`tool_search`'s `Run`, which batches its whole result set through one
+`Promote` call (N discoveries, one `Specs()`-tail rewrite) and states in its
+result text that those tools' schemas resolve starting next turn — never the
+schemas themselves, which would double-bill the tokens this package exists to
+save. `Rehydrate` gives a session-resume path the same monotonic promotion
+without replaying a search.
+
+**`Hint()` is two-tiered and returns a string, never injects.** At or below
+`Options.InlineMax` entries it inlines the whole `name — summary` index; above
+it, a per-`Source` roster (count + sample names) plus the `tool_search`
+instruction — a flat index over hundreds of federated tools runs to
+thousands of tokens on its own, so the roster tier keeps `Hint` itself small
+regardless of federated surface size. The embedder composes, replaces, or
+drops the returned string; that is how the "nothing enters context the
+embedder can't see and override" tenet is upheld here.
+
+**Deferred, by ratified scope.** No auditability layer (`turn.started.
+Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
+public surface expands to support it; that is a follow-on PR.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
