@@ -23,7 +23,7 @@ is unchanged.
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
 | 4 | Search `Provider` interface + Brave / SearXNG | in flight | — |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
-| — | Index-first tool-registry contract | pending | — |
+| — | Index-first tool-registry contract | in review | [#114](https://github.com/jedwards1230/agent-sdk-go/pull/114) |
 
 `lsp/` shipped in M3 and needs no SDK change this round — the application-side
 wiring and live verification are the deliverable there.
