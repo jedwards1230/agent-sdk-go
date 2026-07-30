@@ -21,7 +21,7 @@ is unchanged.
 |---|---|---|---|
 | 1 | `Runner.Compact` seam (`#89`) | in flight | — |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
-| 4 | Search `Provider` interface + Brave / SearXNG | pending | — |
+| 4 | Search `Provider` interface + Brave / SearXNG | in flight | — |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
 | — | Index-first tool-registry contract | pending | — |
 
@@ -42,6 +42,12 @@ wiring and live verification are the deliverable there.
 - **Context transparency**: nothing enters the model's context the embedder
   cannot see and override. Tool and MCP schemas load **index-first**, full schemas
   on demand — federating many servers must never dump every schema into context.
+  The projection point is a single line: `req.Tools = r.cfg.Tools.Specs()` in
+  `(*runner).callModel` (`loop/loop.go:276`), re-evaluated **once per model call**.
+  `loop.ToolRegistry` is a consumer-side interface of just `Get` + `Specs`, so
+  index-first can land as a *decorator* satisfying it — leaving `tool.Tool` and
+  `tool.Registry` untouched. MCP-federated tools go through that same decorator:
+  N servers must not mean N resident schemas.
 - Adding or changing an event kind is an API change. Document it.
 
 ## Decisions
@@ -51,6 +57,26 @@ Recorded as they settle.
 - **Release discipline at the boundary**: cut a real release tag before the
   consuming app re-pins. A squash-merge of the integration PR deletes the branch
   and orphans any pseudo-version pointing at it (M2 lesson, repeated at M3).
+- **The independence invariant is the build graph, not a substring.** Verify with
+  `go list -deps ./... | grep gofer` (authoritative) and
+  `rg -n 'jedwards1230/gofer' -g '*.go' .` (import-level cross-check). Both are at
+  **0**. Do **not** use `rg -rn gofer --include='*.go'` — in ripgrep `-r` is
+  `--replace`, so `-rn` rewrites matches to "n", and `--include` is a grep flag rg
+  does not have; that command fails *false-clean*.
+
+## Open: consumer-neutrality drift (not this round)
+
+M3 ran a deliberate independence sweep (`#45`) that took gofer mentions to zero
+**including docs**. That has since drifted to **41** prose mentions: 22 in
+`docs/proposals/checkpoint-task-handle-seam.md`, 10 in `docs/PRD.md`, 7 in
+`docs/DESIGN.md`, 2 in `NOTICE`. The drift is concentrated in one newer proposal
+rather than spread.
+
+Deliberately **not** acted on this round. A library naming its consumer in design
+prose is defensible, `NOTICE` arguably requires it, and scrubbing to hit a
+substring count would make the seam docs worse. But whether the SDK should *read*
+as consumer-neutral is a positioning question for the owner to decide, not one to
+settle silently — it is flagged for the milestone boundary.
 
 ## Definition of done
 
