@@ -1,6 +1,18 @@
-# CI: fast build/vet/test + lint on every PR; the race detector runs only on
-# push (merges to main and release tags) so PR feedback stays fast while any
-# data race still blocks a release.
+# CI: fast build/vet/test + lint on every PR; the race detector runs on push
+# (merges to main and release tags) and on PRs targeting a `milestone/*`
+# integration branch.
+#
+# The PR-time exception exists because an integration branch accumulates many
+# pieces before anything reaches main, so "a data race blocks the release" is too
+# late a gate: by then the racy commit is buried under a dozen others and the
+# person who wrote it has moved on. Milestone rounds are also where genuinely
+# concurrent code lands (mutex-guarded registries, connection managers with async
+# connect and backoff), which is exactly what -race exists to check.
+#
+# Deliberately NOT enabled for every PR: routine PRs keep the fast lane, which is
+# the original trade-off. If a future round finds that too narrow, widen this to
+# all pull_request events rather than reintroducing per-piece manual race runs —
+# a gate that depends on a human remembering is not a gate.
 name: CI
 
 on:
@@ -36,7 +48,9 @@ jobs:
           version: v2.11
 
   race:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      startsWith(github.base_ref, 'milestone/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
