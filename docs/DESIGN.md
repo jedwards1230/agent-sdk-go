@@ -449,6 +449,49 @@ injected into tool results (current-file vs project split, errors first,
 settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
 tools built on top of the `Registry` + `Publisher` seam above.
 
+## Skills (`skill/`, M5)
+
+`skill/` loads the neutral, cross-tool `SKILL.md` standard (the only other
+neutral standard the SDK builds to besides `AGENTS.md`) with progressive
+disclosure: a skill's name and description enter the model's context up
+front; the body loads only when the skill is invoked. Same context-cost
+discipline as tool/MCP index-first discovery.
+
+- **`skill.Load(dirs []string, opts skill.Options) (*skill.Set, []skill.Diagnostic)`**
+  discovers skills across a caller-supplied directory list — the SDK reads no
+  config and decides no default locations; that is the embedder's concern
+  (gofer's `config.Skills`). Each directory is scanned one level deep for the
+  standard `<dir>/<name>/SKILL.md` layout.
+- **Precedence**: dirs are scanned in the order given; the first directory to
+  define a name wins, and every later duplicate is dropped with a
+  `Diagnostic`. PATH-style resolution — the package does not know which
+  directory is "project" vs "user global", so the caller's list order is the
+  only precedence signal.
+- **Never silently truncated**: an oversized `SKILL.md` (`Options.MaxBodyBytes`,
+  default 64KiB) is skipped with a `Diagnostic`, never truncated — half a
+  skill can silently drop the instruction that made it correct. Malformed or
+  incomplete frontmatter (missing `name`/`description`, unclosed fence,
+  invalid YAML) is the same: skipped with a `Diagnostic`, not degraded to a
+  guessed default. A `Diagnostic` is a value the caller must observe, never
+  swallowed.
+- **`Set.Index() []Meta`** is the discovery projection: `{Name, Description,
+  Truncated}` only — no body field exists on `Meta`, so nothing in the type
+  can leak one. `Description` is truncated to `Options.DescriptionBudget`
+  (default 200 bytes) at a word boundary where one exists.
+- **`Set.Body(name string) (string, error)`** is the one place a body is
+  read, from disk, at invocation time — never cached from `Load`.
+- **Invocation surface is the embedder's choice.** The package does not
+  decide whether a skill surfaces as a tool, a system-prompt injection, or a
+  slash command; `Set.Index`/`Set.Body` are the primitives. The optional
+  `skill.NewTool(*skill.Set) tool.Tool` is one instantiation — a single
+  dispatcher tool whose `Description()` projects the current index and whose
+  `Run` resolves `Body` by name — but it is never registered implicitly; a
+  caller that wants it constructs and `Registry.Register`s it itself.
+- **Path safety**: a skill directory is untrusted input. A symlinked skill
+  subdirectory or a symlinked `SKILL.md` is refused, not followed (reported
+  as a `Diagnostic`); a frontmatter `name` containing a path separator or a
+  `.`/`..` segment is rejected at load time, before it can become a landmine
+  for any embedder-side code that later joins it onto a path.
 ## Web search providers (M7)
 
 `search/` is an optional SDK package (extension tier 2 — see *Extension
