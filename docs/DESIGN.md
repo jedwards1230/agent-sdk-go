@@ -972,6 +972,22 @@ the same `[]tool.Tool` a session started with stays the same array all
 session long, which matters because mutating a session's tool array
 mid-session silently breaks prompt caching.
 
+**Hard invariant: a session's tool set is fixed at create — this package
+never mutates one, and neither may the connection manager built on it.**
+`Project` is a one-shot snapshot; nothing here watches a server or re-projects
+on reconnect. The consuming application's connection manager must preserve
+that all the way up: a server that finishes connecting *after* a session is
+already running joins the NEXT session, never a live one, and a server that
+dies mid-session keeps its already-projected tools registered (degrading to
+`IsError` per above, and working again on reconnect with no re-registration).
+This is load-bearing, not stylistic: a resident-tool-index decorator built
+over a session's registry (`toolindex`, see `docs/milestones/M7-round-ab.md`)
+snapshots that registry once at `Wrap` time and stakes a prompt-cache
+byte-identity guarantee on the tool array never growing afterward —
+hot-adding a late-connecting server's tools into a live session would break
+that guarantee silently, with nothing in either package's test suite to catch
+it.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:

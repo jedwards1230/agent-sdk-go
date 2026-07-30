@@ -23,6 +23,15 @@ import (
 // key like "wiki" or "home-assistant") — it never touches the wire; it only
 // feeds [qualifiedToolName] and error messages, so a caller should pick
 // something a human recognizes over the connection's URL or PID.
+//
+// Project is a one-shot snapshot, deliberately: call it once when a session
+// is created, register the result, and stop. A session's tool set is fixed
+// at create — nothing in this package re-projects on its own, and a caller
+// must not call Project again to hot-add a late-connecting server's tools
+// into an already-running session's registry (a server that finishes
+// connecting after the session started joins the NEXT session). See
+// docs/DESIGN.md "MCP (M7)" and the mcp package doc for why this is a hard
+// invariant, not a style preference.
 func Project(ctx context.Context, c *Client, server string) ([]tool.Tool, error) {
 	infos, err := c.ListTools(ctx)
 	if err != nil {

@@ -52,7 +52,24 @@
 // the turn) from this package's own internal per-call timeout or a
 // transport failure (an IsError result the model can react to). Because a
 // projectedTool never becomes invalid — it always returns SOME [tool.Result]
-// — a caller never needs to unregister it when its server misbehaves, which
-// matters: mutating a session's tool array mid-session silently breaks
-// prompt caching.
+// — a caller never needs to unregister it when its server misbehaves.
+//
+// # A session's tool set is fixed at create — this package never mutates one
+//
+// [Project] is a one-shot snapshot: call it, get back a []tool.Tool, register
+// them once. Nothing in this package watches a server or re-projects on
+// reconnect, and a consuming application's connection manager MUST preserve
+// that: a session's registered tool set is decided once, at create (after
+// whatever bounded readiness wait the application allows already-configured
+// servers), and never grows or shrinks for the life of that session. A
+// server that finishes connecting after a session is already running joins
+// the NEXT session, not the live one; a server that dies mid-session keeps
+// its already-projected tools registered (calls degrade to IsError per
+// above, and resume working again on reconnect — no re-registration needed
+// either way). This is not a style preference: a resident-tool-index
+// decorator built on top of a session's registry (see
+// docs/milestones/M7-round-ab.md, `toolindex`) snapshots that registry once
+// and stakes a prompt-cache byte-identity guarantee on the tool array never
+// growing afterward; hot-adding a late-connecting server's tools into a live
+// session would silently break that guarantee with no test to catch it.
 package mcp
