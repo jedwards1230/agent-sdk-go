@@ -781,6 +781,93 @@ resuming**. As with `Options.Agent` and the session title, the SDK defines no
 vocabulary and attaches no behavior: it carries the value, the embedder owns its
 meaning.
 
+## Compaction seam (M7)
+
+The journal already modeled compaction's *result* — `session.EntryCompaction`
+and `event.KindSessionCompacted` shipped in v0.17.0, and `Journal.Fold` already
+stopped walking ancestors at a compaction entry. What was missing was a way to
+CAUSE one (agent-sdk-go#89): `NewSessionCompacted` had zero call sites. This
+seam is exactly that trigger, plus the accounting an embedder needs to decide
+when to pull it — nothing about `Fold` changed.
+
+**`Runner.Compact(ctx, instructions) error`** is an explicit method, not a
+threshold or a loop hook — the same shape as `Checkpoint`/`Fork`/`Rewind`: it
+drains `awaitJournaled` first, then appends a `session.EntryCompaction`
+parented on the current HEAD and publishes a must-deliver `session.compacted`.
+It is additive, like `Fork` — nothing is deleted, and the compacted entries
+still count toward `Runner.Cost`.
+
+**The SDK ships no compaction policy.** There is no size threshold and no
+automatic trigger wired into `Prompt` or the loop. An embedder decides WHEN —
+reading `Runner.LastUsage` or a live `turn.finished` event to judge pressure,
+or simply honoring an explicit user command — and calls `Compact` between
+turns. Because `Compact` always operates on whatever HEAD is at the moment
+it's called, compacting right before the next `Prompt` (sized against the last
+known usage) and compacting right after one returns (sized against that turn's
+just-settled usage) are equally correct; there is no separate code path for
+either, so the choice costs the caller nothing either way.
+
+**Rejected: compaction as a fifth loop hook.** The loop's `Hooks` family
+(`BeforeTool`/`AfterTool`/`TransformContext`/`PrepareNextTurn`) was considered
+as the home for this instead of a `Runner` method — `TransformContext` already
+rewrites the message list before each model call, and folding compaction in
+there would make it automatic and embedder-overridable by construction.
+Rejected because `TransformContext` rewrites the in-flight list for ONE call
+only: it is never journaled, does not survive `Resume`, and is not observable
+as a `session.compacted` event without handing the loop direct journal/broker
+access that today only `Runner`'s synchronous append path has (guarded by the
+`awaitJournaled` barrier that keeps a `Prompt`'s own entries from reordering
+against it). Wiring compaction through it would reintroduce exactly that
+ordering hazard for a marginal composability gain the `Summarizer` interface
+already buys another way (below). An explicit method needed no new machinery
+and matches every other structural seam this package ships.
+
+**Summarization is a seam, not a hardcoded prompt.** `instructions` (or
+`DefaultCompactionInstructions`, an exported constant — never a string
+buried in the loop) is threaded through `Options.Summarizer`
+(`runner.Summarizer`), which an embedder replaces wholesale — a different
+model, a custom prompt template, an external service, or a deterministic
+non-LLM condenser for tests — not just the instructions text. The default
+(`defaultSummarizer`) makes one non-tool completion call against the runner's
+own bound provider and reports back `SummarizeResult{Summary, Model, Usage}`;
+Compact journals `Usage` on the compaction entry itself (via
+`WithEntryModel`/`WithEntryUsage`, now accepted by `NewCompactionEntry`) so a
+compaction's own cost folds into `Runner.Cost` like any other turn instead of
+being invisible, and republishes it on `event.SessionCompacted` for a live
+renderer.
+
+**Accounting reused, not duplicated.** `Runner.Cost`/`session.CostReport`
+(cumulative, every branch) and a live `event.TurnFinished{Usage,
+ContextWindow}` (per-turn, already `ContextWindow`-aware via
+`provider.Lookup`) already covered the common case — an embedder that stays
+subscribed already has everything a `/context` view or a pressure threshold
+needs, the same figures its existing usage/stats panel already tracks. The one
+gap: a session with no live turn yet in THIS process (freshly `Resume`d,
+before any new `Prompt`) has nothing to read. `Journal.LastUsage` (and
+`Runner.LastUsage`, its thin wrapper) close it: the model and usage of the
+most recent turn-bearing entry in the CURRENT folded chain — the exact walk
+`Fold` performs (HEAD back to root, or a compaction boundary), refactored out
+as `chainFromHead` so both agree on what "current context" means without
+duplicating the walk. Pair the returned model with `provider.Lookup` for a
+context-window size, exactly as a live `turn.finished`'s `ContextWindow` is
+derived.
+
+**`event.SessionCompacted`'s payload** is designed for a renderer, not just an
+audit log: `ReplacesThrough` (the boundary), `MessagesCompacted` (how many
+provider messages `Fold` held immediately before — "12 messages summarized"
+without walking the journal), `Model`/`Usage` (the summarization call's own
+footprint — `Usage.InputTokens` approximates the pre-compaction context's
+size, since the provider tokenized exactly that content to answer the call;
+`Usage.OutputTokens` approximates the summary's own size — a before/after pair
+with no separate tokenizer dependency), and `Summary` itself, so a client
+renders what happened without a second read of the journal. `Usage` is always
+present on the wire (like `TurnFinished`'s); the rest are omitempty, so a
+strategy that made no model call still marshals a valid, mostly-empty event.
+
+`event.SessionCompact` (the `session.compact` op) gained an optional
+`Instructions` field mirroring the method signature — additive, omitempty, so
+an existing bare `{session_id}` request is unaffected.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:

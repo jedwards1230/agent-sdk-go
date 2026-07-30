@@ -65,6 +65,20 @@ func TestEntryConstructorsAndAccessorsRoundTrip(t *testing.T) {
 	if cp.Summary != "summary text" || cp.ReplacesThrough != "entry-9" {
 		t.Errorf("Compaction() = %+v, unexpected", cp)
 	}
+	if comp.Model != "" || comp.Usage != nil {
+		t.Errorf("comp.Model/Usage = %q/%+v, want zero (no opts given)", comp.Model, comp.Usage)
+	}
+
+	compWithCost := session.NewCompactionEntry("summary text 2", "entry-10",
+		session.WithEntryModel("model-c"),
+		session.WithEntryUsage(usage),
+	)
+	if compWithCost.Model != "model-c" {
+		t.Errorf("compWithCost.Model = %q, want model-c", compWithCost.Model)
+	}
+	if compWithCost.Usage == nil || !compWithCost.Usage.Equal(usage) {
+		t.Errorf("compWithCost.Usage = %+v, want %+v", compWithCost.Usage, usage)
+	}
 
 	meta := session.NewMetaEntry("/home/user/project")
 	if meta.Type != session.EntryMeta {

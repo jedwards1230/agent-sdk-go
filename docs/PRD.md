@@ -82,7 +82,7 @@ socket, or network — same messages).
 
 | Event | Delivery |
 |---|---|
-| `session.created / .resumed / .forked{at?, label?} / .compacted / .killed / .archived` | must-deliver |
+| `session.created / .resumed / .forked{at?, label?} / .compacted{replaces_through?, messages_compacted?, model?, usage, summary?} / .killed / .archived` | must-deliver |
 | `session.info{title}` (embedder-set title change) | must-deliver |
 | `session.config{options}` (embedder config-option snapshot, e.g. current model) | must-deliver |
 | `plan{entries}` (agent task-plan snapshot via `update_plan`) | must-deliver |
@@ -101,7 +101,7 @@ socket, or network — same messages).
 `session.resume` · `session.fork{at}` · `prompt.send{text, attachments?}`
 (queues if busy) · `prompt.queue.list / .clear` ·
 `permission.reply{id, verdict, remember?}` · `turn.interrupt` ·
-`tool.cancel{id}` · `session.compact` · `session.set_model{model}` ·
+`tool.cancel{id}` · `session.compact{instructions?}` · `session.set_model{model}` ·
 `session.set_effort{effort}` · `session.kill` · `session.archive`.
 
 `session.set_effort` landed in M4 as the effort-axis parallel to

@@ -169,22 +169,73 @@ func (e SessionForked) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
-// SessionCompacted is emitted when a session's history is compacted.
-type SessionCompacted struct{ meta }
+// SessionCompacted is emitted when a session's history is compacted — the
+// event behind runner.Runner.Compact. It carries what a renderer needs to
+// show what happened without re-reading the journal: WHERE the boundary
+// landed, HOW MUCH got folded into it, and the before/after token footprint.
+//
+// ReplacesThrough mirrors session.CompactionPayload.ReplacesThrough: the id of
+// the last entry the summary covers, and so the new context boundary
+// session.Journal.Fold stops at.
+//
+// MessagesCompacted is how many provider messages the pre-compaction folded
+// context held (len(Runner.Fold()) immediately before this call) — "12
+// messages summarized" without walking the journal.
+//
+// Model and Usage describe the summarization call itself: Model is the model
+// that produced Summary, or "" when the summarization strategy made no model
+// call (see runner.Summarizer). Usage.InputTokens (+ CacheReadTokens) is the
+// closest available measurement of the pre-compaction context's size — the
+// provider tokenized exactly that content to answer the call — so it stands
+// in for a "before" figure; Usage.OutputTokens is the size of the summary
+// that replaces it, an "after" figure. Both are zero when Model is "".
+//
+// Summary is the rendered replacement text — the same text
+// session.EntryCompaction carries and Fold will render as the new context
+// boundary.
+type SessionCompacted struct {
+	meta
+	ReplacesThrough   string
+	MessagesCompacted int
+	Model             string
+	Usage             provider.Usage
+	Summary           string
+}
 
-// NewSessionCompacted builds a session.compacted event.
-func NewSessionCompacted(session string) SessionCompacted {
-	return SessionCompacted{meta{session: session}}
+// NewSessionCompacted builds a session.compacted event. See
+// [SessionCompacted] for what each field means to a renderer.
+func NewSessionCompacted(session, replacesThrough string, messagesCompacted int, model string, usage provider.Usage, summary string) SessionCompacted {
+	return SessionCompacted{
+		meta:              meta{session: session},
+		ReplacesThrough:   replacesThrough,
+		MessagesCompacted: messagesCompacted,
+		Model:             model,
+		Usage:             usage,
+		Summary:           summary,
+	}
 }
 
 // Kind returns KindSessionCompacted.
 func (SessionCompacted) Kind() string { return KindSessionCompacted }
 
-// Tier returns TierMustDeliver.
+// Tier returns TierMustDeliver: a compaction moves the session's context
+// boundary, so a client that misses it renders stale context.
 func (SessionCompacted) Tier() Tier { return TierMustDeliver }
 
-// MarshalJSON encodes the envelope.
-func (e SessionCompacted) MarshalJSON() ([]byte, error) { return marshalBare(e) }
+// MarshalJSON encodes the envelope plus {replaces_through?, messages_compacted?,
+// model?, usage, summary?}. replaces_through, messages_compacted, model, and
+// summary are omitempty; usage is always present (like TurnFinished's), since
+// its zero value is itself meaningful (no model call was made).
+func (e SessionCompacted) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		ReplacesThrough   string         `json:"replaces_through,omitempty"`
+		MessagesCompacted int            `json:"messages_compacted,omitempty"`
+		Model             string         `json:"model,omitempty"`
+		Usage             provider.Usage `json:"usage"`
+		Summary           string         `json:"summary,omitempty"`
+	}{baseEnvelope(e), e.ReplacesThrough, e.MessagesCompacted, e.Model, e.Usage, e.Summary})
+}
 
 func (e SessionCompacted) withMeta(seq uint64, ts time.Time) Event {
 	e.seq, e.ts = seq, ts
