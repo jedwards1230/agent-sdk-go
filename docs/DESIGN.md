@@ -449,6 +449,49 @@ injected into tool results (current-file vs project split, errors first,
 settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
 tools built on top of the `Registry` + `Publisher` seam above.
 
+## Skills (`skill/`, M5)
+
+`skill/` loads the neutral, cross-tool `SKILL.md` standard (the only other
+neutral standard the SDK builds to besides `AGENTS.md`) with progressive
+disclosure: a skill's name and description enter the model's context up
+front; the body loads only when the skill is invoked. Same context-cost
+discipline as tool/MCP index-first discovery.
+
+- **`skill.Load(dirs []string, opts skill.Options) (*skill.Set, []skill.Diagnostic)`**
+  discovers skills across a caller-supplied directory list — the SDK reads no
+  config and decides no default locations; that is the embedder's concern
+  (gofer's `config.Skills`). Each directory is scanned one level deep for the
+  standard `<dir>/<name>/SKILL.md` layout.
+- **Precedence**: dirs are scanned in the order given; the first directory to
+  define a name wins, and every later duplicate is dropped with a
+  `Diagnostic`. PATH-style resolution — the package does not know which
+  directory is "project" vs "user global", so the caller's list order is the
+  only precedence signal.
+- **Never silently truncated**: an oversized `SKILL.md` (`Options.MaxBodyBytes`,
+  default 64KiB) is skipped with a `Diagnostic`, never truncated — half a
+  skill can silently drop the instruction that made it correct. Malformed or
+  incomplete frontmatter (missing `name`/`description`, unclosed fence,
+  invalid YAML) is the same: skipped with a `Diagnostic`, not degraded to a
+  guessed default. A `Diagnostic` is a value the caller must observe, never
+  swallowed.
+- **`Set.Index() []Meta`** is the discovery projection: `{Name, Description,
+  Truncated}` only — no body field exists on `Meta`, so nothing in the type
+  can leak one. `Description` is truncated to `Options.DescriptionBudget`
+  (default 200 bytes) at a word boundary where one exists.
+- **`Set.Body(name string) (string, error)`** is the one place a body is
+  read, from disk, at invocation time — never cached from `Load`.
+- **Invocation surface is the embedder's choice.** The package does not
+  decide whether a skill surfaces as a tool, a system-prompt injection, or a
+  slash command; `Set.Index`/`Set.Body` are the primitives. The optional
+  `skill.NewTool(*skill.Set) tool.Tool` is one instantiation — a single
+  dispatcher tool whose `Description()` projects the current index and whose
+  `Run` resolves `Body` by name — but it is never registered implicitly; a
+  caller that wants it constructs and `Registry.Register`s it itself.
+- **Path safety**: a skill directory is untrusted input. A symlinked skill
+  subdirectory or a symlinked `SKILL.md` is refused, not followed (reported
+  as a `Diagnostic`); a frontmatter `name` containing a path separator or a
+  `.`/`..` segment is rejected at load time, before it can become a landmine
+  for any embedder-side code that later joins it onto a path.
 ## Web search providers (M7)
 
 `search/` is an optional SDK package (extension tier 2 — see *Extension
@@ -987,6 +1030,57 @@ byte-identity guarantee on the tool array never growing afterward —
 hot-adding a late-connecting server's tools into a live session would break
 that guarantee silently, with nothing in either package's test suite to catch
 it.
+## Index-first tool registry (M7, `toolindex/`)
+
+Federating many tool sources (MCP servers, plugins, builtins) into one
+`req.Tools = r.cfg.Tools.Specs()` call must not mean every schema rides every
+model call — that is the "context transparency" tenet applied to tool
+surfaces. `toolindex.Index` is the seam: a decorator satisfying `loop.
+ToolRegistry` (`Get` + `Specs`), so it drops straight into `Config.Tools` with
+zero loop changes. `tool.Tool` and `tool.Registry` are untouched; the decorator
+never even sees a `tool.Tool`, only the `provider.ToolSpec`s the wrapped
+registry's `Specs()` already returns — uniformity (builtin vs MCP vs plugin)
+is structural, not conventional, because the decorator has no way to tell
+them apart.
+
+**Two-phase construction.** `toolindex.New(opts)` builds the Index; `Index.
+SearchTool()` returns a `tool.Tool` for `tool_search` that the caller registers
+into the base `tool.Registry` **before** `Index.Wrap(base)` snapshots that
+registry's `Specs()` into the index's entries — otherwise `tool_search` itself
+would be unknown to the base. `Wrap` also fixes the always-resident name set
+(`Options.Resident`, plus `tool_search` itself forced resident — the discovery
+mechanism can never go dark) and panics on a second call, matching `tool.
+NewRegistry`'s construction-time-error contract.
+
+**`Specs()` ordering is the cache-safety property.** It returns resident
+(sorted) ++ promoted (promotion order) — appended, never merged into sorted
+order — so indices `[0..len(resident)-1]` stay byte-identical across a
+promotion; a provider's longest-cached-prefix match only has to reprice the
+promoted tail. Residency is monotonic: `Options.Resident` is fixed at `Wrap`,
+and the promoted set only grows.
+
+**`Get(name)`** delegates to the base for any name it knows, auto-promoting a
+non-resident hit — a model that already guessed a valid tool name is served,
+not punished for skipping search. Promotion is otherwise driven by
+`tool_search`'s `Run`, which batches its whole result set through one
+`Promote` call (N discoveries, one `Specs()`-tail rewrite) and states in its
+result text that those tools' schemas resolve starting next turn — never the
+schemas themselves, which would double-bill the tokens this package exists to
+save. `Rehydrate` gives a session-resume path the same monotonic promotion
+without replaying a search.
+
+**`Hint()` is two-tiered and returns a string, never injects.** At or below
+`Options.InlineMax` entries it inlines the whole `name — summary` index; above
+it, a per-`Source` roster (count + sample names) plus the `tool_search`
+instruction — a flat index over hundreds of federated tools runs to
+thousands of tokens on its own, so the roster tier keeps `Hint` itself small
+regardless of federated surface size. The embedder composes, replaces, or
+drops the returned string; that is how the "nothing enters context the
+embedder can't see and override" tenet is upheld here.
+
+**Deferred, by ratified scope.** No auditability layer (`turn.started.
+Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
+public surface expands to support it; that is a follow-on PR.
 
 ## Announce vocabulary (announce/)
 
