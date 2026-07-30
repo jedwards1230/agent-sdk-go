@@ -22,7 +22,7 @@ is unchanged.
 | 1 | `Runner.Compact` seam (`#89`) | in review | [#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
 | 4 | Search `Provider` interface + Brave / SearXNG | in flight | — |
-| 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
+| 5 | Skills: `SKILL.md` loading, progressive disclosure | in review | (fill in PR link) |
 | — | Index-first tool-registry contract | pending | — |
 
 `lsp/` shipped in M3 and needs no SDK change this round — the application-side
