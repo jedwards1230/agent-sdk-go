@@ -868,6 +868,110 @@ strategy that made no model call still marshals a valid, mostly-empty event.
 `Instructions` field mirroring the method signature — additive, omitempty, so
 an existing bare `{session_id}` request is unaffected.
 
+## MCP (M7)
+
+`mcp/` is an **optional SDK package**: a hand-rolled JSON-RPC 2.0 client
+(stdio and streamable-HTTP transports) plus the projection of a connected
+server's tools onto `[]tool.Tool`. **Ratified 2026-07-29: hand-write the
+client, don't import one** — this overrides the 2026-07-11 sourcing survey's
+"adopt `modelcontextprotocol/go-sdk`" verdict. `lsp/client.go` already proved
+the pattern (a stdlib-only JSON-RPC-over-stdio client is a few hundred lines,
+not a dependency-worthy amount of code), MCP is the same protocol family, and
+because the optional-package tier controls *compilation* rather than the
+*module graph*, an adopted dependency would land in every embedder's
+`go.sum`/`go list -m all` even when `mcp/` is never imported. Scope is
+deliberately narrow: the client and the tool projection, nothing else —
+server configuration, credential resolution, the connection manager
+(reconnect/backoff/readiness), and any tool-index decorator are the consuming
+application's job.
+
+**Transports.** Stdio (`mcp.Start`, `os/exec`) frames each JSON-RPC message as
+one newline-delimited line — MCP's stdio framing, distinct from LSP's
+Content-Length headers, so `mcp/`'s wire layer is a parallel hand-roll, not a
+shared one. Streamable-HTTP (`mcp.NewHTTP`, `net/http`) POSTs each request to
+a single endpoint and accepts either a plain JSON response or an SSE stream
+(read until the JSON-RPC message whose id matches the request arrives;
+anything else on the stream — a progress notification — is skipped, since
+this package models no notification consumer). Both transports sit behind one
+unexported `transport` interface so `Client`'s lifecycle logic (id assignment,
+JSON-RPC envelope construction, error propagation) is written once.
+
+**Lifecycle.** `Client.Initialize` performs the "initialize" handshake plus
+the required `notifications/initialized` notification. `Client.ListTools`
+paginates `tools/list`'s cursor internally, aggregating every page.
+`Client.CallTool` performs one `tools/call`; its `CallToolResult.IsError`
+mirrors the MCP result's own `isError` field — a tool that ran and reported
+failure, still a successful round trip — while a non-nil `error` return means
+the round trip itself failed (unreachable, timed out, malformed, or a
+JSON-RPC-level error).
+
+**`tools/list` already returns full schemas — index-first is a context
+projection, not a network saving.** There is no MCP affordance for fetching a
+tool's name without its schema: one response carries both. So an index-first
+tool registry (schemas fetched only for a tool the model actually names) can
+only ever be something an application builds AFTER `Project` returns, over
+the tool set already fully loaded into memory — never a lazy per-tool fetch
+against the wire. Do not build the latter; it does not exist to build against.
+
+**Projection: `Project(ctx, *Client, server string) ([]tool.Tool, error)`.**
+Each returned tool wraps the same `*Client` and its own original (unsanitized)
+name; `Run` performs exactly one `tools/call`. This is the load-bearing
+output: an MCP tool and a builtin tool become the same Go type in the same
+`tool.Registry`, so permission gating, the tool-index decorator, and
+diagnostics all apply to both structurally, never by convention. A tool's
+input schema is converted from the server's JSON Schema to `tool.Schema` via
+a best-effort recursive projection (object/array nesting, `enum`, `default`,
+top-level `required`); JSON Schema constructs `tool.Schema` has no
+representation for (`oneOf`/`anyOf`, `patternProperties`,
+`additionalProperties`, per-nested-object `required`) are dropped, not
+rejected — the same limitation every builtin tool's schema already lives
+with, not a new one this package introduces.
+
+**Naming and sanitization (satisfies the permission grammar above).** A
+projected tool is named `mcp__<server>__<tool>`, matching the
+`mcp__search__*(*)` form the permission rule grammar documents. Sanitization
+is mandatory: providers cap tool names at 64 bytes of `[A-Za-z0-9_-]`, and a
+real federated name can exceed that (`mcp__home-assistant__ha_config_list_dashboard_resources`
+is already 54 characters). `qualifiedToolName`:
+
+1. Sanitizes `server` and `tool` independently — every rune outside
+   `[A-Za-z0-9_-]` becomes `_` — so the result is pure ASCII and a later
+   byte-length truncation can never split a multi-byte rune.
+2. Joins them as `mcp__<server>__<tool>`.
+3. If that exceeds 64 bytes: truncates to the first 57 bytes, appends `_`,
+   then the first 6 hex characters of the sha256 of the **full** (untruncated)
+   sanitized name — not just the surviving prefix. Two names that agree on
+   everything up to the cut but differ only past it therefore still land on
+   distinct qualified names, deterministically and without a collision table.
+
+The original, unsanitized name stays available (`projectedTool.OriginalName`)
+for display/audit; it is also what `tools/call` is actually sent with — only
+the model- and permission-facing name is sanitized. An unsanitized or
+over-long name is a provider 400 that kills the entire request, not just the
+offending tool, which is why sanitization is mandatory rather than defensive
+polish.
+
+**Resilience is this client's contract; the connection manager is gofer's
+job.** A dead, slow, or unreachable server must never fail a whole turn:
+`projectedTool.Run` maps a `CallTool` failure to a `tool.Result{IsError:
+true}` carrying a message the model can react to (e.g. "mcp server X tool Y
+failed: ..."), never to a Go `error` — *unless* the ctx `Run` itself was given
+is what ended the call (checked via `ctx.Err()` on the ORIGINAL ctx, after
+`CallTool` returns its own internally-timeout-derived error), in which case it
+propagates as a real error and the loop aborts the turn, exactly like any
+other tool's ctx cancellation. `Client`'s per-server connect timeout
+(`WithConnectTimeout`, default `DefaultConnectTimeout` = 10s, applied to
+`Initialize`) and per-call timeout (`WithCallTimeout`, default
+`DefaultCallTimeout` = 60s, applied to `ListTools`/`CallTool`) are what
+produce that internal, non-propagating failure for a hung server — both are
+configurable, never hardcoded, and compose with a caller-supplied ctx
+deadline via `context.WithTimeout` (whichever is sooner wins). Because a
+`projectedTool` always returns SOME `tool.Result` — it never becomes
+"invalid" — a caller never needs to unregister it when its server misbehaves:
+the same `[]tool.Tool` a session started with stays the same array all
+session long, which matters because mutating a session's tool array
+mid-session silently breaks prompt caching.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
@@ -910,9 +1014,9 @@ Three tiers, by trust and coupling:
 1. **Core** — hot path, security, or contract; compiled in (loop, broker,
    permission engine, session).
 2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
-   import (`search/` ships M7; `mcp/` and the vendor settings loaders are
-   planned for M5).
-   First-party and trusted, but not forced on every embedder.
+   import (`search/` and `mcp/` — see "MCP (M7)" below — both ship M7; the
+   vendor settings loaders are still planned). First-party and trusted, but
+   not forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
    over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
 
@@ -923,7 +1027,7 @@ The tier is set by the two-gate test: would a second app need it unchanged
 
 | Need | Verdict | Source |
 |---|---|---|
-| MCP client | **adopt** | `modelcontextprotocol/go-sdk` (official) |
+| MCP client | ~~adopt~~ **build (superseded 2026-07-29)** | Hand-rolled, following `lsp/client.go`'s stdlib-only JSON-RPC-over-stdio precedent, extended to also cover streamable-HTTP. Overrides this survey row: MCP is the same protocol family the SDK already hand-rolls for LSP, and `modelcontextprotocol/go-sdk` would land in every embedder's module graph (`go.sum`) even unimported — the optional-package tier controls compilation, not the module graph. See "MCP (M7)" below. |
 | ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in the application, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
 | WASM plugin tier | **adopt** | `knqyf263/go-plugin` (wazero, typed interfaces) |
 | Provider + streaming | build | thin, with a cross-vendor content-block message model |
