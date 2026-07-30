@@ -21,7 +21,7 @@ is unchanged.
 |---|---|---|---|
 | 1 | `Runner.Compact` seam (`#89`) | in flight | — |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
-| 4 | Search `Provider` interface + Brave / SearXNG | in flight | — |
+| 4 | Search `Provider` interface + Brave / SearXNG | done (this piece) | `feat/search-providers` |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
 | — | Index-first tool-registry contract | pending | — |
 
