@@ -21,7 +21,7 @@ is unchanged.
 |---|---|---|---|
 | 1 | `Runner.Compact` seam (`#89`) | **merged** | [#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
 | 3 | Optional `mcp/` package: client + tool projection | pending | — |
-| 4 | Search `Provider` interface + Brave / SearXNG | in review | [#113](https://github.com/jedwards1230/agent-sdk-go/pull/113) |
+| 4 | Search `Provider` interface + Brave / SearXNG | **merged** | [#113](https://github.com/jedwards1230/agent-sdk-go/pull/113) |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | pending | — |
 | — | Index-first tool-registry contract | designed, not built | — |
 | — | Tool-index auditability layer | deferred to a follow-on PR — see Decisions | — |

@@ -65,6 +65,7 @@ skill/       SKILL.md, two-tier disclosure            (M5)
 plugin/      subprocess JSON-RPC host                 (M5)
 lsp/         server registry · diagnostics            (M3)
 mcp/         client (official go-sdk)                 (M5)
+search/      Provider iface · Brave + SearXNG backends · name-keyed registry (M7, optional)
 compose/     manifest → wired session
 acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```
@@ -210,6 +211,15 @@ M0–M3 are what shipped here.
   picker, migrating to the unstable `providers/list` only once it stabilizes.
   This is the SDK reading of the cross-repo policy; the full conformance matrix
   is tracked internally (spec ↔ SDK ↔ gofer ↔ Agmente).
+- **Web search is an optional SDK package, dynamic by provider (M7).**
+  `search/` ships a vendor-neutral `Provider` interface plus two backends —
+  `search/brave` (Brave Search API) and `search/searxng` (self-hosted SearXNG)
+  — selected by name through a self-registering factory (`search.Register` /
+  `search.Build`), the same shape as `providers.Build` but extensible without
+  editing the package: a third backend registers itself from its own `init()`.
+  Credentials and the base URL are `Config` fields the embedder supplies;
+  nothing is read from an SDK-chosen env var or defaults to anyone's instance.
+  See DESIGN *Web search providers*.
 - **Journals default to on-disk JSONL** (the auditability tenet);
   `session.MemStore` is an explicit embedder opt-in for an ephemeral
   fire-and-forget session — same fold/resume within the process, nothing
