@@ -64,7 +64,9 @@ tool/        registry + bash/read/edit/write/grep/glob/ls  (M1)
 skill/       SKILL.md, two-tier disclosure            (M5)
 plugin/      subprocess JSON-RPC host                 (M5)
 lsp/         server registry · diagnostics            (M3)
-mcp/         client (official go-sdk)                 (M5)
+mcp/         hand-rolled client + tool projection       (M7, optional)
+search/      Provider iface · Brave + SearXNG backends · name-keyed registry (M7, optional)
+toolindex/   index-first loop.ToolRegistry decorator + tool_search  (M7)
 compose/     manifest → wired session
 acp/         clean-room Agent Client Protocol adapter, stdlib-only  (M2)
 ```
@@ -81,7 +83,7 @@ socket, or network — same messages).
 
 | Event | Delivery |
 |---|---|
-| `session.created / .resumed / .forked{at?, label?} / .compacted / .killed / .archived` | must-deliver |
+| `session.created / .resumed / .forked{at?, label?} / .compacted{replaces_through?, messages_compacted?, model?, usage, summary?} / .killed / .archived` | must-deliver |
 | `session.info{title}` (embedder-set title change) | must-deliver |
 | `session.config{options}` (embedder config-option snapshot, e.g. current model) | must-deliver |
 | `plan{entries}` (agent task-plan snapshot via `update_plan`) | must-deliver |
@@ -100,7 +102,7 @@ socket, or network — same messages).
 `session.resume` · `session.fork{at}` · `prompt.send{text, attachments?}`
 (queues if busy) · `prompt.queue.list / .clear` ·
 `permission.reply{id, verdict, remember?}` · `turn.interrupt` ·
-`tool.cancel{id}` · `session.compact` · `session.set_model{model}` ·
+`tool.cancel{id}` · `session.compact{instructions?}` · `session.set_model{model}` ·
 `session.set_effort{effort}` · `session.kill` · `session.archive`.
 
 `session.set_effort` landed in M4 as the effort-axis parallel to
@@ -126,7 +128,9 @@ converges to the correct state regardless of drops.
 | **M2 · the daemon** ✅ shipped 2026-07-13 (v0.2.0) | (application) supervisor + roster + native ACP; SDK ships `acp/` + `runner/` | an ACP client on a phone drives a session on a laptop |
 | **M3 · guardrails** ✅ shipped 2026-07-14 (v0.3.0) | Sandbox/containment seam (concrete Seatbelt/bwrap+seccomp backends are an application concern) + approval protocol events + binary containment policy (sandboxable → run contained; else → ask a human) + tool-output spill files + headless exec + LSP | a non-sandboxable tool call raises `permission.requested` and a client's reply gates execution |
 | **M4 · ACP v1 featureset expansion** | Cross-repo, matrix-driven ACP surface build-out — this repo owns the modeling + projection half. Session-method projection (`session/list` dispatch, resume, a modeled `set_config_option`) over the already-present `cwd`/`title` on `SessionInfo`; producers for the already-modeled rich blocks (emit `diff` from the edit tools, `terminal`) so a real tool call carries them; native list-models types feeding gofer's `session/new` model picker; capability modeling for the stretch set (`session_info_update`, `plan`, the `*_update` registries). Shipped so far: the projection-safe subset in **v0.6.0**; the `diff` producer, `set_config_option` modeling and `session/list` dispatch in **v0.7.0**; `session_info_update` in **v0.8.0**; `plan` in **v0.9.0**; `config_option_update` in **v0.10.0**; and the model-discovery types (`provider.ModelLister`) in **v0.13.0**. Still open: the `available_commands_update`/`current_mode_update` registries, and the additive follow-ups (grouped select options, `SessionInfo.additionalDirectories`, `_meta`). | gofer emits a `diff` tool-call block from an edit tool and an ACP client renders it |
-| M5 · ecosystem | MCP client (tool-search-first index) + skills + plugin-sdk + subprocess host + session tree / subagent spawn seam ✅ (`Runner.Spawn` + `session.spawned` + `parent_id`/`depth` metadata capped at `DefaultMaxDepth`; the originating-agent attribution half landed early in M4 — `Agent` on the tool-call events) + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
+| M5 · ecosystem | skills + plugin-sdk + subprocess host + session tree / subagent spawn seam ✅ (`Runner.Spawn` + `session.spawned` + `parent_id`/`depth` metadata capped at `DefaultMaxDepth`; the originating-agent attribution half landed early in M4 — `Agent` on the tool-call events) + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay). MCP client moved to M7 Round A+B (below) — the index-first tool registry it was paired with here is a cross-repo M7 piece too. | a plugin from a separate repo adds a tool |
+| M7 · Round A+B (daily-driver build) ✅ MCP piece shipped | Cross-repo, application-facing round closing the gaps between M0–M6 and daily use: `Runner.Compact` seam, config-driven prompt files, an optional `mcp/` package (hand-rolled client + tool projection — see `docs/DESIGN.md` "MCP (M7)"), web search provider interface + tool search, and SKILL.md skills. Full scope and cross-repo mechanics: `docs/milestones/M7-round-ab.md` (this repo) and `jedwards1230/home-orchestration` `docs/projects/gofer-m7-round-ab-plan.md` (source of record). | an MCP server's tools project into a session via config alone |
+| M5 · ecosystem | MCP client (tool-search-first index) + skills ✅ (`skill.Load` over caller-supplied dirs, `Set.Index`/`Set.Body` progressive disclosure, optional `skill.NewTool`; see docs/DESIGN.md "Skills") + plugin-sdk + subprocess host + session tree / subagent spawn seam ✅ (`Runner.Spawn` + `session.spawned` + `parent_id`/`depth` metadata capped at `DefaultMaxDepth`; the originating-agent attribution half landed early in M4 — `Agent` on the tool-call events) + vendor settings-import adapters (Claude Code `settings.json`; home TBD) + provider breadth (`openai-compat`, manifest `ModelInfo` overlay) | a plugin from a separate repo adds a tool |
 | M6 · auto + polish | Reviewer pipeline, WASM tier, asset import, mDNS pairing | auto mode survives a week of real ops without a bad allow |
 
 ### Point releases (post-M3)
@@ -210,6 +214,15 @@ M0–M3 are what shipped here.
   picker, migrating to the unstable `providers/list` only once it stabilizes.
   This is the SDK reading of the cross-repo policy; the full conformance matrix
   is tracked internally (spec ↔ SDK ↔ gofer ↔ Agmente).
+- **Web search is an optional SDK package, dynamic by provider (M7).**
+  `search/` ships a vendor-neutral `Provider` interface plus two backends —
+  `search/brave` (Brave Search API) and `search/searxng` (self-hosted SearXNG)
+  — selected by name through a self-registering factory (`search.Register` /
+  `search.Build`), the same shape as `providers.Build` but extensible without
+  editing the package: a third backend registers itself from its own `init()`.
+  Credentials and the base URL are `Config` fields the embedder supplies;
+  nothing is read from an SDK-chosen env var or defaults to anyone's instance.
+  See DESIGN *Web search providers*.
 - **Journals default to on-disk JSONL** (the auditability tenet);
   `session.MemStore` is an explicit embedder opt-in for an ephemeral
   fire-and-forget session — same fold/resume within the process, nothing

@@ -449,6 +449,98 @@ injected into tool results (current-file vs project split, errors first,
 settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
 tools built on top of the `Registry` + `Publisher` seam above.
 
+## Skills (`skill/`, M5)
+
+`skill/` loads the neutral, cross-tool `SKILL.md` standard (the only other
+neutral standard the SDK builds to besides `AGENTS.md`) with progressive
+disclosure: a skill's name and description enter the model's context up
+front; the body loads only when the skill is invoked. Same context-cost
+discipline as tool/MCP index-first discovery.
+
+- **`skill.Load(dirs []string, opts skill.Options) (*skill.Set, []skill.Diagnostic)`**
+  discovers skills across a caller-supplied directory list — the SDK reads no
+  config and decides no default locations; that is the embedder's concern
+  (gofer's `config.Skills`). Each directory is scanned one level deep for the
+  standard `<dir>/<name>/SKILL.md` layout.
+- **Precedence**: dirs are scanned in the order given; the first directory to
+  define a name wins, and every later duplicate is dropped with a
+  `Diagnostic`. PATH-style resolution — the package does not know which
+  directory is "project" vs "user global", so the caller's list order is the
+  only precedence signal.
+- **Never silently truncated**: an oversized `SKILL.md` (`Options.MaxBodyBytes`,
+  default 64KiB) is skipped with a `Diagnostic`, never truncated — half a
+  skill can silently drop the instruction that made it correct. Malformed or
+  incomplete frontmatter (missing `name`/`description`, unclosed fence,
+  invalid YAML) is the same: skipped with a `Diagnostic`, not degraded to a
+  guessed default. A `Diagnostic` is a value the caller must observe, never
+  swallowed.
+- **`Set.Index() []Meta`** is the discovery projection: `{Name, Description,
+  Truncated}` only — no body field exists on `Meta`, so nothing in the type
+  can leak one. `Description` is truncated to `Options.DescriptionBudget`
+  (default 200 bytes) at a word boundary where one exists.
+- **`Set.Body(name string) (string, error)`** is the one place a body is
+  read, from disk, at invocation time — never cached from `Load`.
+- **Invocation surface is the embedder's choice.** The package does not
+  decide whether a skill surfaces as a tool, a system-prompt injection, or a
+  slash command; `Set.Index`/`Set.Body` are the primitives. The optional
+  `skill.NewTool(*skill.Set) tool.Tool` is one instantiation — a single
+  dispatcher tool whose `Description()` projects the current index and whose
+  `Run` resolves `Body` by name — but it is never registered implicitly; a
+  caller that wants it constructs and `Registry.Register`s it itself.
+- **Path safety**: a skill directory is untrusted input. A symlinked skill
+  subdirectory or a symlinked `SKILL.md` is refused, not followed (reported
+  as a `Diagnostic`); a frontmatter `name` containing a path separator or a
+  `.`/`..` segment is rejected at load time, before it can become a landmine
+  for any embedder-side code that later joins it onto a path.
+## Web search providers (M7)
+
+`search/` is an optional SDK package (extension tier 2 — see *Extension
+tiers*): it performs real network I/O, so nothing in the SDK core imports it.
+It ships a vendor-neutral `Provider` interface, two backend implementations,
+and a name-keyed factory registry that lets a third backend be added without
+touching this package.
+
+- **Interface.** `Provider` is `Search(ctx, query string, opts Options)
+  (*Results, error)` plus `Name() string`. `Options{MaxResults int}` (zero =
+  provider default) configures one call. `Results{Query, Provider, Items
+  []Result, Truncated bool}` and `Result{Rank, Title, URL, Snippet}` are
+  designed to serve both a human-rendered view and a lossless projection into
+  a model-facing tool result — nothing on `Results` requires a caller to go
+  back to the provider for context.
+- **Bounding (context transparency).** A search returning many full-text
+  snippets is a context bomb if unbounded. `DefaultMaxResults` (10) is the
+  per-call default absent config; `MaxResultsCeiling` (25) is a hard clamp
+  `ClampMaxResults` applies regardless of what `Config.MaxResults` or
+  `Options.MaxResults` request, so a misconfigured value cannot blow the
+  budget — a caller needing more results pages via repeated calls instead.
+  `DefaultSnippetLimit` (400 runes) bounds each `Result.Snippet` via
+  `TruncateSnippet`, so one verbose backend description cannot dominate a
+  payload the way an unbounded count would. Both implementations apply these
+  before returning.
+- **Credentials/endpoint are `Config`, never SDK-chosen.** `Config{APIKey,
+  BaseURL, HTTPClient, MaxResults}` is the only way a backend learns its
+  auth material and endpoint — no package reads an environment variable of
+  its own choosing, and no backend defaults `BaseURL` to a real instance.
+  `brave.New` requires `APIKey` (Brave rejects unauthenticated requests);
+  `searxng.New` requires `BaseURL` (a self-hosted instance has no universal
+  default) and treats `APIKey`, when set, as a bearer token for an
+  auth-proxied deployment — SearXNG itself has no native key concept.
+- **Registry.** `search.Register(name string, factory Factory)` adds a named
+  constructor to a package-level map; `search.Build(name, cfg)` dispatches to
+  it. Each backend calls `Register` from its own `init()`, so an embedder
+  wanting `"brave"` blank-imports `search/brave` and never touches a switch
+  statement inside `search` — the extension point `providers.Build`
+  approximates with a hardcoded dispatch, made fully open here. Registering a
+  duplicate name panics at init time (the `database/sql.Register` contract).
+- **Errors.** `*Error{Provider, Kind, StatusCode, Err}` classifies a failure
+  (`ErrKindConfig`/`Request`/`HTTP`/`Decode`) and unwraps to the underlying
+  cause, so `errors.Is(err, context.Canceled)` reaches through a cancelled
+  in-flight request the same way it does elsewhere in the SDK.
+- **Not wired anywhere.** This package defines the interface, backends, and
+  registry only — no `tool_search` tool, no loop/registry integration, no
+  MCP or skill surface. That projection (turning `*Results` into a model-
+  facing tool call) is a separate, not-yet-landed piece.
+
 ## Bulk-payload spill (M3)
 
 Tool output is bulk ground truth, not event payload. Every tool execution
@@ -732,6 +824,264 @@ resuming**. As with `Options.Agent` and the session title, the SDK defines no
 vocabulary and attaches no behavior: it carries the value, the embedder owns its
 meaning.
 
+## Compaction seam (M7)
+
+The journal already modeled compaction's *result* — `session.EntryCompaction`
+and `event.KindSessionCompacted` shipped in v0.17.0, and `Journal.Fold` already
+stopped walking ancestors at a compaction entry. What was missing was a way to
+CAUSE one (agent-sdk-go#89): `NewSessionCompacted` had zero call sites. This
+seam is exactly that trigger, plus the accounting an embedder needs to decide
+when to pull it — nothing about `Fold` changed.
+
+**`Runner.Compact(ctx, instructions) error`** is an explicit method, not a
+threshold or a loop hook — the same shape as `Checkpoint`/`Fork`/`Rewind`: it
+drains `awaitJournaled` first, then appends a `session.EntryCompaction`
+parented on the current HEAD and publishes a must-deliver `session.compacted`.
+It is additive, like `Fork` — nothing is deleted, and the compacted entries
+still count toward `Runner.Cost`.
+
+**The SDK ships no compaction policy.** There is no size threshold and no
+automatic trigger wired into `Prompt` or the loop. An embedder decides WHEN —
+reading `Runner.LastUsage` or a live `turn.finished` event to judge pressure,
+or simply honoring an explicit user command — and calls `Compact` between
+turns. Because `Compact` always operates on whatever HEAD is at the moment
+it's called, compacting right before the next `Prompt` (sized against the last
+known usage) and compacting right after one returns (sized against that turn's
+just-settled usage) are equally correct; there is no separate code path for
+either, so the choice costs the caller nothing either way.
+
+**Rejected: compaction as a fifth loop hook.** The loop's `Hooks` family
+(`BeforeTool`/`AfterTool`/`TransformContext`/`PrepareNextTurn`) was considered
+as the home for this instead of a `Runner` method — `TransformContext` already
+rewrites the message list before each model call, and folding compaction in
+there would make it automatic and embedder-overridable by construction.
+Rejected because `TransformContext` rewrites the in-flight list for ONE call
+only: it is never journaled, does not survive `Resume`, and is not observable
+as a `session.compacted` event without handing the loop direct journal/broker
+access that today only `Runner`'s synchronous append path has (guarded by the
+`awaitJournaled` barrier that keeps a `Prompt`'s own entries from reordering
+against it). Wiring compaction through it would reintroduce exactly that
+ordering hazard for a marginal composability gain the `Summarizer` interface
+already buys another way (below). An explicit method needed no new machinery
+and matches every other structural seam this package ships.
+
+**Summarization is a seam, not a hardcoded prompt.** `instructions` (or
+`DefaultCompactionInstructions`, an exported constant — never a string
+buried in the loop) is threaded through `Options.Summarizer`
+(`runner.Summarizer`), which an embedder replaces wholesale — a different
+model, a custom prompt template, an external service, or a deterministic
+non-LLM condenser for tests — not just the instructions text. The default
+(`defaultSummarizer`) makes one non-tool completion call against the runner's
+own bound provider and reports back `SummarizeResult{Summary, Model, Usage}`;
+Compact journals `Usage` on the compaction entry itself (via
+`WithEntryModel`/`WithEntryUsage`, now accepted by `NewCompactionEntry`) so a
+compaction's own cost folds into `Runner.Cost` like any other turn instead of
+being invisible, and republishes it on `event.SessionCompacted` for a live
+renderer.
+
+**Accounting reused, not duplicated.** `Runner.Cost`/`session.CostReport`
+(cumulative, every branch) and a live `event.TurnFinished{Usage,
+ContextWindow}` (per-turn, already `ContextWindow`-aware via
+`provider.Lookup`) already covered the common case — an embedder that stays
+subscribed already has everything a `/context` view or a pressure threshold
+needs, the same figures its existing usage/stats panel already tracks. The one
+gap: a session with no live turn yet in THIS process (freshly `Resume`d,
+before any new `Prompt`) has nothing to read. `Journal.LastUsage` (and
+`Runner.LastUsage`, its thin wrapper) close it: the model and usage of the
+most recent turn-bearing entry in the CURRENT folded chain — the exact walk
+`Fold` performs (HEAD back to root, or a compaction boundary), refactored out
+as `chainFromHead` so both agree on what "current context" means without
+duplicating the walk. Pair the returned model with `provider.Lookup` for a
+context-window size, exactly as a live `turn.finished`'s `ContextWindow` is
+derived.
+
+**`event.SessionCompacted`'s payload** is designed for a renderer, not just an
+audit log: `ReplacesThrough` (the boundary), `MessagesCompacted` (how many
+provider messages `Fold` held immediately before — "12 messages summarized"
+without walking the journal), `Model`/`Usage` (the summarization call's own
+footprint — `Usage.InputTokens` approximates the pre-compaction context's
+size, since the provider tokenized exactly that content to answer the call;
+`Usage.OutputTokens` approximates the summary's own size — a before/after pair
+with no separate tokenizer dependency), and `Summary` itself, so a client
+renders what happened without a second read of the journal. `Usage` is always
+present on the wire (like `TurnFinished`'s); the rest are omitempty, so a
+strategy that made no model call still marshals a valid, mostly-empty event.
+
+`event.SessionCompact` (the `session.compact` op) gained an optional
+`Instructions` field mirroring the method signature — additive, omitempty, so
+an existing bare `{session_id}` request is unaffected.
+
+## MCP (M7)
+
+`mcp/` is an **optional SDK package**: a hand-rolled JSON-RPC 2.0 client
+(stdio and streamable-HTTP transports) plus the projection of a connected
+server's tools onto `[]tool.Tool`. **Ratified 2026-07-29: hand-write the
+client, don't import one** — this overrides the 2026-07-11 sourcing survey's
+"adopt `modelcontextprotocol/go-sdk`" verdict. `lsp/client.go` already proved
+the pattern (a stdlib-only JSON-RPC-over-stdio client is a few hundred lines,
+not a dependency-worthy amount of code), MCP is the same protocol family, and
+because the optional-package tier controls *compilation* rather than the
+*module graph*, an adopted dependency would land in every embedder's
+`go.sum`/`go list -m all` even when `mcp/` is never imported. Scope is
+deliberately narrow: the client and the tool projection, nothing else —
+server configuration, credential resolution, the connection manager
+(reconnect/backoff/readiness), and any tool-index decorator are the consuming
+application's job.
+
+**Transports.** Stdio (`mcp.Start`, `os/exec`) frames each JSON-RPC message as
+one newline-delimited line — MCP's stdio framing, distinct from LSP's
+Content-Length headers, so `mcp/`'s wire layer is a parallel hand-roll, not a
+shared one. Streamable-HTTP (`mcp.NewHTTP`, `net/http`) POSTs each request to
+a single endpoint and accepts either a plain JSON response or an SSE stream
+(read until the JSON-RPC message whose id matches the request arrives;
+anything else on the stream — a progress notification — is skipped, since
+this package models no notification consumer). Both transports sit behind one
+unexported `transport` interface so `Client`'s lifecycle logic (id assignment,
+JSON-RPC envelope construction, error propagation) is written once.
+
+**Lifecycle.** `Client.Initialize` performs the "initialize" handshake plus
+the required `notifications/initialized` notification. `Client.ListTools`
+paginates `tools/list`'s cursor internally, aggregating every page.
+`Client.CallTool` performs one `tools/call`; its `CallToolResult.IsError`
+mirrors the MCP result's own `isError` field — a tool that ran and reported
+failure, still a successful round trip — while a non-nil `error` return means
+the round trip itself failed (unreachable, timed out, malformed, or a
+JSON-RPC-level error).
+
+**`tools/list` already returns full schemas — index-first is a context
+projection, not a network saving.** There is no MCP affordance for fetching a
+tool's name without its schema: one response carries both. So an index-first
+tool registry (schemas fetched only for a tool the model actually names) can
+only ever be something an application builds AFTER `Project` returns, over
+the tool set already fully loaded into memory — never a lazy per-tool fetch
+against the wire. Do not build the latter; it does not exist to build against.
+
+**Projection: `Project(ctx, *Client, server string) ([]tool.Tool, error)`.**
+Each returned tool wraps the same `*Client` and its own original (unsanitized)
+name; `Run` performs exactly one `tools/call`. This is the load-bearing
+output: an MCP tool and a builtin tool become the same Go type in the same
+`tool.Registry`, so permission gating, the tool-index decorator, and
+diagnostics all apply to both structurally, never by convention. A tool's
+input schema is converted from the server's JSON Schema to `tool.Schema` via
+a best-effort recursive projection (object/array nesting, `enum`, `default`,
+top-level `required`); JSON Schema constructs `tool.Schema` has no
+representation for (`oneOf`/`anyOf`, `patternProperties`,
+`additionalProperties`, per-nested-object `required`) are dropped, not
+rejected — the same limitation every builtin tool's schema already lives
+with, not a new one this package introduces.
+
+**Naming and sanitization (satisfies the permission grammar above).** A
+projected tool is named `mcp__<server>__<tool>`, matching the
+`mcp__search__*(*)` form the permission rule grammar documents. Sanitization
+is mandatory: providers cap tool names at 64 bytes of `[A-Za-z0-9_-]`, and a
+real federated name can exceed that (`mcp__home-assistant__ha_config_list_dashboard_resources`
+is already 54 characters). `qualifiedToolName`:
+
+1. Sanitizes `server` and `tool` independently — every rune outside
+   `[A-Za-z0-9_-]` becomes `_` — so the result is pure ASCII and a later
+   byte-length truncation can never split a multi-byte rune.
+2. Joins them as `mcp__<server>__<tool>`.
+3. If that exceeds 64 bytes: truncates to the first 57 bytes, appends `_`,
+   then the first 6 hex characters of the sha256 of the **full** (untruncated)
+   sanitized name — not just the surviving prefix. Two names that agree on
+   everything up to the cut but differ only past it therefore still land on
+   distinct qualified names, deterministically and without a collision table.
+
+The original, unsanitized name stays available (`projectedTool.OriginalName`)
+for display/audit; it is also what `tools/call` is actually sent with — only
+the model- and permission-facing name is sanitized. An unsanitized or
+over-long name is a provider 400 that kills the entire request, not just the
+offending tool, which is why sanitization is mandatory rather than defensive
+polish.
+
+**Resilience is this client's contract; the connection manager is gofer's
+job.** A dead, slow, or unreachable server must never fail a whole turn:
+`projectedTool.Run` maps a `CallTool` failure to a `tool.Result{IsError:
+true}` carrying a message the model can react to (e.g. "mcp server X tool Y
+failed: ..."), never to a Go `error` — *unless* the ctx `Run` itself was given
+is what ended the call (checked via `ctx.Err()` on the ORIGINAL ctx, after
+`CallTool` returns its own internally-timeout-derived error), in which case it
+propagates as a real error and the loop aborts the turn, exactly like any
+other tool's ctx cancellation. `Client`'s per-server connect timeout
+(`WithConnectTimeout`, default `DefaultConnectTimeout` = 10s, applied to
+`Initialize`) and per-call timeout (`WithCallTimeout`, default
+`DefaultCallTimeout` = 60s, applied to `ListTools`/`CallTool`) are what
+produce that internal, non-propagating failure for a hung server — both are
+configurable, never hardcoded, and compose with a caller-supplied ctx
+deadline via `context.WithTimeout` (whichever is sooner wins). Because a
+`projectedTool` always returns SOME `tool.Result` — it never becomes
+"invalid" — a caller never needs to unregister it when its server misbehaves:
+the same `[]tool.Tool` a session started with stays the same array all
+session long, which matters because mutating a session's tool array
+mid-session silently breaks prompt caching.
+
+**Hard invariant: a session's tool set is fixed at create — this package
+never mutates one, and neither may the connection manager built on it.**
+`Project` is a one-shot snapshot; nothing here watches a server or re-projects
+on reconnect. The consuming application's connection manager must preserve
+that all the way up: a server that finishes connecting *after* a session is
+already running joins the NEXT session, never a live one, and a server that
+dies mid-session keeps its already-projected tools registered (degrading to
+`IsError` per above, and working again on reconnect with no re-registration).
+This is load-bearing, not stylistic: a resident-tool-index decorator built
+over a session's registry (`toolindex`, see `docs/milestones/M7-round-ab.md`)
+snapshots that registry once at `Wrap` time and stakes a prompt-cache
+byte-identity guarantee on the tool array never growing afterward —
+hot-adding a late-connecting server's tools into a live session would break
+that guarantee silently, with nothing in either package's test suite to catch
+it.
+## Index-first tool registry (M7, `toolindex/`)
+
+Federating many tool sources (MCP servers, plugins, builtins) into one
+`req.Tools = r.cfg.Tools.Specs()` call must not mean every schema rides every
+model call — that is the "context transparency" tenet applied to tool
+surfaces. `toolindex.Index` is the seam: a decorator satisfying `loop.
+ToolRegistry` (`Get` + `Specs`), so it drops straight into `Config.Tools` with
+zero loop changes. `tool.Tool` and `tool.Registry` are untouched; the decorator
+never even sees a `tool.Tool`, only the `provider.ToolSpec`s the wrapped
+registry's `Specs()` already returns — uniformity (builtin vs MCP vs plugin)
+is structural, not conventional, because the decorator has no way to tell
+them apart.
+
+**Two-phase construction.** `toolindex.New(opts)` builds the Index; `Index.
+SearchTool()` returns a `tool.Tool` for `tool_search` that the caller registers
+into the base `tool.Registry` **before** `Index.Wrap(base)` snapshots that
+registry's `Specs()` into the index's entries — otherwise `tool_search` itself
+would be unknown to the base. `Wrap` also fixes the always-resident name set
+(`Options.Resident`, plus `tool_search` itself forced resident — the discovery
+mechanism can never go dark) and panics on a second call, matching `tool.
+NewRegistry`'s construction-time-error contract.
+
+**`Specs()` ordering is the cache-safety property.** It returns resident
+(sorted) ++ promoted (promotion order) — appended, never merged into sorted
+order — so indices `[0..len(resident)-1]` stay byte-identical across a
+promotion; a provider's longest-cached-prefix match only has to reprice the
+promoted tail. Residency is monotonic: `Options.Resident` is fixed at `Wrap`,
+and the promoted set only grows.
+
+**`Get(name)`** delegates to the base for any name it knows, auto-promoting a
+non-resident hit — a model that already guessed a valid tool name is served,
+not punished for skipping search. Promotion is otherwise driven by
+`tool_search`'s `Run`, which batches its whole result set through one
+`Promote` call (N discoveries, one `Specs()`-tail rewrite) and states in its
+result text that those tools' schemas resolve starting next turn — never the
+schemas themselves, which would double-bill the tokens this package exists to
+save. `Rehydrate` gives a session-resume path the same monotonic promotion
+without replaying a search.
+
+**`Hint()` is two-tiered and returns a string, never injects.** At or below
+`Options.InlineMax` entries it inlines the whole `name — summary` index; above
+it, a per-`Source` roster (count + sample names) plus the `tool_search`
+instruction — a flat index over hundreds of federated tools runs to
+thousands of tokens on its own, so the roster tier keeps `Hint` itself small
+regardless of federated surface size. The embedder composes, replaces, or
+drops the returned string; that is how the "nothing enters context the
+embedder can't see and override" tenet is upheld here.
+
+**Deferred, by ratified scope.** No auditability layer (`turn.started.
+Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
+public surface expands to support it; that is a follow-on PR.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
@@ -774,8 +1124,9 @@ Three tiers, by trust and coupling:
 1. **Core** — hot path, security, or contract; compiled in (loop, broker,
    permission engine, session).
 2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
-   import (`mcp/` and the vendor settings loaders, both planned for M5).
-   First-party and trusted, but not forced on every embedder.
+   import (`search/` and `mcp/` — see "MCP (M7)" below — both ship M7; the
+   vendor settings loaders are still planned). First-party and trusted, but
+   not forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
    over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
 
@@ -786,7 +1137,7 @@ The tier is set by the two-gate test: would a second app need it unchanged
 
 | Need | Verdict | Source |
 |---|---|---|
-| MCP client | **adopt** | `modelcontextprotocol/go-sdk` (official) |
+| MCP client | ~~adopt~~ **build (superseded 2026-07-29)** | Hand-rolled, following `lsp/client.go`'s stdlib-only JSON-RPC-over-stdio precedent, extended to also cover streamable-HTTP. Overrides this survey row: MCP is the same protocol family the SDK already hand-rolls for LSP, and `modelcontextprotocol/go-sdk` would land in every embedder's module graph (`go.sum`) even unimported — the optional-package tier controls compilation, not the module graph. See "MCP (M7)" below. |
 | ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in the application, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
 | WASM plugin tier | **adopt** | `knqyf263/go-plugin` (wazero, typed interfaces) |
 | Provider + streaming | build | thin, with a cross-vendor content-block message model |

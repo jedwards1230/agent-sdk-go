@@ -228,6 +228,118 @@ func TestJournalFoldCompactionBoundary(t *testing.T) {
 	}
 }
 
+// TestJournalLastUsage covers the accounting Runner.LastUsage exposes to a
+// consumer: an empty journal reports ok=false, the most recent usage-bearing
+// entry in the CURRENT folded chain wins (a later entry with no usage of its
+// own does not erase the last one that had it), a fork drops an abandoned
+// branch's usage from view (unlike Cost, which still counts it), and a
+// compaction entry's own usage — the summarization call's footprint — is
+// itself a valid answer once every ordinary turn before it has been folded
+// away.
+func TestJournalLastUsage(t *testing.T) {
+	ctx := context.Background()
+	newJournal := func(t *testing.T) *session.Journal {
+		t.Helper()
+		store, err := session.NewFileStore(
+			session.WithRoot(t.TempDir()),
+			session.WithStoreIDGen(newCounterIDGen("e")),
+			session.WithStoreClock(newStepClock(time.Now(), time.Second)),
+		)
+		if err != nil {
+			t.Fatalf("NewFileStore: %v", err)
+		}
+		j, err := store.Create(ctx, "proj")
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return j
+	}
+
+	t.Run("empty journal", func(t *testing.T) {
+		j := newJournal(t)
+		if _, _, ok := j.LastUsage(); ok {
+			t.Error("LastUsage() ok = true on an empty journal, want false")
+		}
+	})
+
+	t.Run("most recent usage-bearing entry wins", func(t *testing.T) {
+		j := newJournal(t)
+		u1 := provider.Usage{InputTokens: 10, OutputTokens: 5}
+		u2 := provider.Usage{InputTokens: 40, OutputTokens: 8}
+		if _, err := j.Append(session.NewMessageEntry(provider.UserText("a"),
+			session.WithEntryModel("model-a"), session.WithEntryUsage(u1))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if _, err := j.Append(session.NewMessageEntry(provider.AssistantText("b"),
+			session.WithEntryModel("model-a"), session.WithEntryUsage(u2))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		// A later marker entry (no usage) must not shadow the last real one.
+		if _, err := j.Append(session.NewCheckpointEntry("mark")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+
+		model, usage, ok := j.LastUsage()
+		if !ok {
+			t.Fatal("LastUsage() ok = false, want true")
+		}
+		if model != "model-a" {
+			t.Errorf("model = %q, want model-a", model)
+		}
+		if !usage.Equal(u2) {
+			t.Errorf("usage = %+v, want the most recent entry's %+v", usage, u2)
+		}
+	})
+
+	t.Run("fork drops the abandoned branch's usage", func(t *testing.T) {
+		j := newJournal(t)
+		// "a" deliberately carries no usage, so a false pass on the assertion
+		// below can only come from LastUsage wrongly reaching past the fork
+		// point into the abandoned "b".
+		a, err := j.Append(session.NewMessageEntry(provider.UserText("a")))
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if _, err := j.Append(session.NewMessageEntry(provider.AssistantText("b"),
+			session.WithEntryModel("model-a"), session.WithEntryUsage(provider.Usage{InputTokens: 99, OutputTokens: 99}))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if _, err := j.Fork(a.ID); err != nil {
+			t.Fatalf("Fork: %v", err)
+		}
+
+		// Nothing after the fork carries usage, and the abandoned "b" entry is
+		// out of the current chain — same as Fold, LastUsage must not see it.
+		if _, _, ok := j.LastUsage(); ok {
+			t.Error("LastUsage() ok = true after forking away the only usage-bearing entry, want false")
+		}
+	})
+
+	t.Run("compaction entry's own usage is a valid answer", func(t *testing.T) {
+		j := newJournal(t)
+		if _, err := j.Append(session.NewMessageEntry(provider.UserText("old"),
+			session.WithEntryModel("model-a"), session.WithEntryUsage(provider.Usage{InputTokens: 1, OutputTokens: 1}))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		summarizeUsage := provider.Usage{InputTokens: 500, OutputTokens: 60}
+		if _, err := j.Append(session.NewCompactionEntry("summary", j.Head(),
+			session.WithEntryModel("model-b"), session.WithEntryUsage(summarizeUsage))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+
+		model, usage, ok := j.LastUsage()
+		if !ok {
+			t.Fatal("LastUsage() ok = false, want true")
+		}
+		if model != "model-b" {
+			t.Errorf("model = %q, want model-b (the summarizer's model)", model)
+		}
+		if !usage.Equal(summarizeUsage) {
+			t.Errorf("usage = %+v, want %+v", usage, summarizeUsage)
+		}
+	})
+}
+
 // TestJournalForkBranch asserts Fork parents a new fork_point entry on an
 // older entry, subsequent appends chain onto it, HEAD moves, Fold drops the
 // abandoned branch while Entries retains everything.

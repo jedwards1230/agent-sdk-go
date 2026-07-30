@@ -236,11 +236,19 @@ func NewToolRoundEntry(blocks []provider.ContentBlock, opts ...EntryOpt) Entry {
 }
 
 // NewCompactionEntry constructs a compaction entry summarizing everything up
-// to and including replacesThrough.
-func NewCompactionEntry(summary, replacesThrough string) Entry {
+// to and including replacesThrough. opts optionally attach the model and
+// token usage the summarization call spent producing summary (see
+// [WithEntryModel], [WithEntryUsage]) — the same per-entry accounting a
+// message or tool-round entry carries, so a compaction's own cost folds into
+// [Journal.Cost] like any other turn rather than being invisible. Both are
+// left zero when the summarization strategy made no model call.
+func NewCompactionEntry(summary, replacesThrough string, opts ...EntryOpt) Entry {
+	cfg := newEntryConfig(opts)
 	payload := CompactionPayload{Summary: summary, ReplacesThrough: replacesThrough}
 	return Entry{
 		Type:    EntryCompaction,
+		Model:   cfg.model,
+		Usage:   cfg.usage,
 		Payload: marshalPayload(payload),
 	}
 }

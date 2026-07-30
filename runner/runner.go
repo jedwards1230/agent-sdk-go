@@ -140,6 +140,19 @@ type Options struct {
 	// the loop denies). Passed straight through to the loop.
 	Approver loop.Approver
 
+	// Summarizer produces the summary [Runner.Compact] appends as a session's
+	// compaction entry. Nil (the default) uses one completion call against
+	// THIS runner's own provider and model, with the Compact caller's
+	// instructions (or [DefaultCompactionInstructions] when empty) as the
+	// system prompt over the folded context being compacted. Set it to
+	// replace the ENTIRE compaction strategy — a different (cheaper/faster)
+	// model, a custom prompt template, an external summarization service, or
+	// a deterministic non-LLM condenser for tests — not just the
+	// instructions text: Compact's instructions argument still reaches
+	// whatever strategy is installed, as [SummarizeRequest.Instructions], but
+	// what a strategy does with it is entirely its own. See [Summarizer].
+	Summarizer Summarizer
+
 	// IDGen overrides the session/entry id generator. Test seam.
 	IDGen func() string
 	// Clock overrides the wall clock used to timestamp journal entries. Test
@@ -195,10 +208,11 @@ type Runner struct {
 	depth    int
 	maxDepth int
 
-	provider provider.Provider
-	tools    loop.ToolRegistry
-	guard    loop.Guard
-	approver loop.Approver
+	provider   provider.Provider
+	tools      loop.ToolRegistry
+	guard      loop.Guard
+	approver   loop.Approver
+	summarizer Summarizer
 
 	broker  *event.Broker
 	journal *session.Journal
@@ -411,6 +425,13 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 	if maxDepth <= 0 {
 		maxDepth = DefaultMaxDepth
 	}
+	// The default summarizer binds to THIS runner's own provider, so
+	// Options.Summarizer's zero value is a real, working strategy — no
+	// separate nil-check at every Compact call.
+	summarizer := opts.Summarizer
+	if summarizer == nil {
+		summarizer = defaultSummarizer{provider: prov}
+	}
 
 	r := &Runner{
 		model:       opts.Model,
@@ -427,6 +448,7 @@ func build(opts Options, store session.Store, journal *session.Journal, prov pro
 		tools:       tools,
 		guard:       opts.Guard,
 		approver:    opts.Approver,
+		summarizer:  summarizer,
 		broker:      broker,
 		journal:     journal,
 		store:       store,
