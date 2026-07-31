@@ -57,7 +57,12 @@ type ToolResult struct {
 	Content string
 	// IsError marks a failed execution.
 	IsError bool
-	// Diagnostics are optional advisory messages (e.g. LSP findings).
+	// Diagnostics are optional advisory messages (e.g. LSP findings) carried
+	// onto the emitted tool.call.finished event. Nothing in the SDK populates
+	// them: the consuming application does, through either seam that reaches a
+	// ToolResult — a [Hooks] AfterTool hook, or a decorated [ToolRegistry] —
+	// typically assigning the lines rendered by lsp.Batch.Strings. tool.Result
+	// has no diagnostics field, so [FromRegistry] never sets this.
 	Diagnostics []string
 	// Edits are the structured file mutations the tool performed, carried onto
 	// the emitted tool.call.finished event so a client can render a diff. The
