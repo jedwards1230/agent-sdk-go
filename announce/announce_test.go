@@ -499,6 +499,22 @@ func TestPayloadOmitsEmptyCredential(t *testing.T) {
 	}
 }
 
+// client is an entirely ordinary embedder shape: a Payload held in an
+// UNEXPORTED field of another struct. It is in the leak test's subject list
+// because it is the one path where fmt never reaches Credential's redaction
+// methods at all — fmt only calls Format, String or GoString when the reflected
+// value reports CanInterface, and that is false for anything reached through an
+// unexported field, so it falls through to reflection over the struct.
+//
+// Measured against the string-valued Credential this test now guards:
+//
+//	%+v → {p:{... Credential:{value:opaque.bearer.blob} ...}}
+//
+// The secret, in clear. Credential.value is a *string for exactly this reason:
+// fmt renders a pointer at depth > 0 as a hex address and never follows it, so
+// the same dump now yields Credential:{_:[] value:0x14000120020}.
+type client struct{ p Payload }
+
 // TestCredentialDoesNotLeakThroughFormatting is the real gate on [Credential].
 // A Payload is exactly the sort of value that gets printed while debugging, so
 // the secret must survive none of it: not %v on the payload, not %+v, not %s,
@@ -508,6 +524,10 @@ func TestPayloadOmitsEmptyCredential(t *testing.T) {
 // and %X; every other verb falls through to reflection, which happily prints an
 // unexported field. Before Credential.Format existed, %d on a struct holding a
 // credential printed `{{%!d(string=s3cr3t)}}` — the value, in clear.
+//
+// The [client] subjects cover the complementary hole: the path where reflection
+// runs no matter what methods Credential has. Those are gated by the field
+// being a pointer, not by Format.
 func TestCredentialDoesNotLeakThroughFormatting(t *testing.T) {
 	p := validPayload(t)
 	if p.Credential.Reveal() != testSecret {
@@ -542,6 +562,10 @@ func TestCredentialDoesNotLeakThroughFormatting(t *testing.T) {
 				{"credential pointer", &p.Credential},
 				{"payload slice", []Payload{p}},
 				{"payload map", map[string]Payload{"k": p}},
+				{"payload in an unexported field", client{p}},
+				{"pointer to a struct with an unexported field", &client{p}},
+				{"slice of structs with an unexported field", []client{{p}}},
+				{"credential in an unexported field", struct{ c Credential }{p.Credential}},
 			}
 			for _, s := range subjects {
 				got := fmt.Sprintf(v.verb, s.val)
@@ -553,11 +577,96 @@ func TestCredentialDoesNotLeakThroughFormatting(t *testing.T) {
 	}
 
 	// The convenience wrappers that do not name a verb route through %v, and
-	// are what a careless log line actually calls.
-	for _, got := range []string{fmt.Sprint(p), fmt.Sprintln(p), fmt.Sprint(p.Credential)} {
+	// are what a careless log line actually calls. fmt.Errorf is the same %v
+	// one indirection later — an error carrying the secret is a log line
+	// carrying the secret.
+	for _, got := range []string{
+		fmt.Sprint(p),
+		fmt.Sprintln(p),
+		fmt.Sprint(p.Credential),
+		fmt.Sprint(client{p}),
+		fmt.Errorf("boom: %v", p).Error(),
+		fmt.Errorf("boom: %v", client{p}).Error(),
+		fmt.Errorf("boom: %+v", client{p}).Error(),
+	} {
 		if strings.Contains(got, testSecret) {
 			t.Errorf("fmt.Sprint-family leaked the credential: %s", got)
 		}
+	}
+}
+
+// TestCredentialEmptyHasOneRepresentation pins the invariant the pointer field
+// makes possible to get wrong: "" and "no credential" must be the SAME value,
+// not two values that merely agree on IsZero. A non-nil pointer to "" would
+// make an encode/decode round trip come back not reflect.DeepEqual to what went
+// in, which is what TestPayloadRoundTrip compares — the failure would show up
+// as a flaky-looking round-trip mismatch far from its cause.
+func TestCredentialEmptyHasOneRepresentation(t *testing.T) {
+	decodeJSON := func(t *testing.T, data string) Credential {
+		t.Helper()
+		var c Credential
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", data, err)
+		}
+		return c
+	}
+	decodeYAML := func(t *testing.T, data string) Credential {
+		t.Helper()
+		var c Credential
+		if err := yaml.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatalf("yaml.Unmarshal(%q): %v", data, err)
+		}
+		return c
+	}
+
+	tests := []struct {
+		name string
+		get  func(*testing.T) Credential
+	}{
+		{"zero value", func(*testing.T) Credential { return Credential{} }},
+		{"NewCredential of the empty string", func(*testing.T) Credential { return NewCredential("") }},
+		{"json empty string", func(t *testing.T) Credential { return decodeJSON(t, `""`) }},
+		{"json null", func(t *testing.T) Credential { return decodeJSON(t, `null`) }},
+		{"yaml empty string", func(t *testing.T) Credential { return decodeYAML(t, `""`) }},
+		{"yaml null", func(t *testing.T) Credential { return decodeYAML(t, `null`) }},
+		{"decoded from a marshalled zero", func(t *testing.T) Credential {
+			data, err := json.Marshal(Credential{})
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			return decodeJSON(t, string(data))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := tt.get(t)
+			if !reflect.DeepEqual(c, Credential{}) {
+				t.Errorf("credential = %#v, want it DeepEqual to the zero Credential", c)
+			}
+			if !c.IsZero() {
+				t.Error("IsZero() = false, want true")
+			}
+			if got := c.Reveal(); got != "" {
+				t.Errorf("Reveal() = %q, want the empty string", got)
+			}
+		})
+	}
+}
+
+// TestCredentialDeepEqualComparesValues is the other half of making Credential
+// non-comparable: `==` is a compile error, so reflect.DeepEqual is the
+// supported structural comparison and it must follow the pointer rather than
+// compare addresses. The announce round-trip tests depend on this.
+func TestCredentialDeepEqualComparesValues(t *testing.T) {
+	a, b := NewCredential(testSecret), NewCredential(testSecret)
+	if !reflect.DeepEqual(a, b) {
+		t.Error("two credentials holding the same secret are not DeepEqual — the pointer is being compared, not the value")
+	}
+	if reflect.DeepEqual(a, NewCredential("other")) {
+		t.Error("credentials holding different secrets compared DeepEqual")
+	}
+	if reflect.DeepEqual(a, Credential{}) {
+		t.Error("a set credential compared DeepEqual to the zero Credential")
 	}
 }
 

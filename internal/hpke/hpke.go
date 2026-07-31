@@ -63,12 +63,14 @@ const (
 	KeySize = 32
 )
 
-// ErrOpen reports that an AEAD ciphertext did not authenticate, or that the
-// key schedule it was opened under could not be reproduced. Like the caller's
-// own open error it carries no detail about which step failed.
+// ErrOpen reports that [OpenAuth] failed somewhere after its inputs were
+// checked for length: decapsulation, the key schedule, or the AEAD. It
+// deliberately carries no detail about which — see [OpenAuth] on why.
 var ErrOpen = errors.New("hpke: open failed")
 
-// ErrKeySize reports a key or encapsulation of the wrong length.
+// ErrKeySize reports a key or encapsulation of the wrong length. It is
+// structural, not cryptographic: it says the caller passed the wrong number of
+// bytes, which is a bug in the caller and reveals nothing about any secret.
 var ErrKeySize = errors.New("hpke: wrong key length")
 
 // SealAuth encapsulates to recipientPub in mode_auth as senderPriv and seals
@@ -107,21 +109,43 @@ func SealAuth(rand io.Reader, recipientPub, senderPriv, info []byte, aadFor func
 }
 
 // OpenAuth decapsulates enc with recipientPriv in mode_auth, authenticating it
-// as coming from senderPub, and opens ciphertext at sequence 0. Every
-// cryptographic failure — a bad encapsulation, a shared secret that does not
-// match, a forged tag — surfaces as ErrOpen.
+// as coming from senderPub, and opens ciphertext at sequence 0.
+//
+// # The error contract, exactly
+//
+// There are two error classes and the split is drawn at input validation:
+//
+//   - LENGTH is checked first, before any key material is touched, and a wrong
+//     length is reported as ErrKeySize. That is a structural bug in the caller
+//     and says nothing about a secret.
+//   - EVERYTHING after that — a point crypto/ecdh rejects, a low-order or
+//     all-zero encapsulation, a shared secret that does not match, a key
+//     schedule that will not derive, a forged tag — is exactly ErrOpen and
+//     nothing more. No wrapping, no cause, no distinguishable message.
+//
+// The second half is the point: an attacker who can feed this function chosen
+// bytes learns one bit, "it did not open", from every one of those failures.
+// Reporting which step failed would turn the package into a decryption oracle —
+// low-order encapsulations in particular are attacker-supplied, and a distinct
+// error for them would confirm the recipient key reached ECDH at all.
 func OpenAuth(recipientPriv, senderPub, enc, info, aad, ciphertext []byte) ([]byte, error) {
+	// Pre-validation: structural, and the only failure reported distinctly.
+	// authDecap re-checks these lengths for its own direct callers; doing it
+	// here is what keeps the check ahead of the ErrOpen collapse below.
+	if len(enc) != KeySize || len(recipientPriv) != KeySize || len(senderPub) != KeySize {
+		return nil, fmt.Errorf("hpke: decap: %w", ErrKeySize)
+	}
 	sharedSecret, err := authDecap(enc, recipientPriv, senderPub)
 	if err != nil {
-		return nil, err
+		return nil, ErrOpen
 	}
 	key, baseNonce, _, err := keySchedule(sharedSecret, info)
 	if err != nil {
-		return nil, err
+		return nil, ErrOpen
 	}
 	aead, err := chacha20poly1305.New(key)
 	if err != nil {
-		return nil, fmt.Errorf("hpke: aead: %w", err)
+		return nil, ErrOpen
 	}
 	plaintext, err := aead.Open(nil, baseNonce, ciphertext, aad)
 	if err != nil {
@@ -158,6 +182,10 @@ func authEncap(rand io.Reader, recipientPub, senderPriv []byte) (enc, sharedSecr
 		return nil, nil, fmt.Errorf("hpke: encap: read ephemeral: %w", err)
 	}
 	skE, err := curve.NewPrivateKey(scalar)
+	// This scrubs OUR copy only. NewPrivateKey has already copied the scalar
+	// into the returned key, and crypto/ecdh offers no way to scrub that copy —
+	// it lives until the key is collected. So the clear reduces the window in
+	// which the ephemeral scalar is resident, it does not eliminate it.
 	clear(scalar)
 	if err != nil {
 		return nil, nil, fmt.Errorf("hpke: encap: ephemeral key: %w", err)
@@ -253,6 +281,14 @@ func extractAndExpand(dh, kemContext []byte) ([]byte, error) {
 
 // keySchedule is RFC 9180 §5.1 KeySchedule for mode_auth with no PSK: psk and
 // psk_id are both the empty string, so both hashes are over the label alone.
+//
+// It derives and returns exporterSecret even though the package exposes no
+// exporter (see the package doc) and both callers discard it with _. That is
+// deliberate, not dead code: exporter_secret is a published field of every CFRG
+// vector, and TestKeyScheduleMatchesVector asserts it. Checking it proves the
+// schedule agrees with the RFC at a third independent point, which is worth
+// more than the line it costs — and derivation order does not affect key or
+// base_nonce, so returning it changes nothing else.
 func keySchedule(sharedSecret, info []byte) (key, baseNonce, exporterSecret []byte, err error) {
 	suite := suiteID()
 	var psk, pskID []byte

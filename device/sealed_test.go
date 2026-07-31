@@ -418,6 +418,22 @@ func TestSealedUnmarshalJSONRejectsMalformed(t *testing.T) {
 // FAILS against the old construction, where that recovery succeeds; that
 // mutation is the evidence, since against the new construction the test can only
 // pass.
+//
+// # What this test does and does not gate, honestly
+//
+// It is the ARTIFACT of that migration, not the standing cryptographic gate.
+// Against the current tree the NaCl recovery has no wire nonce to run under, so
+// what this test now asserts is the WIRE SHAPE: no `nonce` field, and — if one
+// ever reappears — that the static-static recovery still fails under it. A
+// reintroduced nonce field fails here loudly instead of silently skipping the
+// only assertion in the function, which is what it did before.
+//
+// The cryptographic property itself is gated in internal/hpke, by the RFC 9180
+// vector suite. That is not a hope: an independent reviewer mutated authEncap's
+// derivation to dh = DH(skS,pkR) || DH(skS,pkR) — which destroys forward
+// secrecy while leaving the wire shape byte-for-byte identical, so nothing in
+// THIS file could notice — and the vector tests caught it. Look there when
+// changing the KEM; look here when changing the envelope's fields.
 func TestSealForwardSecrecyAgainstSenderKeyCompromise(t *testing.T) {
 	sender, recipient := pair(t), pair(t)
 	plaintext := []byte("compromise the sender key after the fact")
@@ -451,13 +467,21 @@ func TestSealForwardSecrecyAgainstSenderKeyCompromise(t *testing.T) {
 	if !ok {
 		t.Fatalf("wire carries no decodable ciphertext: %s", wire)
 	}
-	nonceBytes, ok := field("nonce")
-	if !ok || len(nonceBytes) != 24 {
-		// No usable wire nonce: the static-static recovery has nothing to run
-		// under, so the attacker cannot recover the plaintext. That is a pass,
-		// not a test error.
-		return
+	// Assertion 1 — the wire shape. HPKE derives its AEAD nonce from the key
+	// schedule and publishes none, so the absence of this field is something to
+	// ASSERT, not to skip on: a reappearing `nonce` means the envelope grew a
+	// field, which changes what an attacker holding the sender key can attempt.
+	// Errorf, not Fatalf, so assertion 2 still runs and reports under it.
+	if raw, present := env["nonce"]; present {
+		t.Errorf("the envelope grew a wire nonce (%v): HPKE publishes none, so this test's premise no longer holds — re-derive it; wire: %s", raw, wire)
 	}
+
+	// Assertion 2 — the recovery itself, always reached. With a nonce on the
+	// wire this is the original pre-HPKE attack, run verbatim. With none, the
+	// zero nonce stands in: it is the most the attacker can do with the
+	// material the current wire actually gives it, and it keeps this branch
+	// from being a silent no-op.
+	nonceBytes, _ := field("nonce")
 	var nonce [24]byte
 	copy(nonce[:], nonceBytes)
 

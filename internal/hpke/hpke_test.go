@@ -184,7 +184,15 @@ func TestKeyScheduleMatchesVector(t *testing.T) {
 	if err != nil {
 		t.Fatalf("labeledExtract info_hash: %v", err)
 	}
-	ksContext := append([]byte{modeAuth}, append(pskIDHash, infoHash...)...)
+	// Built the way the production code builds it — a fresh slice appended to,
+	// never `append(pskIDHash, ...)`, which can write through pskIDHash's
+	// backing array. Harmless at this call site, but this is exactly the
+	// aliasing pattern keySchedule deliberately avoids, and a test that models
+	// the code differently is one refactor away from proving the wrong thing.
+	ksContext := make([]byte, 0, 1+len(pskIDHash)+len(infoHash))
+	ksContext = append(ksContext, modeAuth)
+	ksContext = append(ksContext, pskIDHash...)
+	ksContext = append(ksContext, infoHash...)
 	if got, want := hex.EncodeToString(ksContext), fv.KeyScheduleContext; got != want {
 		t.Errorf("key_schedule_context = %s, want %s", got, want)
 	}
@@ -379,6 +387,74 @@ func TestOpenAuthRejectsMismatch(t *testing.T) {
 				t.Errorf("returned plaintext %x alongside an error", pt)
 			}
 		})
+	}
+}
+
+// TestOpenAuthCollapsesPostValidationFailuresToErrOpen is the gate on OpenAuth's
+// error contract: everything that fails AFTER the length check must be exactly
+// ErrOpen, so the package is not a decryption oracle.
+//
+// The degenerate keys are the cases that used to escape. An all-zero enc or an
+// all-zero senderPub is the right LENGTH, so it sails past validation and dies
+// inside crypto/ecdh, which rejects low-order points per RFC 7748 §6.1. Before
+// this contract was enforced, that surfaced verbatim as
+//
+//	hpke: decap: ephemeral dh: crypto/ecdh: bad X25519 remote ECDH input: low order point
+//
+// — not errors.Is(err, ErrOpen), and a distinguishable answer to bytes an
+// attacker chose.
+func TestOpenAuthCollapsesPostValidationFailuresToErrOpen(t *testing.T) {
+	recipient, sender := newKey(t), newKey(t)
+	info, aad := []byte("info"), []byte("aad")
+
+	enc, ct, err := SealAuth(rand.Reader, recipient.pub, sender.priv, info, func([]byte) []byte { return aad }, []byte("secret"))
+	if err != nil {
+		t.Fatalf("SealAuth: %v", err)
+	}
+
+	zero := make([]byte, KeySize)
+	tests := []struct {
+		name string
+		open func() ([]byte, error)
+	}{
+		{
+			name: "all-zero encapsulation",
+			open: func() ([]byte, error) { return OpenAuth(recipient.priv, sender.pub, zero, info, aad, ct) },
+		},
+		{
+			name: "all-zero sender key",
+			open: func() ([]byte, error) { return OpenAuth(recipient.priv, zero, enc, info, aad, ct) },
+		},
+		{
+			name: "all-zero recipient key",
+			open: func() ([]byte, error) { return OpenAuth(zero, sender.pub, enc, info, aad, ct) },
+		},
+		{
+			name: "all-zero everything",
+			open: func() ([]byte, error) { return OpenAuth(zero, zero, zero, info, aad, ct) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pt, err := tt.open()
+			if !errors.Is(err, ErrOpen) {
+				t.Fatalf("err = %v, want %v", err, ErrOpen)
+			}
+			// Nothing more than ErrOpen: a wrapped cause would still satisfy
+			// errors.Is while leaking which step failed into the message.
+			if err.Error() != ErrOpen.Error() {
+				t.Errorf("err message = %q, want exactly %q — no cause may ride along", err, ErrOpen)
+			}
+			if pt != nil {
+				t.Errorf("returned plaintext %x alongside an error", pt)
+			}
+		})
+	}
+
+	// The structural half of the contract stays distinct and stays reachable:
+	// a wrong LENGTH is still ErrKeySize, checked before any of the above.
+	if _, err := OpenAuth(recipient.priv, sender.pub, enc[:KeySize-1], info, aad, ct); !errors.Is(err, ErrKeySize) {
+		t.Errorf("short encapsulation: err = %v, want %v", err, ErrKeySize)
 	}
 }
 

@@ -113,6 +113,12 @@ func sealedInfo(version int) []byte {
 // the KEM derive a different shared secret, so Open fails regardless. The AAD
 // makes that binding explicit and, more importantly, covers the version byte,
 // which the KEM does not see.
+//
+// PRECONDITION: 0 <= version < 256. I2OSP(version, 1) is one byte, and
+// byte(version) truncates silently past it — versions 1 and 257 would produce
+// the same AAD. Both call sites gate on version == SealedVersion first, so this
+// is unreachable today; a v256 needs a wider length prefix here, and by then the
+// envelope format has changed enough to be revisiting this function anyway.
 func sealedAAD(version int, sender PublicKey, ephemeral []byte) []byte {
 	aad := make([]byte, 0, 1+2*KeySize)
 	aad = append(aad, byte(version))
@@ -131,10 +137,19 @@ func sealedAAD(version int, sender PublicKey, ephemeral []byte) []byte {
 // Every call reads 32 bytes from rand for a fresh ephemeral private scalar; a
 // nil rand uses crypto/rand.Reader (a deterministic reader is for tests only).
 // There is no wire nonce to manage: HPKE derives the AEAD nonce from the key
-// schedule, and because each envelope has its own ephemeral — hence its own
-// key — sealing at sequence 0 every time never reuses a (key, nonce) pair. If
-// rand fails or returns short, Seal returns an error rather than sealing under
-// weak randomness.
+// schedule, and PROVIDED rand is a real CSPRNG, each envelope gets its own
+// ephemeral — hence its own key — so sealing at sequence 0 every time never
+// reuses a (key, nonce) pair. If rand fails or returns short, Seal returns an
+// error rather than sealing under weak randomness.
+//
+// That guarantee is conditional on rand, and the rand parameter is a seam for
+// tests, so state the cost plainly: a reader that REPEATS its output produces
+// the same ephemeral, hence the same HPKE key AND the same base_nonce, for two
+// different envelopes. That is catastrophic, not degraded — ChaCha20Poly1305
+// reuses its keystream, XORing two ciphertexts reveals the XOR of the
+// plaintexts, and the Poly1305 one-time key is recoverable, so the attacker can
+// forge tags as well as read. Pass nil, or crypto/rand.Reader, anywhere outside
+// a test.
 //
 // Metadata that must be authenticated belongs inside plaintext; see Sealed. An
 // empty plaintext is valid and produces a sealable, openable envelope.

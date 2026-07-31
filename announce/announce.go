@@ -201,30 +201,97 @@ type SessionSummary struct {
 // It is optional. A deployment that authenticates some other way announces
 // without one.
 //
-// # Why it is a struct with a hidden field
+// # Why it is a struct with a hidden pointer field
 //
 // The value is a bearer secret: whoever holds it can act as the holder of this
 // payload. The obvious modelling — a defined string type — puts that secret one
 // careless format verb away from a log line, because a [Payload] is exactly the
 // sort of value that gets printed while debugging. Wrapping it means the raw
 // string is reachable only through [Credential.Reveal], so `grep -rn Reveal`
-// enumerates every legitimate read of the secret in a codebase, and a
-// [Payload] printed with any verb prints a redaction instead.
+// enumerates every legitimate read of the secret in a codebase.
 //
-// This is containment, not encryption, and the boundary is drawn on purpose:
+// # Exactly what printing covers
+//
+// Under EVERY format verb — %v, %+v, %#v, %s, %q, %x, and the verbs the type
+// was never meant for like %d and %t — the secret does not appear when the
+// value is reached through an EXPORTED path:
+//
+//   - a [Credential] or a *Credential printed directly;
+//   - a [Payload] or a *Payload, and a slice or map of either;
+//   - any of those held in an exported field of another struct;
+//   - the verb-less wrappers — fmt.Print, fmt.Sprint, fmt.Sprintln — and the
+//     implicit %v inside fmt.Errorf.
+//
+// [Credential.Format] is what buys that. fmt consults a [fmt.Formatter] before
+// every other method and for every verb, whereas it reaches a [fmt.Stringer]
+// only for %v, %s, %q, %x and %X. A redacting String alone was considered and
+// rejected: measured, before Format existed, %d on a struct holding a
+// Credential printed `{{%!d(string=s3cr3t)}}` — the secret, in clear. Partial
+// protection that looks total is worse than none, because it invites false
+// confidence.
+//
+// # The one path where the redaction methods are bypassed
+//
+// A [Payload] reached through another struct's UNEXPORTED field:
+//
+//	type client struct{ p announce.Payload }
+//	fmt.Sprintf("%+v", client{p})
+//
+// fmt only calls Format, String or GoString when the reflected value it holds
+// reports CanInterface, and that is false for anything reached through an
+// unexported field. It falls through to reflection over the struct instead, and
+// reflection does not care that Credential's own field is unexported either.
+//
+// That is why value is a *string and not a string. fmt renders a pointer at
+// depth > 0 as a hex address and never follows it, so the reflection dump above
+// yields `Credential:{value:0x14000120020}` — an address, not the secret. The
+// redaction METHODS are bypassed on this path; the secret still does not print.
+// Measured both ways, and pinned by
+// TestCredentialDoesNotLeakThroughFormatting.
+//
+// # Serialization is open on purpose — structured logging included
+//
+// This is containment, not encryption, and the boundary is drawn deliberately:
 // the JSON and YAML codecs carry the REAL value, because the credential's whole
-// job is to ride the wire. A redacting String alone was considered and
-// rejected for the opposite reason — it would leave %d and every other
-// non-string verb printing the field verbatim through reflection while looking
-// protected, which is worse than no protection because it invites false
-// confidence. [Credential.Format] closes that gap; serialization is the one
-// path that is meant to be open, and it is documented here rather than left to
-// be discovered.
-type Credential struct{ value string }
+// job is to ride the wire. Treat an encoded payload as secret-bearing.
+//
+// The case that will actually bite is a structured-log call, so it is named
+// here rather than left to be discovered:
+//
+//	slog.New(slog.NewJSONHandler(w, nil)).Info("m", "payload", p)
+//
+// emits the credential IN CLEAR. slog's JSON handler resolves the value through
+// [Credential.MarshalJSON], not through fmt, so no redaction runs — the same is
+// true of any handler that marshals rather than formats. Log a payload's
+// ServerID; do not log the payload.
+type Credential struct {
+	// The zero-width func field makes Credential NON-COMPARABLE on purpose.
+	// value is a pointer, so `c1 == c2` would compare ADDRESSES rather than
+	// secrets: two credentials carrying the same string would compare unequal,
+	// silently and plausibly. A compile error is strictly better than a silent
+	// wrong answer in a security type. Compare with [Credential.Reveal], or
+	// with reflect.DeepEqual, which follows the pointer.
+	//
+	// It costs nothing one level up: [Payload] holds slices and is already
+	// non-comparable.
+	_ [0]func()
+
+	// value is nil when no credential is announced. The empty string and "no
+	// credential" have exactly ONE representation — nil — so a decoded payload
+	// is reflect.DeepEqual to the one it was encoded from; see NewCredential.
+	value *string
+}
 
 // NewCredential wraps s as a Credential. The empty string yields the zero
-// Credential, which is what "no credential announced" means.
-func NewCredential(s string) Credential { return Credential{value: s} }
+// Credential, which is what "no credential announced" means — the two are the
+// same value, not merely equivalent, so a "" that survives a round trip through
+// either codec comes back reflect.DeepEqual to the zero Credential.
+func NewCredential(s string) Credential {
+	if s == "" {
+		return Credential{}
+	}
+	return Credential{value: &s}
+}
 
 // Reveal returns the raw credential. It is the ONLY way to read the value, and
 // that is the point: every legitimate use of the secret is a call to a method
@@ -233,7 +300,14 @@ func NewCredential(s string) Credential { return Credential{value: s} }
 // Call it where the value goes on the wire. Do not park the result in a
 // variable, put it in an error, or hand it to a logger — the wrapper stops
 // being worth anything the moment a bare string escapes.
-func (c Credential) Reveal() string { return c.value }
+//
+// The zero Credential reveals the empty string.
+func (c Credential) Reveal() string {
+	if c.value == nil {
+		return ""
+	}
+	return *c.value
+}
 
 // IsZero reports whether no credential is set.
 //
@@ -241,13 +315,13 @@ func (c Credential) Reveal() string { return c.value }
 // and yaml.v3's omitempty calls it through that package's IsZeroer interface.
 // Changing it changes what gets emitted — see the tags on
 // [Payload.Credential].
-func (c Credential) IsZero() bool { return c.value == "" }
+func (c Credential) IsZero() bool { return c.value == nil }
 
 // String implements [fmt.Stringer] with a redacted form: "[redacted]" when a
 // credential is set, and the empty string when none is. It NEVER returns the
 // value.
 func (c Credential) String() string {
-	if c.value == "" {
+	if c.value == nil {
 		return ""
 	}
 	return "[redacted]"
@@ -257,7 +331,7 @@ func (c Credential) String() string {
 // emits something that is not valid Go source for reconstructing the value —
 // there is no round trip through a debug print.
 func (c Credential) GoString() string {
-	if c.value == "" {
+	if c.value == nil {
 		return "announce.Credential{}"
 	}
 	return "announce.Credential{/* redacted */}"
@@ -296,32 +370,34 @@ func (c Credential) Format(f fmt.State, verb rune) {
 // that must present it back; a redacting codec would break the protocol while
 // looking safe. Redaction is a defence against accidental printing, not against
 // deliberate serialization — treat encoded payloads as secret-bearing.
-func (c Credential) MarshalJSON() ([]byte, error) { return json.Marshal(c.value) }
+func (c Credential) MarshalJSON() ([]byte, error) { return json.Marshal(c.Reveal()) }
 
-// UnmarshalJSON implements [json.Unmarshaler]. A JSON null decodes to the zero
-// Credential.
+// UnmarshalJSON implements [json.Unmarshaler]. A JSON null and an empty string
+// both decode to the zero Credential — see [NewCredential] on why "" has
+// exactly one representation.
 func (c *Credential) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
 		return fmt.Errorf("announce: unmarshal credential: %w", err)
 	}
-	c.value = s
+	*c = NewCredential(s)
 	return nil
 }
 
 // MarshalYAML implements yaml.Marshaler and, like [Credential.MarshalJSON],
 // emits the REAL credential. yaml.v3 does not consult encoding.TextMarshaler,
 // so this pair is not redundant with the JSON pair.
-func (c Credential) MarshalYAML() (any, error) { return c.value, nil }
+func (c Credential) MarshalYAML() (any, error) { return c.Reveal(), nil }
 
-// UnmarshalYAML implements yaml.Unmarshaler. A YAML null decodes to the zero
-// Credential.
+// UnmarshalYAML implements yaml.Unmarshaler. A YAML null and an empty string
+// both decode to the zero Credential — see [NewCredential] on why "" has
+// exactly one representation.
 func (c *Credential) UnmarshalYAML(n *yaml.Node) error {
 	var s string
 	if err := n.Decode(&s); err != nil {
 		return fmt.Errorf("announce: unmarshal credential: %w", err)
 	}
-	c.value = s
+	*c = NewCredential(s)
 	return nil
 }
 
