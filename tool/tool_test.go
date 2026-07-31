@@ -55,10 +55,7 @@ func TestResultMetadataBasics(t *testing.T) {
 		Metadata: Metadata{
 			ExitCode:  &exitCode,
 			Truncated: true,
-			Diagnostics: []Diagnostic{
-				{File: "a.go", Line: 1, Col: 2, Severity: "error", Message: "bad"},
-			},
-			Extra: map[string]any{"lines": 3},
+			Extra:     map[string]any{"lines": 3},
 		},
 	}
 	if r.Content != "boom" || !r.IsError {
@@ -70,8 +67,8 @@ func TestResultMetadataBasics(t *testing.T) {
 	if !r.Metadata.Truncated {
 		t.Errorf("Truncated = false, want true")
 	}
-	if len(r.Metadata.Diagnostics) != 1 {
-		t.Errorf("Diagnostics = %v, want len 1", r.Metadata.Diagnostics)
+	if r.Metadata.Extra["lines"] != 3 {
+		t.Errorf("Extra[lines] = %v, want 3", r.Metadata.Extra["lines"])
 	}
 }
 
@@ -82,20 +79,5 @@ func TestErrorResult(t *testing.T) {
 	}
 	if r.Content != "bad thing: oops" {
 		t.Errorf("Content = %q, want %q", r.Content, "bad thing: oops")
-	}
-}
-
-func TestDiagnosticJSON(t *testing.T) {
-	d := Diagnostic{File: "a.go", Line: 1, Col: 2, Severity: "warning", Message: "m"}
-	b, err := json.Marshal(d)
-	if err != nil {
-		t.Fatalf("Marshal: %v", err)
-	}
-	var round Diagnostic
-	if err := json.Unmarshal(b, &round); err != nil {
-		t.Fatalf("Unmarshal: %v", err)
-	}
-	if round != d {
-		t.Errorf("round trip = %+v, want %+v", round, d)
 	}
 }
