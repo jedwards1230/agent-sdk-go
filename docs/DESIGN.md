@@ -1058,12 +1058,49 @@ output: an MCP tool and a builtin tool become the same Go type in the same
 `tool.Registry`, so permission gating, the tool-index decorator, and
 diagnostics all apply to both structurally, never by convention. A tool's
 input schema is converted from the server's JSON Schema to `tool.Schema` via
-a best-effort recursive projection (object/array nesting, `enum`, `default`,
-top-level `required`); JSON Schema constructs `tool.Schema` has no
-representation for (`oneOf`/`anyOf`, `patternProperties`,
-`additionalProperties`, per-nested-object `required`) are dropped, not
-rejected — the same limitation every builtin tool's schema already lives
-with, not a new one this package introduces.
+a best-effort recursive projection.
+
+**Schema projection: what it represents, and what degradation costs.**
+`tool.Schema`/`tool.Property` represent `type`, `description`, `properties`,
+top-level *and* per-nested-object `required`, `enum`, `items`, `default`,
+`oneOf`/`anyOf`/`allOf`, and `patternProperties`. The composition and nested-
+`required` fields are optional and `omitempty` — a builtin tool that does not
+use them marshals to exactly the bytes it did before they existed, and no
+provider adapter changed to carry them (both adapters copy a tool's marshalled
+spec through as an opaque `json.RawMessage`).
+
+Everything else a server can write — `additionalProperties`, `minimum`,
+`pattern`, `format`, `const`, `$ref`, `not`, `if`/`then`/`else`, and any
+keyword JSON Schema gains later — has no representation and is dropped. That
+detection is **deny-by-default**: the projection knows only which keywords it
+represents plus a short list of inert annotations (`$schema`, `$id`,
+`$comment`, `title`, `examples`, `deprecated`, `readOnly`, `writeOnly`), and
+reports every other key with its path. There is no allowlist of constraint
+keywords to fall behind.
+
+A drop is never silent, because a schema more permissive than the server's is
+a tool call the model will confidently get wrong. When anything is dropped,
+the projected tool's `Description` gains a `Schema note:` paragraph naming the
+dropped keywords and their paths and stating that conforming arguments may
+still be rejected, and the `Client`'s logger (`mcp.WithLogger`) gets one
+`Warn` per affected tool. A represented `oneOf`/`anyOf`/`allOf` is *also*
+restated as one prose clause, since models follow a sentence more reliably
+than a nested composition keyword. A schema that projects cleanly and uses no
+composition is left completely alone: its `Description` is the server's own
+string byte for byte, and it logs nothing — the degradation report has to
+stay a short list an operator can act on.
+
+The projection is total by construction: the raw schema is decoded once into
+`map[string]any` rather than into narrow Go structs, so no value type a server
+legally uses can fail the decode and collapse the schema. (It could: a single
+`{"type":"integer","enum":[1,2]}` property once discarded every property,
+description, and `required` list in the whole schema.) A value only the wire
+type is too narrow for — a non-string `enum`, a `["string","null"]` union
+`type` — costs that one keyword, is reported like any other drop, and leaves
+its siblings intact. A union `type` keeps its first non-`null` member, which
+is narrower than the server, never wider. A missing schema, or one that is not
+a JSON object at all, degrades to an empty object schema rather than failing
+the whole projection over one tool.
 
 **Naming and sanitization (satisfies the permission grammar above).** A
 projected tool is named `mcp__<server>__<tool>`, matching the
