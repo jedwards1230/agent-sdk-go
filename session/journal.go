@@ -217,11 +217,23 @@ func (j *Journal) Fold() []provider.Message {
 // [RegistryPricing] for the built-in provider model registry, or nil to sum
 // tokens without pricing). See cost.go.
 func (j *Journal) Cost(reg PriceLookup) CostReport {
+	// The two halves of cost aggregation sit on opposite sides of this unlock,
+	// on purpose. sumUsage is the journal-sized O(n) part and is pure — no
+	// caller-supplied code is reachable from it — so it runs over j.entries in
+	// place, replacing what used to be a journal-sized copy of 120-byte structs
+	// with a walk of pointer dereferences and integer adds. priceUsage is the
+	// half that invokes reg, a caller-supplied PriceLookup, and it only ever
+	// touches the per-model map (bounded by the number of distinct models, not
+	// by the journal length).
+	//
+	// Do NOT re-inline these into one locked call: reg is arbitrary caller code,
+	// and a PriceLookup that reaches back into this journal (j.Len, j.Head,
+	// j.Cost) would then deadlock on j.mu. Holding the lock across reg is the
+	// regression this split exists to prevent — see the re-entrancy test.
 	j.mu.Lock()
-	entries := make([]Entry, len(j.entries))
-	copy(entries, j.entries)
+	usageByModel, total := sumUsage(j.entries)
 	j.mu.Unlock()
-	return cost(entries, reg)
+	return priceUsage(usageByModel, total, reg)
 }
 
 // LastUsage returns the model and token usage of the most recently completed
@@ -242,16 +254,39 @@ func (j *Journal) Cost(reg PriceLookup) CostReport {
 // session, or one whose only turns were dropped by a fork.
 func (j *Journal) LastUsage() (model string, usage provider.Usage, ok bool) {
 	j.mu.Lock()
-	entries := make([]Entry, len(j.entries))
-	copy(entries, j.entries)
-	j.mu.Unlock()
+	defer j.mu.Unlock()
 
-	// chainFromHead is child→root order, so the first entry carrying usage IS
-	// the most recent one.
-	for _, e := range chainFromHead(entries) {
+	// This walks exactly the chain [chainFromHead] would materialize — from the
+	// last entry in append order back along Parent links, stopping at (but
+	// including) a compaction boundary, the root, or a dangling parent — but in
+	// place, over j.entries and the journal's OWN j.byID index rather than a
+	// copy of the entries and a rebuilt id map. Child→root order means the
+	// first entry carrying usage IS the most recent one, so the walk also
+	// early-exits there, which on a live session is at or near the tail.
+	//
+	// Nothing reachable from this walk is caller-supplied, so unlike
+	// [Journal.Cost] there is no re-entrancy hazard in holding j.mu throughout.
+	//
+	// The len(j.entries) step bound cannot change the answer for a well-formed
+	// journal: parent links are acyclic and ids unique, so the walk visits each
+	// entry at most once and terminates in at most len(j.entries) steps anyway.
+	// It only stops a corrupt journal (a parent cycle, or duplicate ids forming
+	// one) from spinning forever — which, under the lock, would wedge every
+	// other operation on the session rather than just this call.
+	i := len(j.entries) - 1
+	for steps := len(j.entries); steps > 0; steps-- {
+		e := &j.entries[i]
 		if e.Usage != nil {
 			return e.Model, *e.Usage, true
 		}
+		if e.Type == EntryCompaction || e.Parent == "" {
+			break
+		}
+		parent, found := j.byID[e.Parent]
+		if !found {
+			break // dangling parent: stop walking defensively
+		}
+		i = parent
 	}
 	return "", provider.Usage{}, false
 }
