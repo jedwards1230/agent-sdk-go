@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -224,7 +225,10 @@ func TestProjectDescriptionNamesNestedComposition(t *testing.T) {
 
 // TestProjectDescriptionWarnsAboutDropped covers the visible-degradation
 // half: a constraint the projection cannot express must reach the model as
-// prose, with its path, and must say the server may still reject the call.
+// prose naming the keyword, and must say the server may still reject the
+// call. Paths deliberately do NOT appear here — they are unbounded and
+// server-controlled, so they ride the log instead (see
+// TestProjectLogsDroppedConstraintsOncePerTool).
 func TestProjectDescriptionWarnsAboutDropped(t *testing.T) {
 	tests := []struct {
 		name string
@@ -232,9 +236,9 @@ func TestProjectDescriptionWarnsAboutDropped(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "keyword and path",
+			name: "keywords named",
 			raw:  `{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string","pattern":"^[a-z]+$"}}}`,
-			want: []string{"additionalProperties at the root", "pattern at properties.name", "may still be rejected"},
+			want: []string{"additionalProperties", "pattern", "may still be rejected"},
 		},
 		{
 			// The degenerate cases are reported too, not just per-keyword
@@ -242,17 +246,39 @@ func TestProjectDescriptionWarnsAboutDropped(t *testing.T) {
 			// constraint, so it has to be said out loud.
 			name: "non-string enum",
 			raw:  `{"type":"object","properties":{"n":{"type":"integer","enum":[1,2]}}}`,
-			want: []string{"enum at properties.n"},
+			want: []string{"enum"},
 		},
 		{
-			name: "union type",
+			// A narrowed union must not read as "the type is unconstrained",
+			// which is what a bare "type" in this list would imply.
+			name: "union type says union",
 			raw:  `{"type":"object","properties":{"s":{"type":["string","null"]}}}`,
-			want: []string{"type at properties.s"},
+			want: []string{"type union"},
 		},
 		{
-			name: "schema that is not an object at all",
+			// Root enum is an assertion, not an annotation. tool.Schema has
+			// no field for it, so discarding it silently would be the one
+			// hole in the no-silent-drops invariant.
+			name: "root enum",
+			raw:  `{"type":"object","enum":["a","b"]}`,
+			want: []string{"enum", "may still be rejected"},
+		},
+		{
+			// An empty enum or composition list is a schema nothing validates
+			// against; emitting nothing in its place widens.
+			name: "empty enum",
+			raw:  `{"type":"object","properties":{"a":{"enum":[]}}}`,
+			want: []string{"enum"},
+		},
+		{
+			name: "empty composition list",
+			raw:  `{"type":"object","anyOf":[]}`,
+			want: []string{"anyOf"},
+		},
+		{
+			name: "schema that could not be read",
 			raw:  `"not-a-schema"`,
-			want: []string{"not a JSON object", "may still be rejected"},
+			want: []string{"could not read", "may still be rejected"},
 		},
 	}
 	for _, tt := range tests {
@@ -267,6 +293,96 @@ func TestProjectDescriptionWarnsAboutDropped(t *testing.T) {
 	}
 }
 
+// TestProjectVacuousCompositionBranchIsDropped covers the one place this
+// projection could emit a schema WIDER than the server's. A branch whose
+// every keyword was unrepresentable projects to {} — the schema matching
+// everything — so a union carrying one is vacuously true and must be omitted
+// entirely. This is the commonest federated shape there is: pydantic's
+// Optional[Model] via FastMCP.
+func TestProjectVacuousCompositionBranchIsDropped(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		wantSpec string
+		// wantNoNote asserts the composition prose is suppressed too: a
+		// keyword that did not survive must not be restated as "(1) an
+		// alternative shape; (2) an alternative shape".
+		wantNoNote bool
+	}{
+		{
+			name:       "anyOf with unrepresentable branch (pydantic Optional)",
+			raw:        `{"type":"object","properties":{"cfg":{"anyOf":[{"$ref":"#/$defs/Cfg"},{"type":"null"}]}}}`,
+			wantSpec:   `{"type":"object","properties":{"cfg":{}}}`,
+			wantNoNote: true,
+		},
+		{
+			name:       "oneOf with every branch unrepresentable",
+			raw:        `{"type":"object","properties":{"cfg":{"oneOf":[{"$ref":"#/$defs/A"},{"$ref":"#/$defs/B"}]}}}`,
+			wantSpec:   `{"type":"object","properties":{"cfg":{}}}`,
+			wantNoNote: true,
+		},
+		{
+			// allOf is an intersection, not a union: dropping only the
+			// unrepresentable member still applies the others. Dropping the
+			// whole keyword here would LOSE the required:["a"] constraint.
+			name:     "allOf keeps its representable members",
+			raw:      `{"type":"object","allOf":[{"$ref":"#/$defs/A"},{"required":["a"]}],"properties":{"a":{"type":"string"}}}`,
+			wantSpec: `{"type":"object","properties":{"a":{"type":"string"}},"allOf":[{"required":["a"]}]}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tl := projectOne(t, "d", tt.raw)
+			if got := specJSON(t, tl); got != tt.wantSpec {
+				t.Errorf("spec JSON =\n%s\nwant\n%s", got, tt.wantSpec)
+			}
+			desc := tl.Description()
+			if !strings.Contains(desc, "may still be rejected") {
+				t.Errorf("Description() = %q, want the dropped-constraint warning", desc)
+			}
+			if tt.wantNoNote && strings.Contains(desc, "alternative shapes") {
+				t.Errorf("Description() = %q, want no composition prose for a keyword that was dropped", desc)
+			}
+		})
+	}
+}
+
+// TestProjectDescriptionIsBoundedOnWideSchema is the prompt-cost gate. The
+// appended prose must not grow with the server's schema: a projected tool's
+// description rides EVERY request for the life of the session, so an
+// undeduplicated per-occurrence list makes prompt cost server-controlled. The
+// measured pre-fix case was a 40-property schema whose 4,072-byte schema
+// produced a 5,328-byte description from 162 drops.
+func TestProjectDescriptionIsBoundedOnWideSchema(t *testing.T) {
+	const base = "Do a thing."
+	var props []string
+	for i := range 40 {
+		props = append(props, fmt.Sprintf(
+			`"field%02d":{"type":"string","format":"email","minLength":1,"maxLength":64,"pattern":"^.+$","anyOf":[{"type":"string"},{"type":"null"}]}`, i))
+	}
+	raw := `{"type":"object","additionalProperties":false,"properties":{` + strings.Join(props, ",") + `}}`
+
+	desc := projectOne(t, base, raw).Description()
+	appended := len(desc) - len(base)
+	const budget = 1500
+	if appended > budget {
+		t.Errorf("appended description = %d bytes (raw schema %d bytes), want <= %d\n%s",
+			appended, len(raw), budget, desc)
+	}
+	// Bounded but still useful: it must name the frequent offenders with
+	// counts, and still tell the model why.
+	for _, want := range []string{"format", "pattern", "×40", "may still be rejected"} {
+		if !strings.Contains(desc, want) {
+			t.Errorf("Description() = %q, want it to contain %q", desc, want)
+		}
+	}
+	// A long tail must be summarized, not enumerated.
+	if !strings.Contains(desc, "more") {
+		t.Errorf("Description() = %q, want a capped list summarizing the remainder", desc)
+	}
+	t.Logf("raw schema %d bytes -> appended description %d bytes", len(raw), appended)
+}
+
 // TestProjectDroppedKeywordDetectionIsDenyByDefault covers the detector's
 // direction: it is not an allowlist of known constraint keywords, so a
 // keyword nobody has heard of is still surfaced rather than quietly widening
@@ -274,7 +390,7 @@ func TestProjectDescriptionWarnsAboutDropped(t *testing.T) {
 func TestProjectDroppedKeywordDetectionIsDenyByDefault(t *testing.T) {
 	t.Run("unknown keyword reported", func(t *testing.T) {
 		tl := projectOne(t, "d", `{"type":"object","x-madeUpKeyword":{"a":1}}`)
-		if !strings.Contains(tl.Description(), "x-madeUpKeyword at the root") {
+		if !strings.Contains(tl.Description(), "x-madeUpKeyword") {
 			t.Errorf("Description() = %q, want it to report x-madeUpKeyword", tl.Description())
 		}
 	})
@@ -286,26 +402,73 @@ func TestProjectDroppedKeywordDetectionIsDenyByDefault(t *testing.T) {
 			t.Errorf("Description() = %q, want %q exactly", got, desc)
 		}
 	})
+	t.Run("definition blocks stay quiet", func(t *testing.T) {
+		// $defs constrains nothing by itself — only a $ref into it does, and
+		// that is reported at its own path. Every pydantic schema carries
+		// one, so reporting the block would be a guaranteed false positive
+		// on the commonest server family.
+		const desc = "d"
+		tl := projectOne(t, desc,
+			`{"type":"object","$defs":{"Cfg":{"type":"object"}},"definitions":{"Old":{"type":"object"}},"$vocabulary":{"x":true}}`)
+		if got := tl.Description(); got != desc {
+			t.Errorf("Description() = %q, want %q exactly", got, desc)
+		}
+	})
+	t.Run("single-member type array loses nothing", func(t *testing.T) {
+		// ["string"] carries exactly as much as "string" does, so reporting
+		// it would be noise.
+		const desc = "d"
+		tl := projectOne(t, desc, `{"type":"object","properties":{"s":{"type":["string"]}}}`)
+		if got := tl.Description(); got != desc {
+			t.Errorf("Description() = %q, want %q exactly", got, desc)
+		}
+		if got := specJSON(t, tl); got != `{"type":"object","properties":{"s":{"type":"string"}}}` {
+			t.Errorf("spec JSON = %s", got)
+		}
+	})
 }
 
 // TestProjectLogsDroppedConstraintsOncePerTool covers the operator-facing
-// half. A tool that lost constraints logs exactly one Warn naming them; a
-// tool that projected cleanly logs nothing, so the warnings stay a short
-// actionable list instead of a wall.
+// half. A tool that lost constraints logs exactly one Warn carrying the
+// PRECISE per-occurrence list with full paths — the detail the description
+// deliberately drops, because in a log it costs nothing and it is what an
+// operator needs to find the keyword in the server's own schema. A tool that
+// projected cleanly logs nothing, so the warnings stay a short actionable
+// list instead of a wall.
 func TestProjectLogsDroppedConstraintsOncePerTool(t *testing.T) {
-	t.Run("degraded tool warns once", func(t *testing.T) {
+	t.Run("degraded tool warns once with full paths", func(t *testing.T) {
 		var buf bytes.Buffer
 		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
-		projectOne(t, "d", `{"type":"object","additionalProperties":false}`, mcp.WithLogger(log))
+		projectOne(t, "d",
+			`{"type":"object","additionalProperties":false,"properties":{"name":{"type":"string","pattern":"^[a-z]+$"}}}`,
+			mcp.WithLogger(log))
 
 		out := buf.String()
 		if n := strings.Count(out, "level=WARN"); n != 1 {
 			t.Fatalf("warn count = %d, want 1; log:\n%s", n, out)
 		}
-		for _, want := range []string{"server=srv", "tool=probe", "additionalProperties at the root"} {
+		for _, want := range []string{
+			"server=srv", "tool=probe",
+			"additionalProperties at the root", "pattern at properties.name",
+		} {
 			if !strings.Contains(out, want) {
 				t.Errorf("log = %q, want it to contain %q", out, want)
 			}
+		}
+	})
+	t.Run("unreadable schema logs the decode error", func(t *testing.T) {
+		// The model-facing description stays generic; an operator needs to
+		// know whether the schema was truncated, invalid UTF-8, or nested too
+		// deeply, and that only makes sense in a log.
+		var buf bytes.Buffer
+		log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		tl := projectOne(t, "d", `"not-a-schema"`, mcp.WithLogger(log))
+
+		if out := buf.String(); !strings.Contains(out, "decode inputSchema") {
+			t.Errorf("log = %q, want it to carry the decode error", out)
+		}
+		if desc := tl.Description(); strings.Contains(desc, "decode inputSchema") {
+			t.Errorf("Description() = %q, want no raw parser error spliced into the prompt", desc)
 		}
 	})
 	t.Run("clean tool is silent", func(t *testing.T) {

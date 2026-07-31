@@ -165,7 +165,8 @@ type ToolInfo struct {
 	Description string
 	// InputSchema is the tool's raw JSON Schema input object, exactly as the
 	// server sent it. [Project] converts it to [tool.Schema] via
-	// schemaFromJSON; ToolInfo keeps the original for a caller that wants it.
+	// [projectSchema], which is lossy by construction; ToolInfo keeps the
+	// original for a caller that wants what the server actually said.
 	InputSchema json.RawMessage
 }
 

@@ -3,20 +3,49 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jedwards1230/agent-sdk-go/tool"
 )
 
-// inertKeywords are annotations that constrain nothing. Losing them changes
-// which inputs a server accepts not at all, so they are not reported as
-// dropped either.
+// inertKeywords are annotations and definition blocks that constrain nothing
+// on their own. Losing them changes which inputs a server accepts not at all,
+// so they are not reported as dropped. `$defs`/`definitions` are here because
+// every pydantic-derived schema carries one and only the `$ref` *into* it
+// constrains anything — and that `$ref` is already reported at its own path,
+// so reporting the block too would be a guaranteed false positive on the
+// commonest server family.
+//
+// `readOnly`/`writeOnly` are a deliberate judgement call rather than a clean
+// case: JSON Schema defines both as pure annotations, but an OpenAPI-derived
+// server may use `readOnly: true` on a request field to mean "do not send
+// this". Treating them as inert accepts that a server using them in the
+// OpenAPI sense gets no warning; the alternative warns on every schema that
+// uses them in the standard sense, which is the far more common one.
 var inertKeywords = map[string]bool{
 	"$schema": true, "$id": true, "$comment": true, "title": true,
 	"examples": true, "deprecated": true, "readOnly": true, "writeOnly": true,
+	"$defs": true, "definitions": true, "$vocabulary": true,
 }
+
+// listCap bounds every server-controlled list that reaches the model's
+// context: dropped keywords, composition branches, and the paths of nested
+// compositions. Without it a tool's description grows with the size of the
+// server's schema, on every request, for the life of the session — a 40-
+// property schema with four unrepresentable keywords each produced 161 drops
+// and a description larger than the schema it annotated. The precise,
+// uncapped list still goes to the logger, where it costs nothing and is what
+// an operator actually needs.
+const listCap = 6
+
+// keywordRuneCap clips one server-supplied token (a keyword name, a schema
+// path, a required key) before it reaches the model. Combined with listCap it
+// makes the appended description bounded by construction rather than by the
+// server's good behavior.
+const keywordRuneCap = 40
 
 // droppedConstraint is one JSON Schema keyword the projection could not
 // represent, plus where in the schema it appeared. Path is "" for the root
@@ -59,6 +88,13 @@ type projection struct {
 	schema      tool.Schema
 	composition []compositionNote
 	dropped     []droppedConstraint
+	// parseErr is the decode failure behind a whole-schema drop, kept for the
+	// log attr only. The model-facing description stays generic: splicing a
+	// raw parser error into a tool description puts server-controlled text in
+	// the prompt and tells the model nothing it can act on, while an operator
+	// needs to know whether the schema was truncated, invalid UTF-8, or
+	// nested past encoding/json's depth limit.
+	parseErr error
 }
 
 // degraded reports whether the projection lost anything the server will still
@@ -66,7 +102,9 @@ type projection struct {
 // whose schema projected cleanly must produce neither.
 func (p projection) degraded() bool { return len(p.dropped) > 0 }
 
-// droppedKeywords renders the dropped constraints for a structured log attr.
+// droppedKeywords renders the dropped constraints, one entry per occurrence
+// with its full path, for the structured log attr. This is the precise list;
+// [projection.describe] emits a deduplicated and capped summary instead.
 func (p projection) droppedKeywords() []string {
 	out := make([]string, 0, len(p.dropped))
 	for _, d := range p.dropped {
@@ -96,9 +134,13 @@ func (p projection) droppedKeywords() []string {
 // invented after this code was written is still surfaced instead of quietly
 // widening the schema the model sees.
 //
-// The root node's own `description`, `default`, and `items` are ignored:
-// [tool.Schema] has no field for them and, on a tool input object, none of
-// them constrains an argument (the tool's own description carries the prose).
+// Two rules keep "never widens" true where a naive projection would not:
+//   - A composition branch that projects to nothing would marshal as `{}`,
+//     the schema that matches everything. See [projector.branches].
+//   - The root node's own `description`, `default`, and `items` are discarded
+//     without a report, because none of them asserts anything about an
+//     argument of a tool-input object. Root `enum` DOES assert, so it is
+//     reported like any other drop even though it is discarded the same way.
 func projectSchema(raw json.RawMessage) projection {
 	if len(raw) == 0 {
 		return projection{schema: tool.Schema{Type: "object"}}
@@ -108,14 +150,18 @@ func projectSchema(raw json.RawMessage) projection {
 		return projection{
 			schema: tool.Schema{Type: "object"},
 			dropped: []droppedConstraint{{
-				Keyword: "the server sent a schema that is not a JSON object, so none of it could be read",
+				Keyword: "the server sent a schema this client could not read, so none of it could be applied",
 				Whole:   true,
 			}},
+			parseErr: fmt.Errorf("decode inputSchema: %w", err),
 		}
 	}
 
 	var p projector
 	node := p.node("", root)
+	if node.Enum != nil {
+		p.drop("", "enum")
+	}
 	s := tool.Schema{
 		Type:              node.Type,
 		Properties:        node.Properties,
@@ -172,7 +218,23 @@ func (p *projector) node(path string, raw map[string]any) tool.Property {
 		case "enum":
 			out.Enum = p.enumOf(path, v)
 		case "required":
-			out.Required = p.stringsOf(path, "required", v)
+			// An empty or malformed required list constrains nothing, so
+			// unlike enum there is nothing to report when it does not
+			// project — the absence of a requirement is the default.
+			if members, ok := v.([]any); ok {
+				keys := make([]string, 0, len(members))
+				for _, m := range members {
+					s, ok := m.(string)
+					if !ok {
+						keys = nil
+						break
+					}
+					keys = append(keys, s)
+				}
+				if len(keys) > 0 {
+					out.Required = keys
+				}
+			}
 		case "items":
 			if item, ok := p.subschema(childPath(path, "items"), v); ok {
 				out.Items = &item
@@ -202,8 +264,11 @@ func (p *projector) node(path string, raw map[string]any) tool.Property {
 
 // typeOf projects the "type" keyword. JSON Schema allows a union
 // (["string","null"]); [tool.Property.Type] is a single string, so a union
-// keeps its first non-"null" member — narrower than the server, never wider —
-// and is reported as dropped.
+// keeps its first non-"null" member — narrower than the server, never wider.
+// It reports "type union" rather than "type", because "type at properties.s"
+// in a list of things the schema "cannot express" reads as if the value were
+// left unconstrained, which is the opposite of what happened. A single-member
+// array loses nothing and is not reported at all.
 func (p *projector) typeOf(path string, v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -213,7 +278,12 @@ func (p *projector) typeOf(path string, v any) string {
 		p.drop(path, "type")
 		return ""
 	}
-	p.drop(path, "type")
+	if len(members) == 1 {
+		if s, ok := members[0].(string); ok && s != "null" {
+			return s
+		}
+	}
+	p.drop(path, "type union")
 	for _, m := range members {
 		if s, ok := m.(string); ok && s != "null" {
 			return s
@@ -224,10 +294,12 @@ func (p *projector) typeOf(path string, v any) string {
 
 // enumOf projects the "enum" keyword. [tool.Property.Enum] is []string, so an
 // enum with any non-string member is dropped for that property alone — the
-// bug this replaces let one numeric enum discard the entire schema.
+// bug this replaces let one numeric enum discard the entire schema. An empty
+// enum is a schema nothing validates against, so silently emitting no enum in
+// its place widens; it is reported like any other loss.
 func (p *projector) enumOf(path string, v any) []string {
 	members, ok := v.([]any)
-	if !ok {
+	if !ok || len(members) == 0 {
 		p.drop(path, "enum")
 		return nil
 	}
@@ -239,31 +311,6 @@ func (p *projector) enumOf(path string, v any) []string {
 			return nil
 		}
 		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-// stringsOf projects a keyword whose value must be an array of strings.
-func (p *projector) stringsOf(path, keyword string, v any) []string {
-	members, ok := v.([]any)
-	if !ok {
-		p.drop(path, keyword)
-		return nil
-	}
-	out := make([]string, 0, len(members))
-	for _, m := range members {
-		s, ok := m.(string)
-		if !ok {
-			p.drop(path, keyword)
-			return nil
-		}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil
 	}
 	return out
 }
@@ -304,21 +351,49 @@ func (p *projector) subschemaMap(parent, keyword string, v any) map[string]tool.
 // branches projects a oneOf/anyOf/allOf list and records a [compositionNote]
 // describing it, so the projection can restate the composition as prose the
 // model will actually follow.
+//
+// A branch whose every keyword was unrepresentable projects to the zero
+// [tool.Property], which marshals as `{}` — the schema that matches
+// EVERYTHING. That is the one place this projection could emit something
+// wider than the server rather than narrower, and it is the commonest real
+// shape there is: pydantic's Optional[Model] federates as
+// `{"anyOf":[{"$ref":"#/$defs/Cfg"},{"type":"null"}]}`, which would become
+// `anyOf:[{}, {"type":"null"}]` — vacuously true. For oneOf it is worse:
+// `[{},{}]` matches every input twice, so under strict validation nothing
+// validates at all.
+//
+// So a union (oneOf/anyOf) with any such branch is dropped whole: omitting
+// the keyword is strictly better than emitting a vacuous one. allOf is an
+// intersection, not a union — dropping only the unrepresentable member still
+// applies every other member's constraints, which is strictly better than
+// dropping them all — so it keeps what projected and reports the loss.
+// Either way the keyword is reported, and no composition prose is emitted for
+// a keyword that did not survive.
 func (p *projector) branches(path, keyword string, v any) []tool.Property {
 	raw, ok := v.([]any)
-	if !ok {
+	if !ok || len(raw) == 0 {
+		// An empty composition list validates nothing; emitting no keyword in
+		// its place widens, so it is a reportable loss like any other.
 		p.drop(path, keyword)
 		return nil
 	}
 	out := make([]tool.Property, 0, len(raw))
 	phrases := make([]string, 0, len(raw))
+	lost := false
 	for i, b := range raw {
 		branch, ok := p.subschema(fmt.Sprintf("%s[%d]", childPath(path, keyword), i), b)
-		if !ok {
+		if !ok || vacuous(branch) {
+			lost = true
 			continue
 		}
 		out = append(out, branch)
 		phrases = append(phrases, branchPhrase(branch))
+	}
+	if lost {
+		p.drop(path, keyword)
+		if keyword != "allOf" {
+			return nil
+		}
 	}
 	if len(out) == 0 {
 		return nil
@@ -327,19 +402,29 @@ func (p *projector) branches(path, keyword string, v any) []tool.Property {
 	return out
 }
 
+// vacuous reports whether a projected branch asserts nothing about its input
+// and would therefore marshal as a schema matching everything. Description
+// and Default are excluded deliberately: they are annotations, so a branch
+// carrying only those is still vacuous.
+func vacuous(b tool.Property) bool {
+	return b.Type == "" && b.Enum == nil && b.Items == nil &&
+		len(b.Properties) == 0 && len(b.Required) == 0 &&
+		len(b.OneOf) == 0 && len(b.AnyOf) == 0 && len(b.AllOf) == 0 &&
+		len(b.PatternProperties) == 0
+}
+
 // branchPhrase describes one composition branch in the fewest words that
-// still tell a model what to do: the keys the branch requires, else its type,
-// else nothing distinguishing.
+// still tell a model what to do: the keys the branch requires, else its type.
 func branchPhrase(b tool.Property) string {
 	if len(b.Required) > 0 {
 		quoted := make([]string, 0, len(b.Required))
 		for _, r := range b.Required {
-			quoted = append(quoted, strconv.Quote(r))
+			quoted = append(quoted, strconv.Quote(clip(r)))
 		}
-		return "requires " + strings.Join(quoted, ", ")
+		return "requires " + capList(quoted)
 	}
 	if b.Type != "" {
-		return "a " + b.Type
+		return "a " + clip(b.Type)
 	}
 	return "an alternative shape"
 }
@@ -363,37 +448,126 @@ func quantifier(keyword string) string {
 // A schema with no composition and nothing dropped returns base byte-for-byte
 // — no marker, no trailing newline. That is the overwhelming majority of
 // federated tools, and their prompt cost must not change at all.
+//
+// Everything appended is bounded by [listCap] and [keywordRuneCap], so a
+// tool's prompt cost cannot be made to grow with the size (or the malice) of
+// the server's schema. The prose only has to tell the model that its
+// arguments may be rejected and roughly why; the exhaustive per-occurrence
+// list with full paths goes to the logger instead.
 func (p projection) describe(base string) string {
 	if len(p.composition) == 0 && !p.degraded() {
 		return base
 	}
-	var notes []string
-	for _, c := range p.composition {
-		subject := "this tool's input"
-		if c.Path != "" {
-			subject = "the value at " + c.Path
-		}
-		note := fmt.Sprintf("Schema note: %s must satisfy %s %d alternative shapes (%s)",
-			subject, quantifier(c.Keyword), len(c.Branches), c.Keyword)
-		if c.Path == "" {
-			parts := make([]string, 0, len(c.Branches))
-			for i, phrase := range c.Branches {
-				parts = append(parts, fmt.Sprintf("(%d) %s", i+1, phrase))
-			}
-			note += ": " + strings.Join(parts, "; ")
-		}
-		notes = append(notes, note+".")
-	}
+	notes := p.compositionNotes()
 	if p.degraded() {
-		notes = append(notes, fmt.Sprintf(
-			"Schema note: the server's schema for this tool also constrains input in ways this schema cannot express (%s). Arguments that satisfy the schema above may still be rejected.",
-			strings.Join(p.droppedKeywords(), "; ")))
+		notes = append(notes, "Schema note: the server's schema for this tool also constrains input in ways this schema cannot express ("+
+			p.droppedSummary()+"). Arguments that satisfy the schema above may still be rejected.")
 	}
 	appended := strings.Join(notes, "\n")
 	if base == "" {
 		return appended
 	}
 	return base + "\n\n" + appended
+}
+
+// compositionNotes renders the represented compositions as prose. Root
+// composition is spelled out branch by branch — that is the actionable part,
+// and there are at most three such keywords. Nested compositions are grouped
+// by keyword and named by path, because a wide schema can carry one per
+// property (pydantic emits an anyOf for every Optional field) and restating
+// each one's branches would reproduce the schema in prose.
+func (p projection) compositionNotes() []string {
+	var notes []string
+	for _, c := range p.composition {
+		if c.Path != "" {
+			continue
+		}
+		parts := make([]string, 0, len(c.Branches))
+		for i, phrase := range c.Branches {
+			parts = append(parts, fmt.Sprintf("(%d) %s", i+1, phrase))
+		}
+		notes = append(notes, fmt.Sprintf(
+			"Schema note: this tool's input must satisfy %s %d alternative shapes (%s): %s.",
+			quantifier(c.Keyword), len(c.Branches), c.Keyword, capList(parts)))
+	}
+
+	byKeyword := make(map[string][]string)
+	var keywords []string
+	for _, c := range p.composition {
+		if c.Path == "" {
+			continue
+		}
+		if _, seen := byKeyword[c.Keyword]; !seen {
+			keywords = append(keywords, c.Keyword)
+		}
+		byKeyword[c.Keyword] = append(byKeyword[c.Keyword], clip(c.Path))
+	}
+	slices.Sort(keywords)
+	for _, kw := range keywords {
+		paths := byKeyword[kw]
+		subject, verb := "the value at "+capList(paths), "must satisfy"
+		if len(paths) > 1 {
+			subject, verb = "the values at "+capList(paths), "must each satisfy"
+		}
+		notes = append(notes, fmt.Sprintf(
+			"Schema note: %s %s %s several alternative shapes (%s).",
+			subject, verb, quantifier(kw), kw))
+	}
+	return notes
+}
+
+// droppedSummary collapses the drop list into the bounded form that reaches
+// the model: one entry per distinct keyword with an occurrence count, most
+// frequent first, capped. The per-occurrence paths are deliberately absent —
+// they are unbounded and server-controlled, and an operator reading the log
+// gets them in full.
+func (p projection) droppedSummary() string {
+	counts := make(map[string]int)
+	var order []string
+	for _, d := range p.dropped {
+		if d.Whole {
+			return d.Keyword
+		}
+		k := clip(d.Keyword)
+		if counts[k] == 0 {
+			order = append(order, k)
+		}
+		counts[k]++
+	}
+	slices.SortStableFunc(order, func(a, b string) int {
+		if counts[a] != counts[b] {
+			return counts[b] - counts[a]
+		}
+		return strings.Compare(a, b)
+	})
+	items := make([]string, 0, len(order))
+	for _, k := range order {
+		if counts[k] > 1 {
+			items = append(items, fmt.Sprintf("%s (×%d)", k, counts[k]))
+			continue
+		}
+		items = append(items, k)
+	}
+	return capList(items)
+}
+
+// capList joins items for model-facing prose, keeping at most [listCap] of
+// them and summarizing the rest as a count.
+func capList(items []string) string {
+	if len(items) <= listCap {
+		return strings.Join(items, ", ")
+	}
+	return fmt.Sprintf("%s, and %d more", strings.Join(items[:listCap], ", "), len(items)-listCap)
+}
+
+// clip bounds one server-supplied token at [keywordRuneCap] runes. It counts
+// runes, not bytes, so it can never split a multi-byte character into
+// invalid UTF-8 on its way into the prompt.
+func clip(s string) string {
+	if utf8.RuneCountInString(s) <= keywordRuneCap {
+		return s
+	}
+	return string([]rune(s)[:keywordRuneCap]) + "..."
 }
 
 // sortedKeys returns m's keys in ascending order, so every walk over a
@@ -404,6 +578,6 @@ func sortedKeys[V any](m map[string]V) []string {
 	for k := range m {
 		out = append(out, k)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }

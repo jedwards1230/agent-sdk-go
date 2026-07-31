@@ -51,10 +51,15 @@ func Project(ctx context.Context, c *Client, server string) ([]tool.Tool, error)
 	for _, info := range infos {
 		proj := projectSchema(info.InputSchema)
 		if proj.degraded() {
-			c.log.Warn("mcp: tool schema constraints dropped in projection",
-				"server", server,
-				"tool", info.Name,
-				"dropped", proj.droppedKeywords())
+			// The log carries the exhaustive, per-occurrence list with full
+			// paths (and the decode error, when the schema could not be read
+			// at all). The description the model sees carries a bounded
+			// summary instead — see [projection.describe].
+			attrs := []any{"server", server, "tool", info.Name, "dropped", proj.droppedKeywords()}
+			if proj.parseErr != nil {
+				attrs = append(attrs, "error", proj.parseErr)
+			}
+			c.log.Warn("mcp: tool schema constraints dropped in projection", attrs...)
 		}
 		out = append(out, &projectedTool{
 			client:   c,

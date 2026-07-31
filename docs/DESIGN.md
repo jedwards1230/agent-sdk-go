@@ -1067,28 +1067,69 @@ top-level *and* per-nested-object `required`, `enum`, `items`, `default`,
 `required` fields are optional and `omitempty` — a builtin tool that does not
 use them marshals to exactly the bytes it did before they existed, and no
 provider adapter changed to carry them (both adapters copy a tool's marshalled
-spec through as an opaque `json.RawMessage`).
+spec through as an opaque `json.RawMessage`). Adding fields is source-
+compatible for every keyed composite literal, which is all this repo (and
+`go vet`'s `composites` check) uses; an embedder constructing a `tool.Schema`
+or `tool.Property` with an **unkeyed** literal would need to add the new
+fields. That is the one compatibility consequence, and it is recorded here
+rather than discovered.
+
+"Represents `oneOf`" is not unconditional. A composition branch whose every
+keyword was unrepresentable projects to `{}` — the schema matching
+*everything* — so a union carrying one would be vacuously true (`oneOf` is
+worse: `[{},{}]` matches every input twice, so under strict validation
+nothing validates). A `oneOf`/`anyOf` with any such branch is therefore
+dropped whole and reported; omitting a keyword is strictly better than
+emitting a vacuous one. `allOf` is an intersection, so it keeps its
+representable members and reports the loss — dropping only the unrepresentable
+member still applies the others.
 
 Everything else a server can write — `additionalProperties`, `minimum`,
 `pattern`, `format`, `const`, `$ref`, `not`, `if`/`then`/`else`, and any
 keyword JSON Schema gains later — has no representation and is dropped. That
 detection is **deny-by-default**: the projection knows only which keywords it
-represents plus a short list of inert annotations (`$schema`, `$id`,
-`$comment`, `title`, `examples`, `deprecated`, `readOnly`, `writeOnly`), and
-reports every other key with its path. There is no allowlist of constraint
-keywords to fall behind.
+represents plus a short list of inert keys (`$schema`, `$id`, `$comment`,
+`title`, `examples`, `deprecated`, `readOnly`, `writeOnly`, and the definition
+blocks `$defs`/`definitions`/`$vocabulary`), and reports every other key with
+its path. There is no allowlist of constraint keywords to fall behind. A
+definition block constrains nothing by itself — only a `$ref` into it does,
+and that `$ref` is reported at its own path — so treating it as inert avoids a
+guaranteed false positive on every pydantic-derived server.
 
 A drop is never silent, because a schema more permissive than the server's is
-a tool call the model will confidently get wrong. When anything is dropped,
-the projected tool's `Description` gains a `Schema note:` paragraph naming the
-dropped keywords and their paths and stating that conforming arguments may
-still be rejected, and the `Client`'s logger (`mcp.WithLogger`) gets one
-`Warn` per affected tool. A represented `oneOf`/`anyOf`/`allOf` is *also*
-restated as one prose clause, since models follow a sentence more reliably
-than a nested composition keyword. A schema that projects cleanly and uses no
-composition is left completely alone: its `Description` is the server's own
-string byte for byte, and it logs nothing — the degradation report has to
-stay a short list an operator can act on.
+a tool call the model will confidently get wrong. That invariant holds with no
+exceptions: a root-level `enum` (an assertion `tool.Schema` has no field for),
+an empty `enum`/`oneOf`/`anyOf`/`allOf` (a schema nothing validates against),
+and a schema that could not be decoded at all are all reported, not discarded
+quietly. Only genuinely inert keys stay silent.
+
+Reporting is split by audience, because one of the two channels is billed per
+request:
+
+- **The model** gets a `Schema note:` paragraph appended to the tool's
+  `Description`, carrying **deduplicated keyword counts under a hard cap**
+  (`format (×40), pattern (×40), additionalProperties, and 3 more`) plus the
+  statement that conforming arguments may still be rejected. It carries **no
+  paths**. A description rides every request for the life of the session, and
+  paths are unbounded and server-controlled: the undeduplicated form turned a
+  4,072-byte schema into a 5,328-byte description, making prompt cost a
+  function of the server's schema. Every appended token is now bounded by
+  construction — a fixed cap on list length and on the length of any single
+  server-supplied token — so it cannot grow with the schema's size.
+- **The operator** gets one `Warn` per affected tool on the `Client`'s logger
+  (`mcp.WithLogger`) carrying the exhaustive per-occurrence list *with* full
+  paths, plus the decode error when the schema could not be read. In a log
+  that detail costs nothing and it is exactly what is needed to find the
+  keyword in the server's own schema.
+
+A represented `oneOf`/`anyOf`/`allOf` is *also* restated as one prose clause,
+since models follow a sentence more reliably than a nested composition
+keyword; nested compositions are grouped by keyword and named by path under
+the same cap, because a wide pydantic schema carries one per optional field. A
+schema that projects cleanly and uses no composition is left completely alone:
+its `Description` is the server's own string byte for byte, and it logs
+nothing — the degradation report has to stay a short list an operator can act
+on.
 
 The projection is total by construction: the raw schema is decoded once into
 `map[string]any` rather than into narrow Go structs, so no value type a server
@@ -1098,9 +1139,11 @@ description, and `required` list in the whole schema.) A value only the wire
 type is too narrow for — a non-string `enum`, a `["string","null"]` union
 `type` — costs that one keyword, is reported like any other drop, and leaves
 its siblings intact. A union `type` keeps its first non-`null` member, which
-is narrower than the server, never wider. A missing schema, or one that is not
-a JSON object at all, degrades to an empty object schema rather than failing
-the whole projection over one tool.
+is narrower than the server, never wider, and is reported as `type union` so
+it cannot be misread as "the type is unconstrained"; a single-member array
+loses nothing and is not reported. A missing schema, or one that could not be
+decoded, degrades to an empty object schema rather than failing the whole
+projection over one tool.
 
 **Naming and sanitization (satisfies the permission grammar above).** A
 projected tool is named `mcp__<server>__<tool>`, matching the
