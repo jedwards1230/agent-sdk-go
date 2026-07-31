@@ -322,10 +322,22 @@ func (j *Journal) reopen(w JournalWriter) {
 
 // chainFromHead walks parent links from HEAD back toward the root, collecting
 // in child→root order, and stops at (but includes) a compaction boundary —
-// exactly the entries that make up the session's CURRENT context. It is the
-// shared walk behind [fold] and [Journal.LastUsage], so both agree on what
-// "current context" means without duplicating the walk. Returns nil for an
+// exactly the entries that make up the session's CURRENT context. It
+// materializes that chain for [fold], now its only caller. Returns nil for an
 // empty journal.
+//
+// [Journal.LastUsage] no longer calls this: it walks the same links in place,
+// under the journal lock and without allocating. So the two agree on what
+// "current context" means BY CONVENTION rather than by construction — change a
+// stop condition here and it must change there too, or Fold and LastUsage will
+// silently disagree about which entries are in context.
+//
+// Unlike LastUsage's walk, this one is unbounded. A journal whose ids are not
+// unique — a corrupt or concatenated file, carrying ids this process did not
+// generate — can form a parent cycle that spins here forever, appending on
+// every iteration. LastUsage's len(entries) step bound is the fixed form;
+// applying it here is deliberately left to a follow-up, since fold's contract
+// has its own equivalence surface.
 func chainFromHead(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return nil
