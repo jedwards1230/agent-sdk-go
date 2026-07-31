@@ -934,6 +934,78 @@ strategy that made no model call still marshals a valid, mostly-empty event.
 `Instructions` field mirroring the method signature — additive, omitempty, so
 an existing bare `{session_id}` request is unaffected.
 
+## Provider error classification
+
+**`provider.ErrContextOverflow` is a contract; provider message text is not.**
+The sentinel reports one thing: a request was REJECTED because the prompt
+exceeded the model's context window. Callers branch with `errors.Is`. It is
+distinct from `StopMaxTokens` (a turn that ran and hit its *output* cap — a
+success), from a rate limit, from Anthropic's `request_too_large` (a request
+*byte size* limit, not remedied by shortening history), and from a transport
+failure. None of those classify.
+
+It exists because the compaction seam above ships **no automatic trigger**: an
+embedder judges pressure from settled usage. That can't see a single-turn
+overshoot — a rejected call generates nothing and therefore reports *no usage
+at all*, so a usage threshold never fires and the session wedges
+(`jedwards1230/gofer#279`). The rejection error is the only signal, so it has
+to be classified rather than string-matched by every consumer.
+
+**Each adapter normalizes its own vendor signal**, and vendor asymmetry is
+absorbed there rather than exported. Every adapter error type implements
+`Is(target error) bool` over its *exported fields* — a pure function, so a value
+a consumer hand-builds in its own test classifies exactly as a live response
+does — and the rule is structured-signal-first:
+
+- **OpenAI** names the failure discretely. `openai.APIError` now parses the
+  `{"error":{…}}` envelope into `Type`/`Code`/`Param` (`Body` still retained),
+  and both it and `openai.StreamError` recognize `context_length_exceeded` plus
+  the `context_window_exceeded` that gateways re-emitting the envelope
+  (LiteLLM, OpenRouter — reachable through `WithBaseURL`) send instead. An
+  *unrecognized* code is not a verdict: it may simply have been rewritten, so
+  the prose fallback still runs.
+- **Anthropic ships no discrete code**: overflow is a plain
+  `invalid_request_error` with the detail only in the message. So
+  `anthropic.Error` gates on type first, then matches a narrow phrase list
+  (`prompt is too long`, `exceed context limit`, `context window`).
+
+Both adapters check each structured field **only when it is present**, and as
+separate conditions. Neither is guaranteed — status is 0 on a mid-stream SSE
+error frame, and type is empty whenever the envelope was rewritten or truncated
+past the read cap — so demanding either outright false-negatives a real
+overflow, while collapsing the two into one `status != 400 && type != …`
+condition passes whenever *either* matches and lets a 5xx quoting overflow
+prose through. Both spellings are natural and both are wrong; the tests pin
+each direction.
+
+Text matching is a fallback confined to the adapter, never a caller's job.
+Where the two directions conflict the adapters resolve toward the false
+positive: a missed overflow wedges the session, while a spurious one costs a
+single bounded compact-and-retry.
+
+The error propagates **unwrapped** through `loop.Run` and `runner.Prompt`, so
+`errors.Is` works on what a consumer holds; a `loop` regression test pins that.
+`faux.Turn.Err` scripts a pre-stream rejection, so the whole branch is testable
+with no network:
+
+```go
+res, err := loop.Run(ctx, cfg, msgs)
+if errors.Is(err, provider.ErrContextOverflow) {
+    msgs = shrink(msgs)               // embedder policy: summarize or drop history
+    res, err = loop.Run(ctx, cfg, msgs)
+}
+```
+
+On the `Runner` path the retry is not this symmetric: `Runner.Prompt` journals
+the user message *before* the model call, so an overflow leaves that message
+already in the journal and re-prompting the same text double-appends it —
+compact, then continue from the existing HEAD rather than re-sending.
+
+No new `StreamEventType`, `StopReason`, or `event/` field: the returned `error`
+is what a compact-and-retry branch reads, and each of those is a separate
+contract addition with its own cost. There is deliberately no
+`provider.IsContextOverflow` helper either — `errors.Is` is already the ask.
+
 ## MCP (M7)
 
 `mcp/` is an **optional SDK package**: a hand-rolled JSON-RPC 2.0 client

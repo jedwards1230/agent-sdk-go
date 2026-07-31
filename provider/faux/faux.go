@@ -18,13 +18,25 @@ type Script struct {
 	Turns []Turn
 }
 
-// Turn scripts a single model turn: reasoning chunks, then text chunks, then
-// the turn's usage and stop reason.
+// Turn scripts a single model turn: either a successful turn — reasoning
+// chunks, then text chunks, then the turn's usage and stop reason — or, when
+// Err is set, a pre-stream failure instead.
 type Turn struct {
 	Reasoning  []string
 	Text       []string
 	Usage      provider.Usage
 	StopReason provider.StopReason
+	// Err, when non-nil, makes this turn fail from Stream before any event is
+	// emitted, exactly as a provider that rejects a request pre-stream does.
+	// It is the PRE-STREAM failure path only: a mid-stream error is not
+	// scriptable, and the turn's other fields are ignored when it is set.
+	//
+	// It lets a test script a classified failure — say
+	// provider.ErrContextOverflow, wrapped or bare — and assert on how the
+	// caller reacts. The turn is still consumed, so a following turn replays
+	// normally: turn 1 fails with an overflow, turn 2 succeeds, which is what
+	// makes an end-to-end compact-and-retry test possible.
+	Err error
 }
 
 // Default returns the canonical script used by the demo and the golden-file
@@ -62,8 +74,9 @@ func New(s Script) *Provider { return &Provider{script: s} }
 // Info returns the faux provider's synthetic model metadata.
 func (p *Provider) Info() provider.ModelInfo { return info }
 
-// Stream returns the next scripted turn as a normalized stream. It errors once
-// the script is exhausted. The request is ignored — output is fully scripted.
+// Stream returns the next scripted turn as a normalized stream, or that turn's
+// [Turn.Err] when it scripts a pre-stream failure. It errors once the script is
+// exhausted. The request is ignored — output is fully scripted.
 func (p *Provider) Stream(_ context.Context, _ provider.Request) (provider.StreamHandle, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -71,7 +84,13 @@ func (p *Provider) Stream(_ context.Context, _ provider.Request) (provider.Strea
 		return nil, fmt.Errorf("faux: script exhausted after %d turn(s)", len(p.script.Turns))
 	}
 	t := p.script.Turns[p.turn]
+	// Consume the turn before reporting its failure, so the next Stream call
+	// advances to the following turn — a scripted failure is one turn, not a
+	// permanent wedge.
 	p.turn++
+	if t.Err != nil {
+		return nil, t.Err
+	}
 	return newStream(t), nil
 }
 
