@@ -332,12 +332,26 @@ func (j *Journal) reopen(w JournalWriter) {
 // stop condition here and it must change there too, or Fold and LastUsage will
 // silently disagree about which entries are in context.
 //
-// Unlike LastUsage's walk, this one is unbounded. A journal whose ids are not
-// unique — a corrupt or concatenated file, carrying ids this process did not
-// generate — can form a parent cycle that spins here forever, appending on
-// every iteration. LastUsage's len(entries) step bound is the fixed form;
-// applying it here is deliberately left to a follow-up, since fold's contract
-// has its own equivalence surface.
+// The len(entries) step bound is the same one [Journal.LastUsage] carries, and
+// it is here for the same reason: parent links come from a file this process
+// may not have written, and a cycle in them would otherwise spin forever while
+// appending on every iteration — an infinite loop that also exhausts memory.
+//
+// The bound cannot truncate a real context. For any acyclic journal the walk
+// visits each entry at most once and so terminates in at most len(entries)
+// steps anyway; the bound is only reachable on a journal whose links cycle,
+// where the old code had no finite behavior at all. That matters more here than
+// it did for LastUsage: Fold builds the model's ENTIRE context, so a bound that
+// could trip on a well-formed journal would silently change what the model
+// sees. It cannot.
+//
+// A cyclic journal is usually refused before it ever gets this far:
+// [FileStore.Open] runs [validateAcyclic] and fails with [ErrCorruptJournal].
+// The bound is not therefore dead code. That check covers the chain as loaded,
+// so a cycle can still reach here two ways — a journal assembled in-process
+// (MemStore, tests), and a [Journal.Fork] onto an unreachable cyclic branch,
+// which re-parents HEAD into corruption the load-time check deliberately
+// tolerated. This bound is what makes both of those terminate.
 func chainFromHead(entries []Entry) []Entry {
 	if len(entries) == 0 {
 		return nil
@@ -350,7 +364,7 @@ func chainFromHead(entries []Entry) []Entry {
 
 	chain := make([]Entry, 0, len(entries))
 	cur := entries[len(entries)-1]
-	for {
+	for steps := len(entries); steps > 0; steps-- {
 		chain = append(chain, cur)
 		if cur.Type == EntryCompaction || cur.Parent == "" {
 			break

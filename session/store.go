@@ -336,6 +336,16 @@ func (s *FileStore) Open(ctx context.Context, id string) (*Journal, error) {
 		return nil, err
 	}
 
+	// The structural check belongs HERE rather than in readJournal, because
+	// this is the path that produces a foldable *Journal. A cyclic parent chain
+	// wedges the walkers behind Fold and LastUsage, so it must not become a live
+	// session; but [ReadEntries] only ever scans entries linearly for metadata,
+	// never following a Parent link, so refusing it there would lose a session's
+	// cwd and checkpoints over corruption it does not even traverse.
+	if err := validateAcyclic(entries); err != nil {
+		return nil, fmt.Errorf("session: journal %s: %w", path, err)
+	}
+
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("session: open journal %s for append: %w", path, err)
