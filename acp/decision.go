@@ -30,20 +30,20 @@ type DecisionOption struct {
 // batches several so an agent needing several sign-offs asks only once.
 type DecisionQuestion struct {
 	// QuestionID is a stable id correlating a [DecisionAnswer] to its question.
-	QuestionID string
+	QuestionID string `json:"questionId"`
 	// Title is a short chip label for the decision.
-	Title string
+	Title string `json:"title"`
 	// Question is the question text.
-	Question string
+	Question string `json:"question"`
 	// Context is optional supporting context for a side panel.
-	Context string
+	Context string `json:"context,omitempty"`
 	// Options are the choices offered; a nil slice marshals to "[]" (a question
 	// may legitimately carry zero options when only free text is offered).
-	Options []DecisionOption
+	Options []DecisionOption `json:"options"`
 	// AllowFreeText offers a free-text "type something" answer.
-	AllowFreeText bool
+	AllowFreeText bool `json:"allowFreeText,omitempty"`
 	// AllowChat offers the "chat about this" escape hatch.
-	AllowChat bool
+	AllowChat bool `json:"allowChat,omitempty"`
 }
 
 // MarshalJSON encodes {questionId, title, question, context?, options,
@@ -66,15 +66,40 @@ func (q DecisionQuestion) MarshalJSON() ([]byte, error) {
 	}{q.QuestionID, q.Title, q.Question, q.Context, options, q.AllowFreeText, q.AllowChat})
 }
 
+// UnmarshalJSON decodes {questionId, title, question, context?, options,
+// allowFreeText?, allowChat?}.
+func (q *DecisionQuestion) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		QuestionID    string           `json:"questionId"`
+		Title         string           `json:"title"`
+		Question      string           `json:"question"`
+		Context       string           `json:"context"`
+		Options       []DecisionOption `json:"options"`
+		AllowFreeText bool             `json:"allowFreeText"`
+		AllowChat     bool             `json:"allowChat"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("acp: decode DecisionQuestion: %w", err)
+	}
+	q.QuestionID = wire.QuestionID
+	q.Title = wire.Title
+	q.Question = wire.Question
+	q.Context = wire.Context
+	q.Options = wire.Options
+	q.AllowFreeText = wire.AllowFreeText
+	q.AllowChat = wire.AllowChat
+	return nil
+}
+
 // RequestDecisionRequest is the payload of a session/request_decision request,
 // sent agent-to-client to ask the user one or more structured questions. It is
 // distinct from a [RequestPermissionRequest]: not a policy gate on a tool call,
 // but a general question set.
 type RequestDecisionRequest struct {
 	// SessionID identifies the session the questions belong to.
-	SessionID string
+	SessionID string `json:"sessionId"`
 	// Questions are the questions to answer; a nil slice marshals to "[]".
-	Questions []DecisionQuestion
+	Questions []DecisionQuestion `json:"questions"`
 }
 
 // MarshalJSON encodes {"sessionId":...,"questions":[...]}. A nil
@@ -88,6 +113,20 @@ func (r RequestDecisionRequest) MarshalJSON() ([]byte, error) {
 		SessionID string             `json:"sessionId"`
 		Questions []DecisionQuestion `json:"questions"`
 	}{r.SessionID, questions})
+}
+
+// UnmarshalJSON decodes {"sessionId":...,"questions":[...]}.
+func (r *RequestDecisionRequest) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		SessionID string             `json:"sessionId"`
+		Questions []DecisionQuestion `json:"questions"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return fmt.Errorf("acp: decode RequestDecisionRequest: %w", err)
+	}
+	r.SessionID = wire.SessionID
+	r.Questions = wire.Questions
+	return nil
 }
 
 // DecisionOutcome is the tagged union carried by a [DecisionAnswer]: the client
