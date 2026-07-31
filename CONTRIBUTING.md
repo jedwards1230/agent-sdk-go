@@ -53,3 +53,32 @@ diff like code.
 
 Keep documentation current as part of the change, not as a follow-up — update
 the README and `docs/` in the same PR.
+
+## Known false positives
+
+Findings the automated review has raised that were refuted with evidence.
+Refute with a command someone else can re-run, not an assertion — and only add
+an entry once you have.
+
+### "Returning `&param` stores a dangling pointer to the stack"
+
+Raised twice on one line in
+[#138](https://github.com/jedwards1230/agent-sdk-go/pull/138), against
+`announce.NewCredential` returning `Credential{value: &s}`.
+
+Go has no dangling pointers. Escape analysis moves a parameter whose address
+outlives the call to the heap, and the garbage collector keeps it alive as long
+as something references it. The suggested "fix" (`t := s; return &t`) is
+identical after escape analysis. Verify:
+
+```bash
+go build -gcflags='-m' ./announce/ 2>&1 | grep 'moved to heap: s'
+# announce/announce.go:289:20: moved to heap: s
+```
+
+A runtime check also holds: 1000 credentials stored in a slice, then deep stack
+churn and two `runtime.GC()` calls, reveal their original values intact under
+`-race`.
+
+This is a C/C++ lifetime rule applied to Go. Expect it whenever a constructor
+returns a struct holding the address of a parameter.
