@@ -888,10 +888,13 @@ needs, the same figures its existing usage/stats panel already tracks. The one
 gap: a session with no live turn yet in THIS process (freshly `Resume`d,
 before any new `Prompt`) has nothing to read. `Journal.LastUsage` (and
 `Runner.LastUsage`, its thin wrapper) close it: the model and usage of the
-most recent turn-bearing entry in the CURRENT folded chain — the exact walk
-`Fold` performs (HEAD back to root, or a compaction boundary), refactored out
-as `chainFromHead` so both agree on what "current context" means without
-duplicating the walk. Pair the returned model with `provider.Lookup` for a
+most recent turn-bearing entry in the CURRENT folded chain — the same chain
+`Fold` walks (HEAD back to root, stopping at an inclusive compaction
+boundary), so both agree on what "current context" means. `Fold` materializes
+that chain through `chainFromHead`; `LastUsage` walks it in place under the
+journal lock, over the journal's own id index — allocation-free, and
+exiting at the first entry that carries usage rather than building the whole
+chain to inspect its head. Pair the returned model with `provider.Lookup` for a
 context-window size, exactly as a live `turn.finished`'s `ContextWindow` is
 derived.
 

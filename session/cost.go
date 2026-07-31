@@ -70,23 +70,39 @@ type CostReport struct {
 // than as the session's cost.
 func (r CostReport) Complete() bool { return len(r.Unpriced) == 0 }
 
-// cost aggregates usage across entries — every branch, including ones dropped
-// from Fold by a fork — pricing each model's summed usage via reg. reg may be
-// nil (all costs zero; tokens still summed). Because pricing is linear in token
-// counts, summing usage per model and pricing once equals pricing each turn and
-// summing, with less float accumulation.
-func cost(entries []Entry, reg PriceLookup) CostReport {
-	usageByModel := make(map[string]provider.Usage)
-	var totalUsage provider.Usage
-	for _, e := range entries {
+// sumUsage buckets token usage per [Entry.Model] and sums the total, in one
+// pass over entries — every branch, including ones dropped from Fold by a fork.
+//
+// It is the O(len(entries)) half of cost aggregation and it is PURE: no
+// caller-supplied code is reachable from it. That is what lets [Journal.Cost]
+// run it directly over the journal's own slice while holding j.mu, instead of
+// copying the whole slice out first. Entries are addressed by index rather than
+// ranged by value so the walk never copies an [Entry].
+func sumUsage(entries []Entry) (usageByModel map[string]provider.Usage, total provider.Usage) {
+	usageByModel = make(map[string]provider.Usage)
+	for i := range entries {
+		e := &entries[i]
 		if e.Usage == nil {
 			continue
 		}
 		usageByModel[e.Model] = addUsage(usageByModel[e.Model], *e.Usage)
-		totalUsage = addUsage(totalUsage, *e.Usage)
+		total = addUsage(total, *e.Usage)
 	}
+	return usageByModel, total
+}
 
-	report := CostReport{Usage: totalUsage, ByModel: make(map[string]ModelCost, len(usageByModel))}
+// priceUsage prices an already-summed per-model usage map (as returned by
+// [sumUsage]) via reg. reg may be nil (all costs zero; tokens still summed).
+// Because pricing is linear in token counts, summing usage per model and
+// pricing once equals pricing each turn and summing, with less float
+// accumulation.
+//
+// It is the half that calls caller-supplied code — reg.Pricing — and it is
+// bounded by the number of DISTINCT models in the session (typically one to
+// three), never by the journal length. [Journal.Cost] therefore runs it after
+// releasing j.mu; see the call site for why that split matters.
+func priceUsage(usageByModel map[string]provider.Usage, total provider.Usage, reg PriceLookup) CostReport {
+	report := CostReport{Usage: total, ByModel: make(map[string]ModelCost, len(usageByModel))}
 	for model, u := range usageByModel {
 		var c provider.Cost
 		var priced bool
@@ -103,6 +119,15 @@ func cost(entries []Entry, reg PriceLookup) CostReport {
 	}
 	sort.Strings(report.Unpriced)
 	return report
+}
+
+// cost aggregates usage across entries and prices it — the composition of
+// [sumUsage] and [priceUsage] for a caller that already holds a plain entry
+// slice and has no lock to worry about. [Journal.Cost] deliberately does NOT
+// use it: it needs the two halves on opposite sides of an unlock.
+func cost(entries []Entry, reg PriceLookup) CostReport {
+	usageByModel, total := sumUsage(entries)
+	return priceUsage(usageByModel, total, reg)
 }
 
 // addUsage sums two usages field-wise. The per-turn Raw audit map is not
