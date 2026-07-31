@@ -74,6 +74,14 @@ func refCost(entries []Entry, reg PriceLookup) CostReport {
 // refLastUsage is the pre-refactor LastUsage body: materialize the chain via
 // [chainFromHead] (which fold still uses, unchanged) and take the first entry
 // carrying usage.
+//
+// WARNING: this reference delegates to PRODUCTION chainFromHead. That makes it
+// the strongest possible reference while chainFromHead is the untouched
+// pre-refactor walk — but it also means anyone who later optimizes or rewrites
+// chainFromHead silently blinds every differential assertion in this file
+// without changing a single one of them. If chainFromHead is ever modified,
+// inline its current body here first so the reference stays frozen at the
+// behavior these tests exist to pin.
 func refLastUsage(entries []Entry) (string, provider.Usage, bool) {
 	for _, e := range chainFromHead(entries) {
 		if e.Usage != nil {
@@ -401,6 +409,76 @@ func TestJournalDerivedEdgeCases(t *testing.T) {
 		}
 	})
 
+	// The three cases below all force the walk to consume its LAST permitted
+	// step: the answer sits on the oldest entry the walk is allowed to reach.
+	// They exist because every other test in this file either finds usage near
+	// HEAD or stops early at a compaction, which leaves the len(j.entries) step
+	// bound off by one without any test noticing.
+
+	t.Run("sole entry carries the usage", func(t *testing.T) {
+		j := newEmpty(t)
+		only := provider.Usage{InputTokens: 5, OutputTokens: 6}
+		if _, err := j.Append(NewMessageEntry(provider.AssistantText("only"),
+			WithEntryModel("claude-sonnet-5"), WithEntryUsage(only))); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+
+		model, usage, ok := j.LastUsage()
+		wModel, wUsage, wOK := refLastUsage(j.Entries())
+		assertLastUsageEqual(t, model, usage, ok, wModel, wUsage, wOK, "sole-entry")
+		if !ok || model != "claude-sonnet-5" || !usage.Equal(only) {
+			t.Errorf("LastUsage = (%q, %+v, %v), want (%q, %+v, true) — a one-entry journal "+
+				"needs the walk's first and only step", model, usage, ok, "claude-sonnet-5", only)
+		}
+	})
+
+	t.Run("only the root carries usage", func(t *testing.T) {
+		j := newEmpty(t)
+		rootUsage := provider.Usage{InputTokens: 31, OutputTokens: 41}
+		if _, err := j.Append(NewMessageEntry(provider.AssistantText("root"),
+			WithEntryModel("claude-sonnet-5"), WithEntryUsage(rootUsage))); err != nil {
+			t.Fatalf("Append root: %v", err)
+		}
+		// Five usage-free descendants, no compaction: the walk has to traverse
+		// the whole chain and spend its very last step on the root.
+		for i := range 5 {
+			if _, err := j.Append(NewMessageEntry(provider.UserText(fmt.Sprintf("u%d", i)))); err != nil {
+				t.Fatalf("Append u%d: %v", i, err)
+			}
+		}
+		if got := j.Len(); got != 6 {
+			t.Fatalf("Len() = %d, want 6", got)
+		}
+
+		model, usage, ok := j.LastUsage()
+		wModel, wUsage, wOK := refLastUsage(j.Entries())
+		assertLastUsageEqual(t, model, usage, ok, wModel, wUsage, wOK, "root-only-usage")
+		if !ok || !usage.Equal(rootUsage) {
+			t.Errorf("LastUsage = (%q, %+v, %v), want the root's %+v — the walk must reach "+
+				"the oldest entry in a %d-entry chain", model, usage, ok, rootUsage, j.Len())
+		}
+	})
+
+	t.Run("sole compaction entry carries its own usage", func(t *testing.T) {
+		j := newEmpty(t)
+		// This entry is simultaneously HEAD, the root (Parent == ""), and a
+		// compaction boundary — every stop condition at once. Its own usage is
+		// still the answer, because usage is checked BEFORE the stop conditions.
+		summarize := provider.Usage{InputTokens: 71, OutputTokens: 81}
+		if _, err := j.Append(NewCompactionEntry("summary", "",
+			WithEntryModel("claude-opus-4-8"), WithEntryUsage(summarize))); err != nil {
+			t.Fatalf("Append compaction: %v", err)
+		}
+
+		model, usage, ok := j.LastUsage()
+		wModel, wUsage, wOK := refLastUsage(j.Entries())
+		assertLastUsageEqual(t, model, usage, ok, wModel, wUsage, wOK, "sole-compaction")
+		if !ok || model != "claude-opus-4-8" || !usage.Equal(summarize) {
+			t.Errorf("LastUsage = (%q, %+v, %v), want (%q, %+v, true) — a stop-condition entry's "+
+				"OWN usage is still a valid answer", model, usage, ok, "claude-opus-4-8", summarize)
+		}
+	})
+
 	t.Run("only usage is behind a fork", func(t *testing.T) {
 		j := newEmpty(t)
 		// "a" carries no usage on purpose: the only usage in the journal sits on
@@ -459,6 +537,83 @@ func TestJournalDerivedEdgeCases(t *testing.T) {
 		}
 		if got := j.Cost(nil).Usage; !got.Equal(older) {
 			t.Errorf("Cost(nil).Usage = %+v, want the compacted-away turn still counted %+v", got, older)
+		}
+	})
+}
+
+// TestJournalLastUsageMalformedJournal covers the two defensive branches of the
+// walk that no journal built through the public API can reach: a Parent id that
+// is not in the index, and a parent CYCLE.
+//
+// Both journals are assembled as struct literals on purpose. Append and Fork
+// cannot produce either shape — Fork validates its target exists and ids are
+// unique and monotonic — so a journal like this only ever arrives from a
+// corrupt or hand-edited JSONL file on disk, which is exactly the case the
+// defenses are for.
+//
+// The cyclic case is also the one input where the new walk and the old
+// implementation genuinely DIVERGE rather than agree: chainFromHead has no step
+// bound, so refLastUsage would spin forever on it. The new walk terminates.
+// That is a deliberate improvement, not a behavior regression — for any acyclic
+// journal the bound is unreachable — so this case asserts termination directly
+// instead of differentially.
+func TestJournalLastUsageMalformedJournal(t *testing.T) {
+	t.Run("dangling parent stops the walk", func(t *testing.T) {
+		// HEAD's parent id is not in the index. The entry below it DOES carry
+		// usage, so a walk that failed to stop here would wrongly report it
+		// (a missing bounds check would index byID's zero value and land on it).
+		stranded := provider.Usage{InputTokens: 123, OutputTokens: 45}
+		entries := []Entry{
+			{ID: "a", Parent: "", Type: EntryMessage, Model: "claude-sonnet-5", Usage: &stranded},
+			{ID: "b", Parent: "ghost", Type: EntryMessage},
+		}
+		j := &Journal{entries: entries, byID: map[string]int{"a": 0, "b": 1}}
+
+		model, usage, ok := j.LastUsage()
+		// chainFromHead breaks on a dangling parent too, so the old
+		// implementation agrees here and the differential comparison holds.
+		wModel, wUsage, wOK := refLastUsage(entries)
+		assertLastUsageEqual(t, model, usage, ok, wModel, wUsage, wOK, "dangling-parent")
+		if ok {
+			t.Errorf("LastUsage = (%q, %+v, true), want ok=false — the walk must stop at a "+
+				"parent id the index does not contain, not fall through to an unrelated entry",
+				model, usage)
+		}
+	})
+
+	t.Run("parent cycle terminates", func(t *testing.T) {
+		// x and y point at each other, and neither carries usage, so nothing can
+		// end the walk except the step bound.
+		entries := []Entry{
+			{ID: "x", Parent: "y", Type: EntryMessage},
+			{ID: "y", Parent: "x", Type: EntryMessage},
+		}
+		j := &Journal{entries: entries, byID: map[string]int{"x": 0, "y": 1}}
+
+		// Run in a goroutine behind a timeout: an unbounded walk would spin
+		// forever WHILE HOLDING j.mu, so a regression has to fail this test
+		// rather than hang CI until it is killed.
+		type result struct {
+			model string
+			usage provider.Usage
+			ok    bool
+		}
+		done := make(chan result, 1)
+		go func() {
+			m, u, ok := j.LastUsage()
+			done <- result{m, u, ok}
+		}()
+
+		select {
+		case got := <-done:
+			if got.ok {
+				t.Errorf("LastUsage = (%q, %+v, true), want ok=false — no entry in the cycle "+
+					"carries usage", got.model, got.usage)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("Journal.LastUsage did not terminate on a cyclic journal within 10s: " +
+				"the len(j.entries) step bound is missing, and the spin holds j.mu, " +
+				"which wedges every other operation on the session")
 		}
 	})
 }
