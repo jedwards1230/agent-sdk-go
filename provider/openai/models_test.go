@@ -227,6 +227,35 @@ func TestListModelsHTTPError(t *testing.T) {
 	}
 }
 
+// TestListModelsHTTPErrorParsesEnvelope pins the field contract on the SECOND
+// APIError construction site. Both paths go through newAPIError, so the
+// documented meaning of an empty Type/Code/Param — "the body was not that
+// shape" — is true here too, rather than only on the Stream path. Before they
+// shared a constructor this path returned a bare status+body and left the
+// structured fields empty against a body that plainly carried them.
+func TestListModelsHTTPErrorParsesEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"message":"Unknown parameter","type":"invalid_request_error","param":"client_version","code":"unknown_parameter"}}`))
+	}))
+	defer srv.Close()
+
+	_, err := testProvider(t, srv).ListModels(context.Background())
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("want *APIError, got %T: %v", err, err)
+	}
+	if apiErr.Type != "invalid_request_error" || apiErr.Code != "unknown_parameter" || apiErr.Param != "client_version" {
+		t.Errorf("envelope not parsed on the ListModels path: type=%q code=%q param=%q",
+			apiErr.Type, apiErr.Code, apiErr.Param)
+	}
+	// Narrowness still holds on this path: a parameter complaint is not an
+	// overflow just because it parsed.
+	if errors.Is(err, provider.ErrContextOverflow) {
+		t.Error("an unknown-parameter rejection must not classify as a context overflow")
+	}
+}
+
 // TestListModelsMalformedBody rejects a 200 whose body is not the expected
 // JSON, rather than returning a silently empty catalogue.
 func TestListModelsMalformedBody(t *testing.T) {
