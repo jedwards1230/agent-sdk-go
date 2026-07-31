@@ -51,8 +51,11 @@ func (a toolAdapter) Run(ctx context.Context, input json.RawMessage) (ToolResult
 	if err != nil {
 		return ToolResult{}, err
 	}
-	// tool.Result.Metadata.Diagnostics is an M3 slot the builtins never populate,
-	// so it is still not surfaced here.
+	// This adapter maps no diagnostics because tool.Result carries none: the
+	// diagnostics path is ToolResult.Diagnostics ([]string), which a consuming
+	// application fills from outside the tool — via a Hooks AfterTool hook, or
+	// by decorating a ToolRegistry (e.g. with the output of lsp.Batch.Strings).
+	// There is no tool-side source to map from.
 	var edits []event.FileEdit
 	if fc := res.Metadata.FileChange; fc != nil {
 		edits = []event.FileEdit{{Path: fc.Path, OldText: fc.OldText, NewText: fc.NewText}}

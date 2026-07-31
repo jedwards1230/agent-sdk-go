@@ -247,6 +247,42 @@ func TestToolCallFinishedCarriesEdits(t *testing.T) {
 	}
 }
 
+// TestAfterToolDiagnosticsReachFinished pins the documented diagnostics
+// contract: nothing tool-side produces diagnostics, so a consumer sets
+// ToolResult.Diagnostics from outside — here through an AfterTool hook — and
+// the loop must carry them onto tool.call.finished verbatim.
+func TestAfterToolDiagnosticsReachFinished(t *testing.T) {
+	b := event.NewBroker()
+	defer b.Close()
+	sub := b.Subscribe(event.FilterMustDeliver, 256)
+
+	diags := []string{"foo.go:1:2: error: undefined: x [gopls]", "foo.go:9:1: warning: unused [gopls]"}
+	tool := &fakeTool{name: "edit", result: loop.ToolResult{Content: "edited foo.go"}}
+	cfg := baseConfig(b, scripted(
+		toolTurn("t1", "edit", `{"path":"foo.go"}`),
+		textTurn("done", provider.StopEndTurn),
+	))
+	cfg.Tools = tool
+	cfg.Hooks = loop.Hooks{
+		AfterTool: func(_ context.Context, _ loop.ToolCall, res loop.ToolResult) (loop.ToolResult, error) {
+			res.Diagnostics = diags
+			return res, nil
+		},
+	}
+
+	if _, err := loop.Run(context.Background(), cfg, []provider.Message{provider.UserText("go")}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	finished := drainFinished(sub)
+	if len(finished) != 1 {
+		t.Fatalf("want 1 tool.call.finished, got %d", len(finished))
+	}
+	if got := finished[0].Diagnostics; !reflect.DeepEqual(got, diags) {
+		t.Errorf("tool.call.finished diagnostics = %+v, want %+v", got, diags)
+	}
+}
+
 // TestToolCallEventsCarryAgent asserts Config.Agent is stamped onto every
 // tool-call event the loop emits — tool.call.started, tool.call.delta, and
 // tool.call.finished — so a consumer can attribute the call to the agent that

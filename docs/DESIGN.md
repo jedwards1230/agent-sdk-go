@@ -442,12 +442,20 @@ part of this package.
   consumer can assign the result straight onto
   `event.ToolCallFinished.Diagnostics` / `loop.ToolResult.Diagnostics` (both
   already exist) without `lsp` taking a reverse dependency on either.
+  `loop.ToolResult.Diagnostics` (`[]string`) is the only path to the event, and
+  a consumer reaches it from outside the tool through either seam that yields a
+  `ToolResult`: a `loop.Hooks.AfterTool` hook, or a decorated
+  `loop.ToolRegistry`. `tool.Result` carries no diagnostics — there is no
+  tool-side slot for the SDK to fill, and `loop.FromRegistry` never sets one.
 
 **Future (not shipped by `lsp/`)**: an embedded ~370-server registry
 (nvim-lspconfig-shaped dataset) with lazy per-file-event startup, diagnostics
 injected into tool results (current-file vs project split, errors first,
 settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
-tools built on top of the `Registry` + `Publisher` seam above.
+tools built on top of the `Registry` + `Publisher` seam above. "Injected into
+tool results" means the consuming layer setting `loop.ToolResult.Diagnostics`
+from a `loop.Hooks.AfterTool` hook or a decorated `loop.ToolRegistry`, not an
+SDK-side slot on `tool.Result`.
 
 ## Skills (`skill/`, M5)
 
