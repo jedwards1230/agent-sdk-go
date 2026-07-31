@@ -800,6 +800,18 @@ reconstructable) and torn-write recovery, which repairs a crash by dropping a
 bad *final* line and so cannot survive in-place edits of earlier entries. A
 destructive `Truncate` was considered and rejected.
 
+Parent links are only a *tree* because the writer made them one, and a session
+loads entries this process did not write — a concatenated or hand-edited file can
+close a link into a cycle. Every derived value (`Fold`, `LastUsage`) walks those
+links, so `FileStore.Open` refuses a cyclic chain with `ErrCorruptJournal` rather
+than letting each walker survive it independently. Refusing to open beats folding a
+partial context, which would prompt the model with something the journal does not
+say and signal nothing. `ReadEntries` stays permissive on purpose — it scans
+metadata linearly and never follows a link, so it must not lose a session over
+corruption it cannot reach. The check covers the chain *as loaded*, so both walkers
+also cap at `len(entries)` steps, which is what keeps an in-process journal and a
+`Fork` onto an unreachable cyclic branch bounded.
+
 Both publish the must-deliver `session.forked{at?, label?}` — the event's first
 producer — so every client sees a rewind the way it sees a resume, and knows
 *where* the branch landed. Both drain the runner's `awaitJournaled` barrier
