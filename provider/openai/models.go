@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
@@ -119,8 +118,11 @@ func (p *Provider) ListModels(ctx context.Context) ([]provider.ModelInfo, error)
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return nil, &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyLimit))
+		// Drain any remainder past the cap so the connection can return to the
+		// pool instead of being discarded mid-body.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, newAPIError(resp.StatusCode, msg)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, listBodyLimit))

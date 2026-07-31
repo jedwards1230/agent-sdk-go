@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/jedwards1230/agent-sdk-go/provider"
 )
@@ -345,4 +346,62 @@ func (e *Error) Error() string {
 		return fmt.Sprintf("anthropic: http %d: %s: %s", e.StatusCode, e.Type, e.Message)
 	}
 	return fmt.Sprintf("anthropic: http %d: %s", e.StatusCode, e.Message)
+}
+
+// Is reports whether this error satisfies target, normalizing Anthropic's
+// context-window rejection onto [provider.ErrContextOverflow]. Classification
+// is a pure function of the exported fields, so a value a caller constructed by
+// hand in its own test classifies exactly as a real response does.
+func (e *Error) Is(target error) bool {
+	return target == provider.ErrContextOverflow && e.contextOverflow()
+}
+
+// contextOverflow reports whether this error was the prompt not fitting.
+//
+// Anthropic reports overflow as a plain invalid_request_error with the detail
+// ONLY in the message — there is no discrete code to key on — so this
+// classifier is forced into text matching where OpenAI's is not. The structured
+// fields still gate it: text is consulted only after type and status agree.
+func (e *Error) contextOverflow() bool {
+	// Structured gate. request_too_large (HTTP 413) is deliberately excluded
+	// here: it is a limit on the request's BYTE SIZE, not on the context
+	// window, and shrinking history is not its remedy — a caller that treated
+	// it as an overflow would compact and retry forever.
+	if e.Type != "invalid_request_error" {
+		return false
+	}
+	// Status is checked only when present. It is 0 on the mid-stream SSE error
+	// frame (see streamError), which carries no HTTP response of its own — a
+	// classifier demanding 400 would miss every mid-stream overflow.
+	if e.StatusCode != 0 && (e.StatusCode < 400 || e.StatusCode > 499) {
+		return false
+	}
+	lower := strings.ToLower(e.Message)
+	for _, p := range contextOverflowPhrases {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// contextOverflowPhrases are the vendor phrasings of an overflowing prompt,
+// matched case-insensitively. This is a FALLBACK forced by Anthropic shipping
+// no discrete code for the failure (see Error.contextOverflow). Kept
+// deliberately narrow: every entry must be specific to the context window,
+// never a generic validation word, because a loose phrase here silently
+// reclassifies unrelated invalid_request_errors as overflows.
+//
+//	"prompt is too long: 246049 tokens > 200000 maximum"
+//	"input length and `max_tokens` exceed context limit: 195000 + 8192 > 200000, …"
+//
+// "context window" matches neither documented phrasing and is kept anyway,
+// deliberately: the harm is asymmetric. A false negative wedges the session,
+// which is the entire failure this sentinel exists to prevent; a false positive
+// costs one bounded compact-and-retry. The structured gate above (type, plus
+// 4xx when a status is present) already constrains what can reach this list.
+var contextOverflowPhrases = []string{
+	"prompt is too long",
+	"exceed context limit",
+	"context window",
 }

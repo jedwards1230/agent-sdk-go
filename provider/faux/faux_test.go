@@ -66,6 +66,37 @@ func TestInfo(t *testing.T) {
 	}
 }
 
+// TestTurnErrFailsPreStreamThenReplays asserts a scripted Turn.Err is returned
+// from Stream with no handle, and — the load-bearing half — that the failing
+// turn is still CONSUMED, so the next turn replays normally. That is what makes
+// an end-to-end compact-and-retry test possible: turn 1 is rejected, turn 2
+// succeeds. It also asserts the error is returned unwrapped, so errors.Is
+// against a classified sentinel works on what the caller receives.
+func TestTurnErrFailsPreStreamThenReplays(t *testing.T) {
+	p := faux.New(faux.Script{Turns: []faux.Turn{
+		{Err: provider.ErrContextOverflow, Text: []string{"never emitted"}},
+		{Text: []string{"second"}, StopReason: provider.StopEndTurn},
+	}})
+
+	s, err := p.Stream(context.Background(), provider.Request{})
+	if !errors.Is(err, provider.ErrContextOverflow) {
+		t.Fatalf("first Stream err = %v, want ErrContextOverflow", err)
+	}
+	if s != nil {
+		t.Errorf("first Stream returned a handle %v, want nil — the failure is pre-stream", s)
+	}
+
+	s, err = p.Stream(context.Background(), provider.Request{})
+	if err != nil {
+		t.Fatalf("second Stream: %v, want the following turn to replay", err)
+	}
+	defer func() { _ = s.Close() }()
+	got := collect(t, s)
+	if len(got) != 2 || got[0].Text != "second" || got[1].Type != provider.StreamFinished {
+		t.Errorf("second turn events = %+v, want a text delta then finished", got)
+	}
+}
+
 // TestScriptExhausted asserts a second turn against a one-turn script errors.
 func TestScriptExhausted(t *testing.T) {
 	p := faux.New(faux.Script{Turns: []faux.Turn{{Text: []string{"hi"}, StopReason: provider.StopEndTurn}}})

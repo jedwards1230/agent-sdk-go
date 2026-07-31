@@ -223,6 +223,13 @@ M0–M3 are what shipped here.
   Credentials and the base URL are `Config` fields the embedder supplies;
   nothing is read from an SDK-chosen env var or defaults to anyone's instance.
   See DESIGN *Web search providers*.
+- **Provider errors classify onto sentinels, not text.**
+  `provider.ErrContextOverflow` reports a request rejected for exceeding the
+  model's context window; each adapter normalizes its own vendor signal onto it
+  behind `errors.Is`, so no consumer string-matches vendor prose. It is the
+  trigger the compaction seam deliberately lacks — a rejected call reports no
+  usage, so a usage threshold cannot see a single-turn overshoot. See DESIGN
+  *Provider error classification*.
 - **Journals default to on-disk JSONL** (the auditability tenet);
   `session.MemStore` is an explicit embedder opt-in for an ephemeral
   fire-and-forget session — same fold/resume within the process, nothing
