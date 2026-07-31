@@ -67,9 +67,6 @@ type Metadata struct {
 	ExitCode *int
 	// Truncated reports that Content was capped at the tool's output limit.
 	Truncated bool
-	// Diagnostics is a slot the loop fills with LSP diagnostics gathered
-	// around the tool call (M3). Tools never populate it themselves.
-	Diagnostics []Diagnostic
 	// FileChange, when non-nil, records a file the tool created or modified: its
 	// path and full content before and after. It lets a client render a
 	// structured diff and never enters the model's context. The edit and write
@@ -96,18 +93,6 @@ type FileChange struct {
 	OldText string
 	// NewText is the file's content after the change.
 	NewText string
-}
-
-// Diagnostic is a single LSP-style diagnostic. It is defined here so the
-// M3 loop can inject diagnostics into a [Result] without a new type; builtin
-// tools never emit them.
-type Diagnostic struct {
-	File     string `json:"file"`
-	Line     int    `json:"line"`
-	Col      int    `json:"col"`
-	Severity string `json:"severity"` // "error", "warning", "info", or "hint"
-	Message  string `json:"message"`
-	Source   string `json:"source,omitempty"` // producing server, e.g. "gopls"
 }
 
 // Schema is a JSON Schema description of a tool's input. It marshals to a
