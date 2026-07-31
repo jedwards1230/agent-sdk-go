@@ -92,6 +92,8 @@ r, err := runner.New(ctx, runner.Options{
 | `lsp/` | Server registry + JSON-RPC-over-stdio client + diagnostics seam |
 | `spill/` | Streaming per-tool-call output sink (bounded excerpt + durable on-disk file) |
 | `exec/` | Headless one-shot exec adapter (JSONL events + output-schema validation) |
+| `device/` | X25519 device keys + `Sealed` envelope: RFC 9180 HPKE `mode_auth` (DHKEM-X25519/HKDF-SHA256/ChaCha20Poly1305), fresh ephemeral per envelope, one-sided forward secrecy, `ErrOpen` only |
+| `announce/` | The `Payload` a server publishes about itself: identity, candidate endpoints, session summaries, required device key, redacting `Credential`, capability `Scope` — types only, imports no `net` |
 
 Journals default to on-disk JSONL for auditability; `session.MemStore` is the
 opt-in for an ephemeral session that leaves no trace.
