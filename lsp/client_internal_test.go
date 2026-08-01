@@ -15,8 +15,19 @@ import (
 // a fraction of the time.
 
 // internalPipeTransport is the minimal in-memory Transport these tests need:
-// writes to one end arrive as reads on the other, and Close tears both ends
-// down (the peer's blocked Read unblocks with io.EOF or io.ErrClosedPipe).
+// writes to one end arrive as reads on the other, and Close closes both
+// halves of this end. The two tests below observe that from opposite sides,
+// and io.Pipe reports them differently:
+//
+//   - Closing this end's PipeReader makes THIS end's own blocked Read fail
+//     with io.ErrClosedPipe. That is the deliberate-Close path — it is what
+//     Client.Close does to its own read loop.
+//   - Closing this end's PipeWriter makes the PEER's blocked Read return
+//     io.EOF. That is the server-death path — killing the server is what
+//     ends the client's read loop.
+//
+// io.ErrClosedPipe is never what a peer's Read sees; a peer observes it on a
+// Write after the reader end has gone away.
 type internalPipeTransport struct {
 	r *io.PipeReader
 	w *io.PipeWriter
