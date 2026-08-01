@@ -44,6 +44,32 @@ func (h *capturingHandler) seen(level slog.Level, substr string) bool {
 	return false
 }
 
+// attrOf returns the value of the attribute named key on the first recorded
+// message containing substr at the given level. ok is false when no such record
+// was captured, or when it carries no such attribute.
+func (h *capturingHandler) attrOf(level slog.Level, substr, key string) (slog.Value, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Level != level || !strings.Contains(r.Message, substr) {
+			continue
+		}
+		var (
+			value slog.Value
+			found bool
+		)
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key {
+				value, found = a.Value, true
+				return false
+			}
+			return true
+		})
+		return value, found
+	}
+	return slog.Value{}, false
+}
+
 // waitSeen polls seen until it is true or testTimeout elapses.
 func (h *capturingHandler) waitSeen(level slog.Level, substr string) bool {
 	deadline := time.Now().Add(testTimeout)
@@ -97,7 +123,14 @@ func TestClient_WithLogger_SurfacesSwallowedReadLoopDiagnostics(t *testing.T) {
 
 // TestClient_WithLogger_DeliberateCloseIsNotNoise proves a deliberate Close
 // logs the read loop's exit at debug level (not warn), so intentional shutdown
-// does not surface as a transport error.
+// does not surface as a transport error — and that the record still CARRIES the
+// underlying read error.
+//
+// That attribute is the only surviving copy: this branch fails pending calls
+// with ErrClosed rather than the raw error, so nothing forwards it to a caller.
+// A server that died of a real fault an instant before a supervisor called
+// Close lands exactly here, and dropping err would make that root cause
+// unrecoverable process-wide.
 func TestClient_WithLogger_DeliberateCloseIsNotNoise(t *testing.T) {
 	client, _ := newPipedTransports()
 	handler := &capturingHandler{}
@@ -108,10 +141,21 @@ func TestClient_WithLogger_DeliberateCloseIsNotNoise(t *testing.T) {
 	}
 
 	if !handler.waitSeen(slog.LevelDebug, "stopped on close") {
-		t.Error("expected a debug log for the deliberate-close read-loop exit; none seen")
+		t.Fatal("expected a debug log for the deliberate-close read-loop exit; none seen")
 	}
 	if handler.seen(slog.LevelWarn, "transport error") {
 		t.Error("deliberate Close must not log a transport error")
+	}
+
+	// The read loop only reaches this branch with a non-nil error, so an absent
+	// or empty attribute means the error was discarded, never that there was
+	// none.
+	v, ok := handler.attrOf(slog.LevelDebug, "stopped on close", "error")
+	if !ok {
+		t.Fatal(`the "stopped on close" record carries no "error" attribute; the underlying read error is discarded and reaches nothing else`)
+	}
+	if s := v.String(); s == "" || s == "<nil>" {
+		t.Errorf(`"error" attribute = %q, want the underlying read error`, s)
 	}
 }
 

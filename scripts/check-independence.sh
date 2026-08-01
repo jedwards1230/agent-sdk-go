@@ -106,7 +106,19 @@ else
 	# -test includes test-only dependencies, a strict superset of the plain
 	# form. An SDK test file importing the application is exactly as much of a
 	# violation as a non-test file doing it.
+	#
+	# go list's own status is captured rather than left to `set -e`: a build
+	# break makes it exit non-zero, and inheriting that status would exit 1 —
+	# the code this script reserves for a genuine independence VIOLATION, which
+	# is what the CI harness would then report. A tree that does not build means
+	# the check did not run, which is exit 2.
+	set +e
 	deps="$(cd "${REPO_ROOT}" && go list -deps -test ./...)"
+	list_rc=$?
+	set -e
+	if [ "${list_rc}" -ne 0 ]; then
+		die "go list -deps -test ./... exited ${list_rc}; the check did not run (does the tree build?)"
+	fi
 	source_desc="go list -deps -test ./..."
 fi
 
