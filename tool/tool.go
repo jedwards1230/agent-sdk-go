@@ -98,14 +98,40 @@ type FileChange struct {
 // Schema is a JSON Schema description of a tool's input. It marshals to a
 // JSON Schema object the model consumes directly; Type is "object" for tool
 // inputs.
+//
+// The composition fields (OneOf/AnyOf/AllOf/PatternProperties) exist for
+// schemas that come from outside this SDK — an MCP server's inputSchema
+// projected by the mcp package — and stay zero for every builtin. They are
+// all omitempty, so a Schema that does not use them marshals byte-identically
+// to one written before they existed.
 type Schema struct {
 	Type       string              `json:"type"`
 	Properties map[string]Property `json:"properties,omitempty"`
 	Required   []string            `json:"required,omitempty"`
+
+	// OneOf, AnyOf, and AllOf are the JSON Schema composition keywords: the
+	// input must validate against exactly one, at least one, or all of the
+	// listed subschemas respectively.
+	OneOf []Property `json:"oneOf,omitempty"`
+	AnyOf []Property `json:"anyOf,omitempty"`
+	AllOf []Property `json:"allOf,omitempty"`
+	// PatternProperties constrains properties whose name matches a regular
+	// expression, keyed by that expression.
+	PatternProperties map[string]Property `json:"patternProperties,omitempty"`
 }
 
-// Property is one field of a [Schema]. It covers the shapes the builtins
-// need; nested objects use Properties, arrays use Items.
+// Property is one node of a JSON Schema tree: a [Schema]'s field, an array's
+// item schema, or a composition branch. Nested objects use Properties (and
+// their own Required), arrays use Items.
+//
+// Property — not Schema — is the recursive node type, deliberately. Every
+// Property field is omitempty, so a composition branch that only constrains
+// which keys must be present ({"required":["target"]}) marshals exactly that
+// way. Schema.Type has no omitempty (it is always "object" for a tool input,
+// and dropping it would change the wire bytes of every existing tool), so a
+// []Schema branch list would emit an invalid `"type":""` for any typeless
+// branch. Since Property carries Required it is a strict superset of Schema's
+// expressiveness, which makes it the correct branch element.
 type Property struct {
 	Type        string              `json:"type,omitempty"`
 	Description string              `json:"description,omitempty"`
@@ -113,6 +139,16 @@ type Property struct {
 	Items       *Property           `json:"items,omitempty"`
 	Properties  map[string]Property `json:"properties,omitempty"`
 	Default     any                 `json:"default,omitempty"`
+
+	// Required lists the keys a nested object node must carry. The top-level
+	// required list lives on [Schema.Required].
+	Required []string `json:"required,omitempty"`
+	// OneOf, AnyOf, AllOf, and PatternProperties mirror [Schema]'s fields for
+	// a nested node.
+	OneOf             []Property          `json:"oneOf,omitempty"`
+	AnyOf             []Property          `json:"anyOf,omitempty"`
+	AllOf             []Property          `json:"allOf,omitempty"`
+	PatternProperties map[string]Property `json:"patternProperties,omitempty"`
 }
 
 // ObjectSchema builds a [Schema] of Type "object" from required field names

@@ -32,6 +32,34 @@
 // never a network optimization this package could chase by fetching schemas
 // lazily against the wire.
 //
+// # Schema projection degrades visibly, never silently
+//
+// A server's inputSchema is projected onto [tool.Schema], which represents
+// type/description/properties/required (top level and nested), enum, items,
+// default, oneOf/anyOf/allOf, and patternProperties. Anything else — and
+// "anything else" is deny-by-default, so a keyword JSON Schema gains later
+// counts — is dropped, because a schema more permissive than the server's is
+// a tool call the model will confidently get wrong. Only genuinely inert keys
+// stay silent: the annotations ($schema, $id, $comment, title, examples,
+// deprecated, readOnly, writeOnly) and the definition blocks ($defs,
+// definitions, $vocabulary), which constrain nothing on their own — the $ref
+// into a definition block is reported at its own path.
+//
+// Representing a composition keyword is conditional, not unconditional: a
+// branch whose every keyword was unrepresentable would marshal as {}, the
+// schema matching everything, so a oneOf/anyOf carrying one is dropped whole
+// rather than emitted vacuously. allOf keeps its representable members.
+//
+// Every drop is reported twice, split by who pays for it. The model gets a
+// "Schema note:" paragraph appended to the projected tool's Description with
+// deduplicated keyword counts under a hard cap and no paths — a description
+// rides every request, and paths are unbounded and server-controlled. An
+// operator gets one Warn on the Client's logger (see [WithLogger]) with the
+// exhaustive per-occurrence list, full paths, and the decode error when the
+// schema could not be read at all. A schema that projects cleanly and uses no
+// composition keeps the server's own Description byte for byte and logs
+// nothing. See [projectSchema].
+//
 // # Tool naming and sanitization
 //
 // A projected tool is named "mcp__<server>__<tool>", matching
