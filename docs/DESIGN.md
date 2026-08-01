@@ -860,6 +860,32 @@ parented on the current HEAD and publishes a must-deliver `session.compacted`.
 It is additive, like `Fork` — nothing is deleted, and the compacted entries
 still count toward `Runner.Cost`.
 
+**Compaction progress is bracketed, and the bracket is total.** A summarization
+is a full model call that streams nothing and can run a minute or more, so
+`Compact` also publishes a must-deliver `session.compaction_started`
+(`{replaces_through, messages}`) — the signal a client that did NOT call
+`Compact` needs to know one is in flight (agent-sdk-go#140). It goes out
+IMMEDIATELY BEFORE the `Summarizer` call and not one line earlier, which makes
+the outcome structural rather than documented:
+
+- Every exit ABOVE that line — a cancelled context, `ErrNothingToCompact` —
+  happens before any long-running work and before the boundary is fixed, so it
+  publishes NOTHING. There is no start with no terminal.
+- Every exit BELOW it publishes exactly ONE terminal carrying the same
+  `replaces_through` boundary as the start: `session.compacted` on success,
+  `session.compaction_failed{error}` when the summarizer errors (a cancelled
+  context surfaces this way) or the compaction entry fails to append.
+
+Two kinds rather than one `session.compaction{phase}`: `session.compacted` is
+already stable, so a phase field would either duplicate or break it. Both new
+kinds are must-deliver like every other `session.*` lifecycle event — a lossy
+start would defeat the mid-compaction-attach consumer, and the guaranteed
+terminal, not a weaker tier, is what keeps a latched indicator from sticking.
+The start carries no `Model` (only the runner's current model is known then,
+and a custom `Summarizer` may ignore it) and no token count (token counts come
+back from a provider response; a message count is what can be reported
+truthfully before the call).
+
 **The SDK ships no compaction policy.** There is no size threshold and no
 automatic trigger wired into `Prompt` or the loop. An embedder decides WHEN —
 reading `Runner.LastUsage` or a live `turn.finished` event to judge pressure,

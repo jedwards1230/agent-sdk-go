@@ -143,6 +143,126 @@ func TestSessionCompactedMarshal(t *testing.T) {
 	})
 }
 
+// TestSessionCompactionStartedMarshal asserts the session.compaction_started
+// event reports the right kind, is must-deliver both from the value and from
+// TierOf (the guarantee is the contract, not TierOf's default branch), and puts
+// the correlation boundary and message count on the wire — with each omitted at
+// its zero value, so the event stays wire-minimal.
+func TestSessionCompactionStartedMarshal(t *testing.T) {
+	ev := event.NewSessionCompactionStarted(sid, "entry-9", 4)
+
+	if ev.Kind() != event.KindSessionCompactionStarted {
+		t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionCompactionStarted)
+	}
+	if got, want := event.KindSessionCompactionStarted, "session.compaction_started"; got != want {
+		t.Errorf("KindSessionCompactionStarted = %q, want %q", got, want)
+	}
+	if ev.Tier() != event.TierMustDeliver {
+		t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+	}
+	if got := event.TierOf(event.KindSessionCompactionStarted); got != event.TierMustDeliver {
+		t.Errorf("TierOf(%q) = %v, want must-deliver", event.KindSessionCompactionStarted, got)
+	}
+
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]any{
+		"type":             event.KindSessionCompactionStarted,
+		"session_id":       sid,
+		"replaces_through": "entry-9",
+		"messages":         float64(4),
+	}
+	for k, v := range want {
+		if got := m[k]; got != v {
+			t.Errorf("%s = %v, want %v: %s", k, got, v, raw)
+		}
+	}
+	// No model is reported at start: only the runner's current model is known
+	// then, and a custom Summarizer may ignore it entirely.
+	if _, ok := m["model"]; ok {
+		t.Errorf("model present on a start event; it cannot be known truthfully yet: %s", raw)
+	}
+
+	t.Run("zero values omitted", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewSessionCompactionStarted(sid, "", 0))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for _, k := range []string{"replaces_through", "messages"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("%s present for empty/zero value: %s", k, raw)
+			}
+		}
+	})
+}
+
+// TestSessionCompactionFailedMarshal asserts the session.compaction_failed
+// event reports the right kind, is must-deliver both from the value and from
+// TierOf, repeats the started event's correlation fields, and always carries
+// "error" on the wire — reusing session.error's key, and present even when the
+// message is empty, so an absent key is never ambiguous with a decode bug.
+func TestSessionCompactionFailedMarshal(t *testing.T) {
+	ev := event.NewSessionCompactionFailed(sid, "entry-9", 4, "summarizer unavailable")
+
+	if ev.Kind() != event.KindSessionCompactionFailed {
+		t.Errorf("Kind() = %q, want %q", ev.Kind(), event.KindSessionCompactionFailed)
+	}
+	if got, want := event.KindSessionCompactionFailed, "session.compaction_failed"; got != want {
+		t.Errorf("KindSessionCompactionFailed = %q, want %q", got, want)
+	}
+	if ev.Tier() != event.TierMustDeliver {
+		t.Errorf("Tier() = %v, want must-deliver", ev.Tier())
+	}
+	if got := event.TierOf(event.KindSessionCompactionFailed); got != event.TierMustDeliver {
+		t.Errorf("TierOf(%q) = %v, want must-deliver", event.KindSessionCompactionFailed, got)
+	}
+
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	want := map[string]any{
+		"type":             event.KindSessionCompactionFailed,
+		"session_id":       sid,
+		"replaces_through": "entry-9",
+		"messages":         float64(4),
+		"error":            "summarizer unavailable",
+	}
+	for k, v := range want {
+		if got := m[k]; got != v {
+			t.Errorf("%s = %v, want %v: %s", k, got, v, raw)
+		}
+	}
+
+	t.Run("error present even when empty", func(t *testing.T) {
+		raw, err := json.Marshal(event.NewSessionCompactionFailed(sid, "", 0, ""))
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if got, ok := m["error"]; !ok || got != "" {
+			t.Errorf("error = %v (present=%t), want an empty string always present: %s", got, ok, raw)
+		}
+	})
+}
+
 // TestSessionInfoUpdatedMarshal asserts the additive session.info event carries
 // its title on the wire, is must-deliver, and reports the right kind.
 func TestSessionInfoUpdatedMarshal(t *testing.T) {

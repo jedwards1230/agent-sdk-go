@@ -57,6 +57,10 @@ func Unmarshal(data []byte) (Event, error) {
 		return SessionResumed{m}, nil
 	case KindSessionForked:
 		return SessionForked{meta: m, At: w.At, Label: w.Label}, nil
+	case KindSessionCompactionStarted:
+		return SessionCompactionStarted{meta: m, ReplacesThrough: w.ReplacesThrough, Messages: w.Messages}, nil
+	case KindSessionCompactionFailed:
+		return SessionCompactionFailed{meta: m, ReplacesThrough: w.ReplacesThrough, Messages: w.Messages, Error: w.Err}, nil
 	case KindSessionCompacted:
 		return SessionCompacted{
 			meta:              m,
@@ -149,11 +153,18 @@ type wireEvent struct {
 	At    string `json:"at"`
 	Label string `json:"label"`
 
-	// session.compacted (Usage below is shared with turn.finished)
+	// session.compacted (Usage below is shared with turn.finished).
+	// ReplacesThrough is shared with session.compaction_started /
+	// session.compaction_failed, which carry the same boundary.
 	ReplacesThrough   string `json:"replaces_through"`
 	MessagesCompacted int    `json:"messages_compacted"`
 	Model             string `json:"model"`
 	Summary           string `json:"summary"`
+
+	// session.compaction_started / session.compaction_failed (their "error" is
+	// the Err field in the session.error group below — one field decodes both
+	// kinds' identically-named key)
+	Messages int `json:"messages"`
 
 	// session.error
 	Err   string `json:"error"`
