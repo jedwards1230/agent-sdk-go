@@ -88,6 +88,34 @@ reviewer reading added lines cannot see a sentence three files away that just
 became wrong. So when you change behavior, grep for prose that describes it —
 the sentence you have to fix is usually not in the file you edited.
 
+## A skipped check is not a passed check
+
+`gh pr checks` prints `skipping` in the same column as `pass`, and a PR whose
+review never ran reads exactly as green as one that passed. **Before merging,
+confirm `review / review` is at a terminal `pass` — not merely non-failing.**
+
+The review workflow skips drafts. Two different situations produce that, and
+they call for opposite responses:
+
+- **The PR is draft because nobody undrafted it.** No review has run and none
+  will. This is the trap: it accumulates commits looking green. Undraft it.
+- **The PR is draft because `claude[bot]` converted it.** That is
+  `draft_on_blocking` — the review *did* run, found blocking findings, and
+  drafted the PR as the signal. Check the timeline before assuming an
+  oversight:
+
+  ```bash
+  gh api repos/<owner>/<repo>/issues/<pr>/timeline \
+    --jq '.[] | select(.event=="convert_to_draft") | "\(.created_at) by \(.actor.login)"'
+  ```
+
+  Fix the findings, resolve the threads, then undraft to re-trigger.
+
+Note also that `ready_for_review` can race a push: if you undraft and push
+together, the only run may be the `synchronize` one that fired while still
+draft, which skips. Push first, let it settle, then undraft — and if a run is
+still missing, close/reopen (`reopened` is in the trigger types).
+
 ## Known false positives
 
 Findings the automated review has raised that were refuted with evidence.
