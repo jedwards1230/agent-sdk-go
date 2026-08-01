@@ -1,0 +1,4 @@
+# A baseline that parses to zero usable rows. Nothing can be gated against it,
+# so it must fail closed rather than print a cheerful OK having compared
+# nothing.
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op

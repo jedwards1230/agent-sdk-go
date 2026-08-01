@@ -47,6 +47,100 @@ jobs:
         with:
           version: v2.11
 
+  bench:
+    # Deliberately UNCONDITIONAL. Both halves of this job guard invariants that
+    # break silently — an allocation regression looks like a passing test, and
+    # an application import looks like a passing build — so gating them behind
+    # a branch predicate would mean the PR that introduces the breakage is
+    # exactly the PR that skips the check. The `race` job's comment above is
+    # the record of what a naming-based allowlist costs; this job declines to
+    # repeat it.
+    #
+    # It is cheap: the benchmarks run at a fixed 100 iterations, five times,
+    # over one package. Seconds, not minutes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # shellcheck ships on the ubuntu runner image. The scripts below are the
+      # gate, so they get linted before they are trusted to enforce anything.
+      - run: shellcheck scripts/*.sh
+      - run: ./scripts/check-independence.sh
+      - run: ./scripts/bench.sh --check
+      # The gate's own logic, replayed against committed synthetic inputs.
+      # Without this, a broken comparison reports a cheerful OK forever — and
+      # every one of these cases was a real hole found in review, not a
+      # hypothetical.
+      #
+      # Exit codes are asserted EXACTLY. A `!` negation would accept 2
+      # ("bench.sh could not run") as if it were 1 ("bench.sh found a
+      # regression"), passing a gate that is merely broken as a gate that works.
+      - name: the gate must fail on regressed, blinded, and unusable inputs
+        run: |
+          set -uo pipefail
+          # <expected exit>|<args>
+          cases=(
+            # 1 = a violation was detected and reported
+            "1|--input scripts/testdata/regression-bytes-only.txt"
+            "1|--input scripts/testdata/missing-benchmark.txt"
+            "1|--input scripts/testdata/improvement-collapse.txt"
+            "1|--baseline scripts/testdata/baselines/zero-metrics.txt --input scripts/testdata/regression-bytes-only.txt"
+            # 2 = the baseline is unusable; refuse rather than pass vacuously
+            "2|--baseline scripts/testdata/baselines/malformed.txt --input scripts/testdata/regression-bytes-only.txt"
+            # The one that actually got through before validation existed:
+            # "500x" coerces to 500 with no crash, so a -99.6% collapse was
+            # reported as "improved" and the gate exited 0.
+            "2|--baseline scripts/testdata/baselines/numeric-looking.txt --input scripts/testdata/regression-bytes-only.txt"
+            "2|--baseline scripts/testdata/baselines/no-rows.txt --input scripts/testdata/regression-bytes-only.txt"
+            "2|--baseline scripts/testdata/baselines/unmatched-rows.txt --input scripts/testdata/regression-bytes-only.txt"
+          )
+          fails=0
+          for entry in "${cases[@]}"; do
+            want="${entry%%|*}"
+            args="${entry#*|}"
+            status=0
+            # shellcheck disable=SC2086 # args is a deliberately word-split flag list
+            ./scripts/bench.sh --check $args >/dev/null 2>&1 || status=$?
+            if [ "$status" -ne "$want" ]; then
+              echo "::error::bench.sh --check $args: expected exit $want, got $status"
+              fails=$((fails + 1))
+            else
+              echo "ok (exit $status): bench.sh --check $args"
+            fi
+          done
+          [ "$fails" -eq 0 ]
+      # check-independence.sh must be precise in BOTH directions: it has to fire
+      # on the consuming application's module path and stay quiet on an
+      # unrelated module that merely contains the string "gofer". A gate that
+      # cries wolf on someone else's dependency gets switched off.
+      - name: the independence check must be precise in both directions
+        run: |
+          set -uo pipefail
+          sdk=github.com/jedwards1230/agent-sdk-go/loop
+          fails=0
+          assert() { # <expected exit> <dep line>
+            local want="$1" dep="$2" status=0
+            printf '%s\n%s\n' "$sdk" "$dep" | ./scripts/check-independence.sh --stdin >/dev/null 2>&1 || status=$?
+            if [ "$status" -ne "$want" ]; then
+              echo "::error::check-independence.sh on '$dep': expected exit $want, got $status"
+              fails=$((fails + 1))
+            else
+              echo "ok (exit $status): $dep"
+            fi
+          }
+          assert 1 github.com/jedwards1230/gofer
+          assert 1 github.com/jedwards1230/gofer/internal/daemon
+          assert 1 github.com/jedwards1230/gofer.test
+          assert 0 github.com/unrelated/gofergo
+          assert 0 github.com/someone/gofer-utils
+          # An empty or implausible list must refuse, not pass vacuously.
+          status=0
+          printf '' | ./scripts/check-independence.sh --stdin >/dev/null 2>&1 || status=$?
+          [ "$status" -eq 2 ] || { echo "::error::empty stdin: expected exit 2, got $status"; fails=$((fails + 1)); }
+          [ "$fails" -eq 0 ]
+
   race:
     # Both integration-branch prefixes in use. `milestone/*` came first (M5,
     # M7); `integration/contract-hardening` is the same topology under a

@@ -860,6 +860,48 @@ parented on the current HEAD and publishes a must-deliver `session.compacted`.
 It is additive, like `Fork` — nothing is deleted, and the compacted entries
 still count toward `Runner.Cost`.
 
+**Compaction progress is bracketed, and the bracket is total.** A summarization
+is a full model call that streams nothing and can run a minute or more, so
+`Compact` also publishes a must-deliver `session.compaction_started`
+(`{replaces_through, messages}`) — the signal a client that did NOT call
+`Compact` needs to know one is in flight (jedwards1230/agent-sdk-go#140). It goes out
+IMMEDIATELY BEFORE the `Summarizer` call and not one line earlier, which makes
+the outcome structural rather than documented:
+
+- Every exit ABOVE that line — a cancelled context, `ErrNothingToCompact` —
+  happens before any long-running work and before the boundary is fixed, so it
+  publishes NOTHING. There is no start with no terminal.
+- Every exit BELOW it publishes exactly ONE terminal carrying the same
+  `replaces_through` boundary as the start: `session.compacted` on success,
+  `session.compaction_failed{error}` when the summarizer errors (a cancelled
+  context surfaces this way), the compaction entry fails to append, or the
+  summarizer leaves without returning at all — by **panic** (published, then
+  re-raised unchanged; never swallowed) or by **`runtime.Goexit`**. The
+  panic/Goexit terminal is keyed off an explicit `terminal` flag set before
+  each of the three ordinary publishes, NOT off `recover() != nil`: `recover`
+  returns nil during a Goexit unwind, so the `recover`-keyed form published
+  nothing for a summarizer that Goexits (`t.Fatal` in an embedder's test
+  summarizer is the plausible one) while leaving the subscription open — a
+  stuck latch with no signal at all.
+
+The pair is total over what `Compact` PUBLISHES, not over what a subscriber
+RECEIVES. Two things sever a subscriber mid-compaction — a force-unsubscribe
+after a wedged must-deliver publish, and `Broker.Close` (which `Runner.Close`
+calls, e.g. Ctrl-C mid-compaction), where `Publish` is a silent no-op — and in
+both the signal is the **closed channel**. `Subscription.Forced` is true only
+for the first, so it names the cause and never the cut-off; a latching client
+clears on channel close.
+
+Two kinds rather than one `session.compaction{phase}`: `session.compacted` is
+already stable, so a phase field would either duplicate or break it. Both new
+kinds are must-deliver like every other `session.*` lifecycle event — a lossy
+start would defeat the mid-compaction-attach consumer, and the guaranteed
+terminal, not a weaker tier, is what keeps a latched indicator from sticking.
+The start carries no `Model` (only the runner's current model is known then,
+and a custom `Summarizer` may ignore it) and no token count (token counts come
+back from a provider response; a message count is what can be reported
+truthfully before the call).
+
 **The SDK ships no compaction policy.** There is no size threshold and no
 automatic trigger wired into `Prompt` or the loop. An embedder decides WHEN —
 reading `Runner.LastUsage` or a live `turn.finished` event to judge pressure,

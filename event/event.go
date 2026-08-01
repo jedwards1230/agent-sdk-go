@@ -169,6 +169,117 @@ func (e SessionForked) withMeta(seq uint64, ts time.Time) Event {
 	return e
 }
 
+// SessionCompactionStarted is emitted when a session's compaction BEGINS —
+// immediately before runner.Runner.Compact hands the folded context to its
+// Summarizer. A compaction is a full summarizer model call that streams
+// nothing and can run a minute or more; without this event a client watching a
+// compaction it did not itself trigger has no contract-level signal that one is
+// in flight.
+//
+// Its relationship to a terminal event is TOTAL: every Compact that publishes
+// this event goes on to publish exactly one of SessionCompacted (success) or
+// SessionCompactionFailed (the summarizer failed, the compaction entry failed
+// to append, or the summarizer left by panic or runtime.Goexit — a panic is
+// re-raised afterwards, never swallowed). A client may therefore latch a
+// "compacting" indicator on this event and clear it on either terminal.
+// Compact's early exits — a cancelled context, an empty folded context
+// (runner.ErrNothingToCompact) — happen before any long-running work and
+// publish NOTHING, so there is no start with no terminal.
+//
+// The totality is over the events Compact PUBLISHES, not over the events a
+// given subscriber RECEIVES. Two things can cut a subscriber off between the
+// start and the terminal, and in both the signal is the same one: the
+// subscription's channel CLOSES.
+//
+//  1. The broker force-unsubscribed it. A must-deliver publish blocks up to the
+//     broker's bound on a full subscriber buffer and then drops that
+//     subscription (see [Broker.Publish]). This is the case [Subscription.Forced]
+//     reports. The exposure is real rather than theoretical: an embedder that
+//     calls runner.Runner.Compact from inside the same loop that drains its
+//     subscription is, by construction, not draining while Compact runs.
+//  2. The broker was closed before the terminal went out — [Broker.Close], which
+//     runner.Runner.Close calls. Publish on a closed broker is a silent no-op,
+//     so the terminal is never published at all; every subscription is closed
+//     instead. "The user hits Ctrl-C mid-compaction" is the ordinary way to get
+//     here, and nothing forbids Close during a Compact. [Subscription.Forced]
+//     is FALSE on this path — it distinguishes cause (1) from (2), it does not
+//     detect the cut-off.
+//
+// So a client that latches on this event must clear the latch when its
+// subscription's channel closes, whatever Forced reports; a client that only
+// ever type-switches on received events will otherwise latch forever.
+//
+// ReplacesThrough is the journal HEAD the compaction will replace through: the
+// same boundary the terminal event reports, and so the unambiguous correlator
+// between a start and whichever of the two terminals follows it.
+//
+// Messages is how many provider messages the pre-compaction folded context
+// holds (len(runner.Runner.Fold()) at the moment Compact was called) — the same
+// figure SessionCompacted.MessagesCompacted reports. It is a MESSAGE count, not
+// a token count, deliberately: token counts come back from a provider response,
+// so there is no pre-call token figure without adding a tokenizer dependency to
+// the SDK. A message count is what can be reported truthfully before the call.
+//
+// There is deliberately no Model field. SessionCompacted.Model reports the
+// model that actually ran; at start time only the runner's current model is
+// known, and a custom runner.Summarizer is explicitly free to ignore it, use a
+// different model, or call no model at all (see runner.SummarizeResult.Model) —
+// reporting it here would be reporting a value that can be wrong.
+type SessionCompactionStarted struct {
+	meta
+	// ReplacesThrough is the id of the last entry the compaction will cover —
+	// the journal HEAD when Compact was called.
+	ReplacesThrough string
+	// Messages is the number of provider messages in the context being
+	// compacted away.
+	//
+	// The wire key is `messages`, NOT [SessionCompacted]'s
+	// `messages_compacted`, and that asymmetry is deliberate rather than an
+	// oversight: this is a PRE-compaction count. At this point nothing has
+	// been compacted — the summarizer has not run — so naming it
+	// `messages_compacted` would report a compacted count for a compaction
+	// that has not happened. Correlate a start with its terminal on
+	// ReplacesThrough, which IS identical across all three compaction kinds;
+	// nothing correlates on this field.
+	Messages int
+}
+
+// NewSessionCompactionStarted builds a session.compaction_started event for a
+// compaction that will replace the session's context through replacesThrough,
+// summarizing messages provider messages. See [SessionCompactionStarted].
+func NewSessionCompactionStarted(session, replacesThrough string, messages int) SessionCompactionStarted {
+	return SessionCompactionStarted{
+		meta:            meta{session: session},
+		ReplacesThrough: replacesThrough,
+		Messages:        messages,
+	}
+}
+
+// Kind returns KindSessionCompactionStarted.
+func (SessionCompactionStarted) Kind() string { return KindSessionCompactionStarted }
+
+// Tier returns TierMustDeliver: like every session.* lifecycle event, a
+// compaction start is never dropped. A lossy start would defeat the
+// mid-compaction-attach consumer it exists for, and the guaranteed terminal
+// event — not a weaker delivery tier — is what keeps a latched indicator from
+// sticking.
+func (SessionCompactionStarted) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {replaces_through?, messages?}. Both
+// are omitempty, matching session.compacted's treatment of the same figures.
+func (e SessionCompactionStarted) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		ReplacesThrough string `json:"replaces_through,omitempty"`
+		Messages        int    `json:"messages,omitempty"`
+	}{baseEnvelope(e), e.ReplacesThrough, e.Messages})
+}
+
+func (e SessionCompactionStarted) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
 // SessionCompacted is emitted when a session's history is compacted — the
 // event behind runner.Runner.Compact. It carries what a renderer needs to
 // show what happened without re-reading the journal: WHERE the boundary
@@ -238,6 +349,104 @@ func (e SessionCompacted) MarshalJSON() ([]byte, error) {
 }
 
 func (e SessionCompacted) withMeta(seq uint64, ts time.Time) Event {
+	e.seq, e.ts = seq, ts
+	return e
+}
+
+// SessionCompactionFailed is emitted when a compaction that published a
+// [SessionCompactionStarted] does NOT complete: the summarizer returned an
+// error (including a cancelled context, which surfaces as one), the compaction
+// entry failed to append to the journal, or the summarizer left without
+// returning at all — by panic (re-raised after this event goes out) or by
+// runtime.Goexit. It is the second of the two terminals that make the start's
+// outcome total — see [SessionCompactionStarted] — so a client can clear a
+// latched "compacting" indicator on every path instead of leaving it stuck.
+//
+// Nothing the runner acknowledges as journaled happened: the compaction entry
+// is absent from the in-process journal, so this session's folded context is
+// exactly what it was before Compact was called, on every path. That claim is
+// deliberately narrower than "the journal file is byte-identical". session's
+// journal writes an entry's line to the file BEFORE it calls Sync, so a Sync
+// failure surfaces here with the bytes already in the file while the
+// in-process fold never saw them — the live session stays uncompacted, but a
+// later resume of that journal folds the compaction in.
+//
+// ReplacesThrough and Messages repeat the started event's values verbatim, so a
+// consumer correlates the pair on the boundary without tracking call identity.
+//
+// Err is the failure's message — the string form of the same error
+// runner.Runner.Compact returns (or, for the two exits that return nothing, a
+// message naming the panic or the Goexit). It is carried because the embedder
+// that CALLED Compact already has that error as a return value but a SECOND
+// attached client does not, and that client is exactly who this pair of events
+// exists for.
+//
+// Err is an UNREDACTED internal error string, on the same terms as
+// SessionError.Err — whose "error" wire key it also shares. It can carry an
+// absolute host path (the append path wraps an *os.PathError naming the journal
+// file) or a provider SDK error verbatim (status, request URL, sometimes a
+// response body). That text was previously in-process to Compact's caller and
+// is now on the event bus, so a relay that forwards this stream to a
+// less-trusted client owns the redaction — the SDK reports what failed and
+// never decides who may read it.
+type SessionCompactionFailed struct {
+	meta
+	// ReplacesThrough is the id of the last entry the abandoned compaction
+	// would have covered — the same value the started event carried.
+	ReplacesThrough string
+	// Messages is the number of provider messages the abandoned compaction
+	// would have replaced.
+	//
+	// The wire key is `messages`, NOT [SessionCompacted]'s
+	// `messages_compacted`, and that asymmetry is deliberate rather than an
+	// oversight: this event means the compaction did NOT happen, so nothing
+	// was compacted and a `messages_compacted` count here would be false.
+	// Correlate this terminal with its start on ReplacesThrough, which IS
+	// identical across all three compaction kinds; nothing correlates on
+	// this field.
+	Messages int
+	// Err is the failure message. Usually the string form of the error
+	// Compact returned — but the panic and [runtime.Goexit] paths return no
+	// error at all, so for those it is a message this package synthesizes to
+	// name the cause. Treat it as human-readable text, not as something to
+	// parse or compare against a sentinel.
+	Err string
+}
+
+// NewSessionCompactionFailed builds a session.compaction_failed event for a
+// compaction that began at replacesThrough over messages provider messages and
+// failed with err. See [SessionCompactionFailed].
+func NewSessionCompactionFailed(session, replacesThrough string, messages int, err string) SessionCompactionFailed {
+	return SessionCompactionFailed{
+		meta:            meta{session: session},
+		ReplacesThrough: replacesThrough,
+		Messages:        messages,
+		Err:             err,
+	}
+}
+
+// Kind returns KindSessionCompactionFailed.
+func (SessionCompactionFailed) Kind() string { return KindSessionCompactionFailed }
+
+// Tier returns TierMustDeliver: it is the terminal that clears a latched
+// compaction indicator, so dropping it is exactly the failure it exists to
+// prevent.
+func (SessionCompactionFailed) Tier() Tier { return TierMustDeliver }
+
+// MarshalJSON encodes the envelope plus {replaces_through?, messages?, error}.
+// error reuses session.error's wire key and, like it, is always present: a
+// failure with no message is still a failure, and an absent key would be
+// indistinguishable from a consumer's own decode bug.
+func (e SessionCompactionFailed) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		envelope
+		ReplacesThrough string `json:"replaces_through,omitempty"`
+		Messages        int    `json:"messages,omitempty"`
+		Err             string `json:"error"`
+	}{baseEnvelope(e), e.ReplacesThrough, e.Messages, e.Err})
+}
+
+func (e SessionCompactionFailed) withMeta(seq uint64, ts time.Time) Event {
 	e.seq, e.ts = seq, ts
 	return e
 }

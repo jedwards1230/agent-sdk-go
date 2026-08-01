@@ -17,16 +17,23 @@ package event
 // Event kind identifiers. Each is the value returned by an event's Kind method
 // and the "type" field of its JSON envelope.
 const (
-	KindSessionCreated   = "session.created"
-	KindSessionResumed   = "session.resumed"
-	KindSessionForked    = "session.forked"
-	KindSessionCompacted = "session.compacted"
-	KindSessionKilled    = "session.killed"
-	KindSessionArchived  = "session.archived"
-	KindSessionSpawned   = "session.spawned"
-	KindSessionInfo      = "session.info"
-	KindSessionConfig    = "session.config"
-	KindPlan             = "plan"
+	KindSessionCreated = "session.created"
+	KindSessionResumed = "session.resumed"
+	KindSessionForked  = "session.forked"
+	// KindSessionCompactionStarted and KindSessionCompactionFailed bracket
+	// KindSessionCompacted: a compaction publishes the started event, then
+	// exactly one terminal — compacted on success, compaction_failed otherwise.
+	// The names are deliberately not "session.compacting", which is one letter
+	// from "session.compacted" and a genuine misread hazard in logs and switches.
+	KindSessionCompactionStarted = "session.compaction_started"
+	KindSessionCompacted         = "session.compacted"
+	KindSessionCompactionFailed  = "session.compaction_failed"
+	KindSessionKilled            = "session.killed"
+	KindSessionArchived          = "session.archived"
+	KindSessionSpawned           = "session.spawned"
+	KindSessionInfo              = "session.info"
+	KindSessionConfig            = "session.config"
+	KindPlan                     = "plan"
 
 	KindTurnStarted  = "turn.started"
 	KindTurnFinished = "turn.finished"
