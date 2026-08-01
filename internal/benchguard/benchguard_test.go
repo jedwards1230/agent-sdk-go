@@ -215,6 +215,24 @@ func TestDigestFold(t *testing.T) {
 	if Digest("read") == Digest("reads") {
 		t.Error("Digest collides on a one-character difference")
 	}
+
+	// Position sensitivity. Everything above still holds if fold() degrades to
+	// a plain XOR of the bytes — order-independence, duplicate accumulation,
+	// and read/reads (different lengths) all survive that. Only an anagram
+	// distinguishes a real hash from an XOR, because XOR is commutative over
+	// the bytes WITHIN a token as well as across tokens.
+	//
+	// This is not academic for this suite: under an XOR fold,
+	// Digest("mcp__github__tool_0001") == Digest("mcp__github__tool_0010"),
+	// and that is the exact name shape benchNames generates. A digest that
+	// cannot tell two indexed tools apart cannot witness which tools the
+	// target walked, which is the only thing it is there to do.
+	if Digest("ab") == Digest("ba") {
+		t.Error("Digest is position insensitive within a token; an anagram must not collide")
+	}
+	if Digest("mcp__github__tool_0001") == Digest("mcp__github__tool_0010") {
+		t.Error("Digest collides on two names benchNames actually generates")
+	}
 }
 
 // TestCounterHitWith proves the Counter side agrees with the standalone Digest

@@ -1,0 +1,16 @@
+# A baseline whose metrics LOOK numeric but carry a trailing suffix ("500x").
+#
+#   scripts/bench.sh --check --baseline scripts/testdata/baselines/numeric-looking.txt \
+#       --input scripts/testdata/regression-bytes-only.txt
+#
+# This is the nastiest of the malformed shapes and the one that actually got
+# through: awk coerces "500x" to 500 without complaint, so the row silently
+# became a plausible-looking baseline nobody wrote, and the resulting -99.8%
+# collapse was reported as "improved". Exit 0, green gate, nothing measured.
+#
+# Unlike a bare "abc" this never trips a division by zero, so there is no crash
+# to notice — it just quietly gates against the wrong numbers. Must be a hard
+# parse failure (exit 2).
+#
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	500x	9000x

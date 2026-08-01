@@ -62,6 +62,15 @@ import (
 // benchSizes spans a hand-wired local tool set through a heavily federated one
 // (several MCP servers' worth). Read the alloc/byte claims off the larger rows:
 // at n=8 size-class rounding dominates.
+//
+// DO NOT DELETE n=8 as redundant. It is the only row that catches PARTIAL
+// drift. Dropping just the `.Specs()` tail from the Wrap benchmark leaves Wrap
+// itself intact, so the guard counts a full n-per-iteration and passes — and
+// the numeric gate only fires on n=8 (measured −1.17% B/op against the ±1%
+// band, a 0.17pp margin). n=64 (−0.11%) and n=512 (−0.003%) do not fire,
+// because the dropped projection is a fixed cost that a larger index dilutes
+// into the noise floor. The smallest row is the sensitive one precisely
+// because it has the least to hide behind.
 var benchSizes = []int{8, 64, 512}
 
 // benchmark sinks, package level so the compiler cannot elide the calls under

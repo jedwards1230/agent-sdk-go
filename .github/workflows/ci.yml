@@ -89,6 +89,10 @@ jobs:
             "1|--baseline scripts/testdata/baselines/zero-metrics.txt --input scripts/testdata/regression-bytes-only.txt"
             # 2 = the baseline is unusable; refuse rather than pass vacuously
             "2|--baseline scripts/testdata/baselines/malformed.txt --input scripts/testdata/regression-bytes-only.txt"
+            # The one that actually got through before validation existed:
+            # "500x" coerces to 500 with no crash, so a -99.6% collapse was
+            # reported as "improved" and the gate exited 0.
+            "2|--baseline scripts/testdata/baselines/numeric-looking.txt --input scripts/testdata/regression-bytes-only.txt"
             "2|--baseline scripts/testdata/baselines/no-rows.txt --input scripts/testdata/regression-bytes-only.txt"
             "2|--baseline scripts/testdata/baselines/unmatched-rows.txt --input scripts/testdata/regression-bytes-only.txt"
           )

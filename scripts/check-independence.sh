@@ -32,7 +32,7 @@
 # The trade: renaming the consuming application means updating FORBIDDEN_MODULE
 # here. That is a deliberate choice of precision over rename-survival — a rename
 # is a conscious, greppable event, whereas a false positive arrives unannounced
-# on someone else'"'"'s PR.
+# on someone else's PR.
 #
 # Three traps this script exists to avoid
 # ---------------------------------------

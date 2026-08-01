@@ -118,6 +118,25 @@ with the wrong field count, a file with no usable rows, and a run that compares
 **zero** rows are each a hard exit-2 failure. Every one of those was a way to
 get a green gate having measured nothing.
 
+The nastiest of those was a metric that merely *looks* numeric. `500x` is
+coerced to `500` by awk without complaint, so the row became a plausible
+baseline nobody wrote and the resulting −99.6% collapse was reported as
+`improved` — **exit 0, green gate, nothing measured**. Unlike a bare `abc` it
+never crashes, so there is no symptom to notice. Fixture:
+`scripts/testdata/baselines/numeric-looking.txt`.
+
+### The small row is load-bearing — do not delete it
+
+Neither layer catches *partial* drift on its own. Dropping only the `.Specs()`
+projection tail from `BenchmarkIndexWrap` leaves `Wrap` intact, so the guard
+counts a full n-per-iteration and passes cleanly; numerically it fires **only**
+on the smallest row, `n=8`, at −1.17% B/op against the ±1% band — a **0.17
+percentage-point margin**. `n=64` (−0.11%) and `n=512` (−0.003%) stay quiet,
+because a fixed projection cost disappears into a larger index. So `n=8` is not
+redundant coverage of the bigger rows; it is the only thing standing between
+partial drift and a green gate. Deleting it, or loosening the tolerance much
+past 1%, silently reopens that gap.
+
 Both allocation metrics are gated because they move independently. The classic
 "copy the whole slice on every call" regression holds the allocation **count**
 flat and grows the **bytes** linearly; an allocs-only gate walks straight past
