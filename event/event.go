@@ -232,6 +232,15 @@ type SessionCompactionStarted struct {
 	ReplacesThrough string
 	// Messages is the number of provider messages in the context being
 	// compacted away.
+	//
+	// The wire key is `messages`, NOT [SessionCompacted]'s
+	// `messages_compacted`, and that asymmetry is deliberate rather than an
+	// oversight: this is a PRE-compaction count. At this point nothing has
+	// been compacted — the summarizer has not run — so naming it
+	// `messages_compacted` would report a compacted count for a compaction
+	// that has not happened. Correlate a start with its terminal on
+	// ReplacesThrough, which IS identical across all three compaction kinds;
+	// nothing correlates on this field.
 	Messages int
 }
 
@@ -387,6 +396,14 @@ type SessionCompactionFailed struct {
 	ReplacesThrough string
 	// Messages is the number of provider messages the abandoned compaction
 	// would have replaced.
+	//
+	// The wire key is `messages`, NOT [SessionCompacted]'s
+	// `messages_compacted`, and that asymmetry is deliberate rather than an
+	// oversight: this event means the compaction did NOT happen, so nothing
+	// was compacted and a `messages_compacted` count here would be false.
+	// Correlate this terminal with its start on ReplacesThrough, which IS
+	// identical across all three compaction kinds; nothing correlates on
+	// this field.
 	Messages int
 	// Err is the failure message. Usually the string form of the error
 	// Compact returned — but the panic and [runtime.Goexit] paths return no
