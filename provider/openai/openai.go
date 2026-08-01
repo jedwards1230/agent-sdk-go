@@ -147,8 +147,11 @@ func (p *Provider) Stream(ctx context.Context, req provider.Request) (provider.S
 	}
 	if resp.StatusCode != http.StatusOK {
 		defer func() { _ = resp.Body.Close() }()
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return nil, &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(msg))}
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, errBodyLimit))
+		// Drain any remainder past the cap so the connection can return to the
+		// pool instead of being discarded mid-body.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil, newAPIError(resp.StatusCode, msg)
 	}
 	return newStream(ctx, resp.Body), nil
 }

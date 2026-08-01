@@ -1,6 +1,6 @@
 # CI: fast build/vet/test + lint on every PR; the race detector runs on push
-# (merges to main and release tags) and on PRs targeting a `milestone/*`
-# integration branch.
+# (merges to main and release tags) and on any PR into OR out of a `milestone/*`
+# or `integration/*` integration branch.
 #
 # The PR-time exception exists because an integration branch accumulates many
 # pieces before anything reaches main, so "a data race blocks the release" is too
@@ -48,9 +48,29 @@ jobs:
           version: v2.11
 
   race:
+    # Both integration-branch prefixes in use. `milestone/*` came first (M5,
+    # M7); `integration/contract-hardening` is the same topology under a
+    # different name, and matching only the first prefix silently dropped the
+    # gate for that whole round — the failure this predicate exists to prevent,
+    # produced by the predicate itself. If a third prefix ever appears, widen
+    # to all pull_request events rather than adding a third startsWith: an
+    # allowlist that depends on naming a branch correctly is the same class of
+    # gate this file's header warns about.
+    #
+    # head_ref as well as base_ref, because an integration round has TWO kinds
+    # of PR and the base_ref conditions only cover one. A per-piece PR targets
+    # the integration branch (base_ref matches). The tracking PR is the
+    # integration branch itself targeting main — base_ref is `main`, so it
+    # matched nothing and skipped, leaving the round's COMBINED state
+    # ungated at PR time. That is the worse of the two gaps: per-piece PRs are
+    # each small, while the tracking PR is where a dozen of them first exist
+    # together, and `push` only re-checks after it has already merged.
     if: >-
       github.event_name == 'push' ||
-      startsWith(github.base_ref, 'milestone/')
+      startsWith(github.base_ref, 'milestone/') ||
+      startsWith(github.base_ref, 'integration/') ||
+      startsWith(github.head_ref, 'milestone/') ||
+      startsWith(github.head_ref, 'integration/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

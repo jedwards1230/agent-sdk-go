@@ -442,12 +442,20 @@ part of this package.
   consumer can assign the result straight onto
   `event.ToolCallFinished.Diagnostics` / `loop.ToolResult.Diagnostics` (both
   already exist) without `lsp` taking a reverse dependency on either.
+  `loop.ToolResult.Diagnostics` (`[]string`) is the only path to the event, and
+  a consumer reaches it from outside the tool through either seam that yields a
+  `ToolResult`: a `loop.Hooks.AfterTool` hook, or a decorated
+  `loop.ToolRegistry`. `tool.Result` carries no diagnostics — there is no
+  tool-side slot for the SDK to fill, and `loop.FromRegistry` never sets one.
 
 **Future (not shipped by `lsp/`)**: an embedded ~370-server registry
 (nvim-lspconfig-shaped dataset) with lazy per-file-event startup, diagnostics
 injected into tool results (current-file vs project split, errors first,
 settle debounce), and `lsp_diagnostics` / `lsp_references` / `lsp_restart`
-tools built on top of the `Registry` + `Publisher` seam above.
+tools built on top of the `Registry` + `Publisher` seam above. "Injected into
+tool results" means the consuming layer setting `loop.ToolResult.Diagnostics`
+from a `loop.Hooks.AfterTool` hook or a decorated `loop.ToolRegistry`, not an
+SDK-side slot on `tool.Result`.
 
 ## Skills (`skill/`, M5)
 
@@ -926,6 +934,78 @@ strategy that made no model call still marshals a valid, mostly-empty event.
 `Instructions` field mirroring the method signature — additive, omitempty, so
 an existing bare `{session_id}` request is unaffected.
 
+## Provider error classification
+
+**`provider.ErrContextOverflow` is a contract; provider message text is not.**
+The sentinel reports one thing: a request was REJECTED because the prompt
+exceeded the model's context window. Callers branch with `errors.Is`. It is
+distinct from `StopMaxTokens` (a turn that ran and hit its *output* cap — a
+success), from a rate limit, from Anthropic's `request_too_large` (a request
+*byte size* limit, not remedied by shortening history), and from a transport
+failure. None of those classify.
+
+It exists because the compaction seam above ships **no automatic trigger**: an
+embedder judges pressure from settled usage. That can't see a single-turn
+overshoot — a rejected call generates nothing and therefore reports *no usage
+at all*, so a usage threshold never fires and the session wedges
+(`jedwards1230/gofer#279`). The rejection error is the only signal, so it has
+to be classified rather than string-matched by every consumer.
+
+**Each adapter normalizes its own vendor signal**, and vendor asymmetry is
+absorbed there rather than exported. Every adapter error type implements
+`Is(target error) bool` over its *exported fields* — a pure function, so a value
+a consumer hand-builds in its own test classifies exactly as a live response
+does — and the rule is structured-signal-first:
+
+- **OpenAI** names the failure discretely. `openai.APIError` now parses the
+  `{"error":{…}}` envelope into `Type`/`Code`/`Param` (`Body` still retained),
+  and both it and `openai.StreamError` recognize `context_length_exceeded` plus
+  the `context_window_exceeded` that gateways re-emitting the envelope
+  (LiteLLM, OpenRouter — reachable through `WithBaseURL`) send instead. An
+  *unrecognized* code is not a verdict: it may simply have been rewritten, so
+  the prose fallback still runs.
+- **Anthropic ships no discrete code**: overflow is a plain
+  `invalid_request_error` with the detail only in the message. So
+  `anthropic.Error` gates on type first, then matches a narrow phrase list
+  (`prompt is too long`, `exceed context limit`, `context window`).
+
+Both adapters check each structured field **only when it is present**, and as
+separate conditions. Neither is guaranteed — status is 0 on a mid-stream SSE
+error frame, and type is empty whenever the envelope was rewritten or truncated
+past the read cap — so demanding either outright false-negatives a real
+overflow, while collapsing the two into one `status != 400 && type != …`
+condition passes whenever *either* matches and lets a 5xx quoting overflow
+prose through. Both spellings are natural and both are wrong; the tests pin
+each direction.
+
+Text matching is a fallback confined to the adapter, never a caller's job.
+Where the two directions conflict the adapters resolve toward the false
+positive: a missed overflow wedges the session, while a spurious one costs a
+single bounded compact-and-retry.
+
+The error propagates **unwrapped** through `loop.Run` and `runner.Prompt`, so
+`errors.Is` works on what a consumer holds; a `loop` regression test pins that.
+`faux.Turn.Err` scripts a pre-stream rejection, so the whole branch is testable
+with no network:
+
+```go
+res, err := loop.Run(ctx, cfg, msgs)
+if errors.Is(err, provider.ErrContextOverflow) {
+    msgs = shrink(msgs)               // embedder policy: summarize or drop history
+    res, err = loop.Run(ctx, cfg, msgs)
+}
+```
+
+On the `Runner` path the retry is not this symmetric: `Runner.Prompt` journals
+the user message *before* the model call, so an overflow leaves that message
+already in the journal and re-prompting the same text double-appends it —
+compact, then continue from the existing HEAD rather than re-sending.
+
+No new `StreamEventType`, `StopReason`, or `event/` field: the returned `error`
+is what a compact-and-retry branch reads, and each of those is a separate
+contract addition with its own cost. There is deliberately no
+`provider.IsContextOverflow` helper either — `errors.Is` is already the ask.
+
 ## MCP (M7)
 
 `mcp/` is an **optional SDK package**: a hand-rolled JSON-RPC 2.0 client
@@ -978,12 +1058,92 @@ output: an MCP tool and a builtin tool become the same Go type in the same
 `tool.Registry`, so permission gating, the tool-index decorator, and
 diagnostics all apply to both structurally, never by convention. A tool's
 input schema is converted from the server's JSON Schema to `tool.Schema` via
-a best-effort recursive projection (object/array nesting, `enum`, `default`,
-top-level `required`); JSON Schema constructs `tool.Schema` has no
-representation for (`oneOf`/`anyOf`, `patternProperties`,
-`additionalProperties`, per-nested-object `required`) are dropped, not
-rejected — the same limitation every builtin tool's schema already lives
-with, not a new one this package introduces.
+a best-effort recursive projection.
+
+**Schema projection: what it represents, and what degradation costs.**
+`tool.Schema`/`tool.Property` represent `type`, `description`, `properties`,
+top-level *and* per-nested-object `required`, `enum`, `items`, `default`,
+`oneOf`/`anyOf`/`allOf`, and `patternProperties`. The composition and nested-
+`required` fields are optional and `omitempty` — a builtin tool that does not
+use them marshals to exactly the bytes it did before they existed, and no
+provider adapter changed to carry them (both adapters copy a tool's marshalled
+spec through as an opaque `json.RawMessage`). Adding fields is source-
+compatible for every keyed composite literal, which is all this repo (and
+`go vet`'s `composites` check) uses; an embedder constructing a `tool.Schema`
+or `tool.Property` with an **unkeyed** literal would need to add the new
+fields. That is the one compatibility consequence, and it is recorded here
+rather than discovered.
+
+"Represents `oneOf`" is not unconditional. A composition branch whose every
+keyword was unrepresentable projects to `{}` — the schema matching
+*everything* — so a union carrying one would be vacuously true (`oneOf` is
+worse: `[{},{}]` matches every input twice, so under strict validation
+nothing validates). A `oneOf`/`anyOf` with any such branch is therefore
+dropped whole and reported; omitting a keyword is strictly better than
+emitting a vacuous one. `allOf` is an intersection, so it keeps its
+representable members and reports the loss — dropping only the unrepresentable
+member still applies the others.
+
+Everything else a server can write — `additionalProperties`, `minimum`,
+`pattern`, `format`, `const`, `$ref`, `not`, `if`/`then`/`else`, and any
+keyword JSON Schema gains later — has no representation and is dropped. That
+detection is **deny-by-default**: the projection knows only which keywords it
+represents plus a short list of inert keys (`$schema`, `$id`, `$comment`,
+`title`, `examples`, `deprecated`, `readOnly`, `writeOnly`, and the definition
+blocks `$defs`/`definitions`/`$vocabulary`), and reports every other key with
+its path. There is no allowlist of constraint keywords to fall behind. A
+definition block constrains nothing by itself — only a `$ref` into it does,
+and that `$ref` is reported at its own path — so treating it as inert avoids a
+guaranteed false positive on every pydantic-derived server.
+
+A drop is never silent, because a schema more permissive than the server's is
+a tool call the model will confidently get wrong. That invariant holds with no
+exceptions: a root-level `enum` (an assertion `tool.Schema` has no field for),
+an empty `enum`/`oneOf`/`anyOf`/`allOf` (a schema nothing validates against),
+and a schema that could not be decoded at all are all reported, not discarded
+quietly. Only genuinely inert keys stay silent.
+
+Reporting is split by audience, because one of the two channels is billed per
+request:
+
+- **The model** gets a `Schema note:` paragraph appended to the tool's
+  `Description`, carrying **deduplicated keyword counts under a hard cap**
+  (`format (×40), pattern (×40), additionalProperties, and 3 more`) plus the
+  statement that conforming arguments may still be rejected. It carries **no
+  paths**. A description rides every request for the life of the session, and
+  paths are unbounded and server-controlled: the undeduplicated form turned a
+  4,072-byte schema into a 5,328-byte description, making prompt cost a
+  function of the server's schema. Every appended token is now bounded by
+  construction — a fixed cap on list length and on the length of any single
+  server-supplied token — so it cannot grow with the schema's size.
+- **The operator** gets one `Warn` per affected tool on the `Client`'s logger
+  (`mcp.WithLogger`) carrying the exhaustive per-occurrence list *with* full
+  paths, plus the decode error when the schema could not be read. In a log
+  that detail costs nothing and it is exactly what is needed to find the
+  keyword in the server's own schema.
+
+A represented `oneOf`/`anyOf`/`allOf` is *also* restated as one prose clause,
+since models follow a sentence more reliably than a nested composition
+keyword; nested compositions are grouped by keyword and named by path under
+the same cap, because a wide pydantic schema carries one per optional field. A
+schema that projects cleanly and uses no composition is left completely alone:
+its `Description` is the server's own string byte for byte, and it logs
+nothing — the degradation report has to stay a short list an operator can act
+on.
+
+The projection is total by construction: the raw schema is decoded once into
+`map[string]any` rather than into narrow Go structs, so no value type a server
+legally uses can fail the decode and collapse the schema. (It could: a single
+`{"type":"integer","enum":[1,2]}` property once discarded every property,
+description, and `required` list in the whole schema.) A value only the wire
+type is too narrow for — a non-string `enum`, a `["string","null"]` union
+`type` — costs that one keyword, is reported like any other drop, and leaves
+its siblings intact. A union `type` keeps its first non-`null` member, which
+is narrower than the server, never wider, and is reported as `type union` so
+it cannot be misread as "the type is unconstrained"; a single-member array
+loses nothing and is not reported. A missing schema, or one that could not be
+decoded, degrades to an empty object schema rather than failing the whole
+projection over one tool.
 
 **Naming and sanitization (satisfies the permission grammar above).** A
 projected tool is named `mcp__<server>__<tool>`, matching the
@@ -1097,13 +1257,84 @@ embedder can't see and override" tenet is upheld here.
 Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
 public surface expands to support it; that is a follow-on PR.
 
+## Device keys & sealed envelopes (device/)
+
+`device` is types only: an X25519 `PublicKey`/`KeyPair`, the opaque `Sealed`
+envelope, and the `Seal`/`Open` pair. It opens no socket, fetches no key, and
+models no account, roster, or pairing flow. The private half is unexported and
+never marshalled — persist `PrivateBytes()` and rebuild with
+`KeyPairFromPrivate`.
+
+**Construction: RFC 9180 HPKE in `mode_auth`.** Ciphersuite
+DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20Poly1305, single-shot at
+sequence 0, implemented in `internal/hpke` and checked against the CFRG
+vectors — that vector suite, not the envelope tests, is the standing
+cryptographic gate, because a mutated KEM derivation leaves the wire bytes
+identical. The sender mints a **fresh ephemeral X25519 keypair per envelope**
+(`Sealed.Ephemeral` is its public half); DHKEM's `AuthEncap` derives the shared
+secret from `DH(skE, pkR) || DH(skS, pkR)`. The long-term identity key
+therefore *authenticates* rather than contributing the secret: the ephemeral is
+bound to the identity by that second DH, not by a signature. That is what lets
+the identity key stay X25519 — X25519 cannot sign — and it makes sender
+authentication implicit and deniable.
+
+**What is bound.** The HPKE `info` is `agent-sdk-go/device/sealed/v<version>`,
+so a future v2 cannot key-collide with v1 on the same suite. The AEAD's
+associated data is `I2OSP(version,1) || Sender || Ephemeral`; `Sender` and
+`Ephemeral` are already implicit in the KEM (substituting either derives a
+different secret), so the AAD's real work is covering the version byte, which
+the KEM never sees. Nothing else about an envelope is authenticated because
+there is nothing else — **metadata that must be authenticated belongs inside
+the plaintext**. An attacker may still reorder, drop, replay, or duplicate
+envelopes; only the caller's in-plaintext sequencing detects it.
+
+**Forward secrecy is one-sided, deliberately.** Compromise of the *sender's*
+long-term private key reveals nothing historical — the per-envelope ephemeral
+private key never left the sealing process. Compromise of the *recipient's*
+still does, since the recipient contributes a static key to both DHs. Closing
+that half needs a recipient-contributed ephemeral — an interactive handshake or
+published one-time prekeys — which needs transport and application state a
+one-shot stateless envelope has nowhere to keep. Known and accepted, not an
+oversight.
+
+**Versioning fails CLOSED**, the deliberate opposite of `announce`'s open-set
+enums. `Seal` stamps `SealedVersion`; `Open` and `UnmarshalJSON` reject
+anything else with `ErrUnsupportedVersion`. An unrecognized `EndpointKind` is a
+path you skip, but an unknown envelope version is an unknown *construction*,
+and processing it under v1's rules — or relaying it as understood — is exactly
+the downgrade this rejects. `MarshalJSON` emits `s.Version` verbatim rather
+than substituting `SealedVersion`, so a hand-built envelope cannot be laundered
+into looking current.
+
+**`Open` is not a decryption oracle.** Every cryptographic failure — bad
+encapsulation, wrong sender key, forged tag — returns exactly `ErrOpen`,
+unwrapped and undifferentiated, so a caller learns one bit and nothing more.
+Only structural problems checked *before* any decryption (unsupported version,
+zero recipient, zero sender) are reported distinctly. `internal/hpke.OpenAuth`
+draws the same line at input-length validation: `ErrKeySize` for a caller-side
+length bug, bare `ErrOpen` for everything after it.
+
+**Trust is TOFU, and the pin store is the embedder's.** A successful `Open`
+proves the envelope was sealed by the holder of `Sealed.Sender`'s private key;
+it proves nothing about whether that key is trusted, so the recipient must
+check `Sender` against its own authorized set. `PublicKey.ID` — the first 8
+bytes of SHA-256(key), hex — is the pin handle: derived from the key alone,
+stable, carrying no key material, safe in a log line or a confirmation prompt.
+It is an identifier, never the check; 64 bits collide on purpose, so
+authentication compares full keys. `ErrPinnedKeyMismatch` is a sentinel this
+package never returns — it exists so an embedder can report "this is not the
+device you paired with" distinctly from a generic auth failure. Where pins
+live, how long they last, and when a re-pair is permitted are application state
+and fail the membership test: no pin store, roster, account type, or comparison
+helper ships here.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
 identity (server id, account id, display name), candidate endpoints, coarse
-session summaries, an opaque credential, a `device.PublicKey`, and a capability
-`Scope`. Types only — the package imports no `net`, opens no socket, and knows
-nothing about rosters or fleets. Per the two-gate test, describing yourself is
+session summaries, an optional opaque credential, a **required**
+`device.PublicKey`, and a capability `Scope`. Types only — the package imports
+no `net`, opens no socket, and knows nothing about rosters or fleets. Per the two-gate test, describing yourself is
 vocabulary a second SDK-based app needs unchanged; the mDNS browser, rendezvous
 client, device-code flow, and candidate racing are plumbing that lives in a
 separate module.
@@ -1120,8 +1351,50 @@ is opaque: never parsed, resolved, validated, or dialed here.
 and `CanDrive()` is true only for `ScopeDriver` exactly, so a dropped or
 unrecognized scope can never read as drive access. The field ships now because
 adding it later is breaking, even though enforcement is the application's and
-gets refined over time. `Credential` is a slot the SDK carries and never
-fetches, refreshes, validates, or interprets.
+gets refined over time.
+
+**`DeviceKey` is required**; `Validate` rejects the zero key. End-to-end
+encryption is a hard requirement here, so a keyless server is not a degraded
+server but one that cannot take part — accepting it opens a silent downgrade
+path where a client holds a validated payload for a peer it can never seal an
+envelope to. This does not touch `device.PublicKey`: the zero key stays
+representable and still parses (a fixed-size array has no "absent" state, and
+`ParsePublicKey` must accept a well-formed all-zero encoding), it is simply no
+longer valid *in a payload* — the same parse-versus-validity split
+`PublicKey.Valid` documents, applied one level up. Test presence with `Valid`,
+never against the encoded form, which is an all-zero base64 string rather than
+an empty one.
+
+`Credential` is a slot the SDK carries and never fetches, refreshes, validates,
+or interprets — and it is a struct with an unexported `*string`, not a bare
+string, because a bearer secret inside a `Payload` is one careless format verb
+from a log line. `Reveal()` is the only read, so every legitimate use is
+greppable. `Format` is what makes the redaction total rather than partial: fmt
+consults a `fmt.Formatter` for *every* verb but a `fmt.Stringer` only for
+`%v %s %q %x %X`, and before `Format` existed `%d` on a struct holding a
+credential printed the secret in clear. The boundary, exactly:
+
+- Reached through an **exported** path — the value itself, a pointer, a slice
+  or map, an exported field, the verb-less `fmt.Print` family, the implicit
+  `%v` in `fmt.Errorf` — no verb prints the secret.
+- Reached through another struct's **unexported** field, fmt never calls
+  `Format`/`String`/`GoString` at all (`CanInterface` is false) and falls
+  through to reflection, which does not care that `Credential`'s own field is
+  unexported either. That is why the field is a `*string`: fmt renders a
+  pointer at depth > 0 as an address and never follows it. The redaction
+  methods are bypassed on this path; the secret still does not print.
+- **Serialization carries the real value, on purpose** — both codecs, because
+  the credential's whole job is to ride the wire. That includes structured
+  logging: `slog`'s JSON handler resolves through `MarshalJSON`, not fmt, so it
+  emits the credential in clear. Log a `ServerID`, not a payload; treat an
+  encoded payload as secret-bearing.
+
+`Credential` is also deliberately **non-comparable** (a zero-width `[0]func()`
+field): with a pointer inside, `==` would compare addresses rather than
+secrets, and a compile error beats a silent wrong answer in a security type —
+compare via `Reveal`, or `reflect.DeepEqual`. `NewCredential("")` returns the
+zero `Credential`, so "" and "no credential" have exactly one representation
+and a decoded payload stays `DeepEqual` to the one it was encoded from.
 
 **Not in the compose manifest.** A manifest is static configuration an embedder
 *declares*; an announce payload is runtime state a server *emits* (endpoints

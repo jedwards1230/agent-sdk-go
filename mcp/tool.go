@@ -32,6 +32,16 @@ import (
 // connecting after the session started joins the NEXT session). See
 // docs/DESIGN.md "MCP (M7)" and the mcp package doc for why this is a hard
 // invariant, not a style preference.
+//
+// Schema degradation is visible, not silent. A server's JSON Schema can
+// constrain input in ways [tool.Schema] cannot express (see [projectSchema]);
+// where that happens the projected tool's Description gains a "Schema note:"
+// paragraph telling the model its arguments may still be rejected, and the
+// Client's logger (see [WithLogger]) gets one Warn per affected tool naming
+// the dropped keywords. A tool whose schema projected cleanly is left
+// completely alone: its Description is the server's own string, byte for
+// byte, and it logs nothing — so the warnings read as a short list an
+// operator can act on.
 func Project(ctx context.Context, c *Client, server string) ([]tool.Tool, error) {
 	infos, err := c.ListTools(ctx)
 	if err != nil {
@@ -39,13 +49,25 @@ func Project(ctx context.Context, c *Client, server string) ([]tool.Tool, error)
 	}
 	out := make([]tool.Tool, 0, len(infos))
 	for _, info := range infos {
+		proj := projectSchema(info.InputSchema)
+		if proj.degraded() {
+			// The log carries the exhaustive, per-occurrence list with full
+			// paths (and the decode error, when the schema could not be read
+			// at all). The description the model sees carries a bounded
+			// summary instead — see [projection.describe].
+			attrs := []any{"server", server, "tool", info.Name, "dropped", proj.droppedKeywords()}
+			if proj.parseErr != nil {
+				attrs = append(attrs, "error", proj.parseErr)
+			}
+			c.log.Warn("mcp: tool schema constraints dropped in projection", attrs...)
+		}
 		out = append(out, &projectedTool{
 			client:   c,
 			server:   server,
 			original: info.Name,
 			name:     qualifiedToolName(server, info.Name),
-			desc:     info.Description,
-			schema:   schemaFromJSON(info.InputSchema),
+			desc:     proj.describe(info.Description),
+			schema:   proj.schema,
 		})
 	}
 	return out, nil
