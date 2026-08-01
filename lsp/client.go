@@ -285,8 +285,12 @@ func (c *Client) readLoop(r *bufio.Reader) {
 				// read error caused by Close is always observed here — fail
 				// pending calls with ErrClosed, not the raw transport error, so
 				// a call racing Close sees the documented sentinel whichever of
-				// its select cases wins.
-				c.log.Debug("lsp: read loop stopped on close", "session", c.session)
+				// its select cases wins. The raw error is still logged: a
+				// server that died of a real fault just before a supervisor
+				// called Close lands here, and failPending no longer forwards
+				// err anywhere, so dropping it would lose the root cause
+				// process-wide.
+				c.log.Debug("lsp: read loop stopped on close", "session", c.session, "error", err)
 				c.failPending(ErrClosed)
 			default:
 				// The transport died on its own (server crash/exit) with no

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -682,8 +683,8 @@ func TestRunnerCompactSummarizerFailurePublishesFailed(t *testing.T) {
 	if failed.Messages != started.Messages {
 		t.Errorf("failed.Messages = %d, want the start's %d", failed.Messages, started.Messages)
 	}
-	if failed.Error != compactErr.Error() {
-		t.Errorf("failed.Error = %q, want the error Compact returned %q", failed.Error, compactErr.Error())
+	if failed.Err != compactErr.Error() {
+		t.Errorf("failed.Err = %q, want the error Compact returned %q", failed.Err, compactErr.Error())
 	}
 	if failed.Tier() != event.TierMustDeliver {
 		t.Errorf("failed.Tier() = %v, want must-deliver", failed.Tier())
@@ -751,11 +752,11 @@ func TestRunnerCompactAppendFailurePublishesFailed(t *testing.T) {
 		t.Errorf("failed{%q,%d} does not correlate with started{%q,%d}",
 			failed.ReplacesThrough, failed.Messages, started.ReplacesThrough, started.Messages)
 	}
-	if failed.Error != compactErr.Error() {
-		t.Errorf("failed.Error = %q, want the error Compact returned %q", failed.Error, compactErr.Error())
+	if failed.Err != compactErr.Error() {
+		t.Errorf("failed.Err = %q, want the error Compact returned %q", failed.Err, compactErr.Error())
 	}
-	if !strings.Contains(failed.Error, "append compaction entry") {
-		t.Errorf("failed.Error = %q, want it to name the append failure", failed.Error)
+	if !strings.Contains(failed.Err, "append compaction entry") {
+		t.Errorf("failed.Err = %q, want it to name the append failure", failed.Err)
 	}
 
 	// The session is untouched: the entry that failed to write is not in the
@@ -813,8 +814,8 @@ func TestRunnerCompactCancelledMidSummarizePublishesFailed(t *testing.T) {
 	if !ok {
 		t.Fatalf("terminal is %T, want event.SessionCompactionFailed", got[1])
 	}
-	if failed.Error != compactErr.Error() {
-		t.Errorf("failed.Error = %q, want %q", failed.Error, compactErr.Error())
+	if failed.Err != compactErr.Error() {
+		t.Errorf("failed.Err = %q, want %q", failed.Err, compactErr.Error())
 	}
 }
 
@@ -873,13 +874,109 @@ func TestRunnerCompactSummarizerPanicPublishesFailedAndRepanics(t *testing.T) {
 	if failed.Messages != got[0].(event.SessionCompactionStarted).Messages {
 		t.Errorf("failed.Messages = %d, want the start's %d", failed.Messages, got[0].(event.SessionCompactionStarted).Messages)
 	}
-	if !strings.Contains(failed.Error, "panicked") || !strings.Contains(failed.Error, boom) {
-		t.Errorf("failed.Error = %q, want it to name the panic and carry %q", failed.Error, boom)
+	if !strings.Contains(failed.Err, "panicked") || !strings.Contains(failed.Err, boom) {
+		t.Errorf("failed.Err = %q, want it to name the panic and carry %q", failed.Err, boom)
 	}
 
 	// Nothing was journaled: the panic happened before any append.
 	if after := entryIDs(readEntries(t, r)); !slices.Equal(after, before) {
 		t.Errorf("journal = %v after a panicking compaction, want it unchanged %v", after, before)
+	}
+}
+
+// TestRunnerCompactSummarizerGoexitPublishesFailed covers the fifth way out of
+// a compaction that already published a start — and the only one a
+// recover()-keyed defer cannot see: runtime.Goexit. recover() returns nil
+// during a Goexit unwind, so a defer that publishes its terminal only when
+// recover() != nil runs, finds nil, and publishes NOTHING.
+//
+// This is not a hypothetical seam abuse. Summarizer is an embedder seam, and
+// the most plausible caller of Goexit is an embedder's own TEST summarizer
+// reaching for t.Fatalf (testing.T.FailNow is documented as calling Goexit);
+// any library using Goexit for control flow does it too. It is strictly worse
+// than the force-unsubscribe hole event.SessionCompactionStarted documents,
+// because the subscription is NOT closed — the documented out-of-band signal
+// never fires either, and the latch sticks with no signal of any kind. The
+// sentinel below is what pins that: it arrives, so the subscription was still
+// open and the terminal event was genuinely the only thing that could have
+// cleared the latch.
+func TestRunnerCompactSummarizerGoexitPublishesFailed(t *testing.T) {
+	ctx := context.Background()
+
+	goexiting := summarizerFunc(func(context.Context, runner.SummarizeRequest) (runner.SummarizeResult, error) {
+		runtime.Goexit()
+		panic("unreachable: runtime.Goexit never returns")
+	})
+	r := newCheckpointRunner(t, textTurns("one"), func(o *runner.Options) { o.Summarizer = goexiting })
+
+	if err := r.Prompt(ctx, "first"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	wantBoundary := headEntryID(t, r)
+	before := entryIDs(readEntries(t, r))
+
+	sub := r.EventsLive()
+	defer sub.Close()
+
+	// Goexit terminates the goroutine that CALLS it, so Compact has to run on a
+	// goroutine of its own: inline, it would take this test's goroutine down
+	// with it. Deferred calls still run during the unwind — that is both how
+	// Compact's terminal defer gets its chance to publish and how `done` closes
+	// here — while `returned` closes only on an ordinary return, so the two
+	// channels together distinguish "unwound" from "returned normally".
+	done := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = r.Compact(ctx, "")
+		close(returned)
+	}()
+	<-done
+
+	select {
+	case <-returned:
+		t.Fatal("Compact returned normally; want the summarizer's runtime.Goexit to unwind the goroutine without a return")
+	default:
+	}
+
+	r.Emit(event.NewSessionKilled(r.ID()))
+	got := drainEvents(sub)
+	want := []string{
+		event.KindSessionCompactionStarted,
+		event.KindSessionCompactionFailed,
+		event.KindSessionKilled,
+	}
+	if !slices.Equal(kindsOf(got), want) {
+		t.Fatalf("published kinds = %v, want %v — a summarizer that Goexits must still publish its terminal, and its subscription is never closed", kindsOf(got), want)
+	}
+
+	started := got[0].(event.SessionCompactionStarted)
+	failed, ok := got[1].(event.SessionCompactionFailed)
+	if !ok {
+		t.Fatalf("terminal is %T, want event.SessionCompactionFailed", got[1])
+	}
+	if failed.ReplacesThrough != wantBoundary || failed.ReplacesThrough != started.ReplacesThrough {
+		t.Errorf("failed.ReplacesThrough = %q, want the start's boundary %q", failed.ReplacesThrough, wantBoundary)
+	}
+	if failed.Messages != started.Messages {
+		t.Errorf("failed.Messages = %d, want the start's %d", failed.Messages, started.Messages)
+	}
+	// The reason must name Goexit and must NOT read as a panic: a client
+	// triaging a stuck compaction needs to tell "embedder code blew up" from
+	// "embedder code walked out", and there is no panic value to report here.
+	if !strings.Contains(failed.Err, "Goexit") {
+		t.Errorf("failed.Err = %q, want it to name runtime.Goexit", failed.Err)
+	}
+	if strings.Contains(failed.Err, "panicked") {
+		t.Errorf("failed.Err = %q, want it distinguishable from the panic terminal", failed.Err)
+	}
+	if failed.Tier() != event.TierMustDeliver {
+		t.Errorf("failed.Tier() = %v, want must-deliver", failed.Tier())
+	}
+
+	// Nothing was journaled: the Goexit happened before any append.
+	if after := entryIDs(readEntries(t, r)); !slices.Equal(after, before) {
+		t.Errorf("journal = %v after a Goexiting compaction, want it unchanged %v", after, before)
 	}
 }
 

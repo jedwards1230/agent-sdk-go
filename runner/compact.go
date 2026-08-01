@@ -191,11 +191,13 @@ func (d defaultSummarizer) Summarize(ctx context.Context, req SummarizeRequest) 
 // published; every exit below it publishes exactly one terminal event —
 // [event.SessionCompacted] on success, [event.SessionCompactionFailed] when the
 // summarizer errors, the compaction entry fails to append, or the summarizer
-// panics (the panic is re-raised after the event goes out, never swallowed). A
-// client may therefore latch an indicator on the start and clear it on either
-// terminal. The one outcome that is not a terminal event is a subscriber the
-// broker force-unsubscribes — see [event.SessionCompactionStarted], which
-// documents it.
+// leaves without returning at all, by panic (re-raised after the event goes
+// out, never swallowed) or by runtime.Goexit. A client may therefore latch an
+// indicator on the start and clear it on either terminal. What breaks that pair
+// is not an exit path but a severed subscription — force-unsubscribed, or the
+// broker closed out from under the compaction; see
+// [event.SessionCompactionStarted], which documents both and the closed channel
+// that signals them.
 //
 // Note that this publish is a new blocking point inside Compact: a must-deliver
 // publish blocks up to the broker's bound on a subscriber whose buffer is full,
@@ -228,22 +230,38 @@ func (r *Runner) Compact(ctx context.Context, instructions string) error {
 	// one terminal event.
 	r.broker.Publish(event.NewSessionCompactionStarted(r.ID(), replacesThrough, len(msgs)))
 
-	// The two error paths below publish their own terminal; this covers the
-	// third way out — a panic. [Summarizer] is an embedder seam, i.e. arbitrary
-	// third-party code, so a panic here is a real exit from a function that has
-	// already published a start, and a host that recovers at its own per-op
-	// boundary would latch "compacting" forever. It RE-PANICS after publishing:
-	// swallowing an embedder's panic would be a far worse behavior change than
-	// the missing event it fixes, and Compact must stay inert for a caller that
-	// consumes neither new kind.
+	// Every path that publishes its own terminal sets terminal = true on the
+	// line before it; this defer covers every OTHER way out of a function that
+	// has already published a start. [Summarizer] is an embedder seam, i.e.
+	// arbitrary third-party code, so leaving without returning is a real exit,
+	// and a host that recovers at its own per-op boundary would latch
+	// "compacting" forever. It RE-PANICS after publishing: swallowing an
+	// embedder's panic would be a far worse behavior change than the missing
+	// event it fixes, and Compact must stay inert for a caller that consumes
+	// neither new kind.
+	//
+	// The flag is what makes this total; keying off recover() != nil would not
+	// be. recover returns nil during a runtime.Goexit unwind, so a Summarizer
+	// that Goexits — a test summarizer calling t.Fatal, or any library using
+	// Goexit for control flow — would run this defer, see no panic value, and
+	// publish nothing while Compact never returns. That is strictly worse than
+	// the force-unsubscribe hole [event.SessionCompactionStarted] documents,
+	// because no subscription is closed either: the latch would stick with no
+	// signal of any kind.
+	terminal := false
 	defer func() {
-		p := recover()
-		if p == nil {
+		if terminal {
 			return
 		}
-		r.broker.Publish(event.NewSessionCompactionFailed(r.ID(), replacesThrough, len(msgs),
-			fmt.Sprintf("runner: compaction panicked: %v", p)))
-		panic(p)
+		p := recover()
+		reason := "runner: compaction abandoned: the summarizer exited via runtime.Goexit without returning"
+		if p != nil {
+			reason = fmt.Sprintf("runner: compaction panicked: %v", p)
+		}
+		r.broker.Publish(event.NewSessionCompactionFailed(r.ID(), replacesThrough, len(msgs), reason))
+		if p != nil {
+			panic(p)
+		}
 	}()
 
 	result, err := r.summarizer.Summarize(ctx, SummarizeRequest{
@@ -253,6 +271,7 @@ func (r *Runner) Compact(ctx context.Context, instructions string) error {
 	})
 	if err != nil {
 		err = fmt.Errorf("runner: compact session %s: %w", r.ID(), err)
+		terminal = true
 		r.broker.Publish(event.NewSessionCompactionFailed(r.ID(), replacesThrough, len(msgs), err.Error()))
 		return err
 	}
@@ -266,10 +285,12 @@ func (r *Runner) Compact(ctx context.Context, instructions string) error {
 	}
 	if _, err := r.journal.Append(session.NewCompactionEntry(result.Summary, replacesThrough, entryOpts...)); err != nil {
 		err = fmt.Errorf("runner: append compaction entry: %w", err)
+		terminal = true
 		r.broker.Publish(event.NewSessionCompactionFailed(r.ID(), replacesThrough, len(msgs), err.Error()))
 		return err
 	}
 
+	terminal = true
 	r.broker.Publish(event.NewSessionCompacted(r.ID(), replacesThrough, len(msgs), result.Model, result.Usage, result.Summary))
 	return nil
 }

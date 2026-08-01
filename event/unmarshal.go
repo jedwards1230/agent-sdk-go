@@ -60,7 +60,7 @@ func Unmarshal(data []byte) (Event, error) {
 	case KindSessionCompactionStarted:
 		return SessionCompactionStarted{meta: m, ReplacesThrough: w.ReplacesThrough, Messages: w.Messages}, nil
 	case KindSessionCompactionFailed:
-		return SessionCompactionFailed{meta: m, ReplacesThrough: w.ReplacesThrough, Messages: w.Messages, Error: w.Err}, nil
+		return SessionCompactionFailed{meta: m, ReplacesThrough: w.ReplacesThrough, Messages: w.Messages, Err: w.Err}, nil
 	case KindSessionCompacted:
 		return SessionCompacted{
 			meta:              m,
