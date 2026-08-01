@@ -864,7 +864,7 @@ still count toward `Runner.Cost`.
 is a full model call that streams nothing and can run a minute or more, so
 `Compact` also publishes a must-deliver `session.compaction_started`
 (`{replaces_through, messages}`) — the signal a client that did NOT call
-`Compact` needs to know one is in flight (agent-sdk-go#140). It goes out
+`Compact` needs to know one is in flight (jedwards1230/agent-sdk-go#140). It goes out
 IMMEDIATELY BEFORE the `Summarizer` call and not one line earlier, which makes
 the outcome structural rather than documented:
 
