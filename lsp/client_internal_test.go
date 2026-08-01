@@ -26,8 +26,10 @@ import (
 //     io.EOF. That is the server-death path — killing the server is what
 //     ends the client's read loop.
 //
-// io.ErrClosedPipe is never what a peer's Read sees; a peer observes it on a
-// Write after the reader end has gone away.
+// Note r and w are opposite halves of two DIFFERENT io.Pipes, so closing this
+// end's writer never affects this end's own reader — it ends the peer's Read.
+// io.ErrClosedPipe is also what a peer's Write sees once the reader end is
+// gone; it is never what a peer's Read sees, which is io.EOF.
 type internalPipeTransport struct {
 	r *io.PipeReader
 	w *io.PipeWriter
