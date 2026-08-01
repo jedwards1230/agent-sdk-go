@@ -47,6 +47,49 @@ jobs:
         with:
           version: v2.11
 
+  bench:
+    # Deliberately UNCONDITIONAL. Both halves of this job guard invariants that
+    # break silently — an allocation regression looks like a passing test, and
+    # an application import looks like a passing build — so gating them behind
+    # a branch predicate would mean the PR that introduces the breakage is
+    # exactly the PR that skips the check. The `race` job's comment above is
+    # the record of what a naming-based allowlist costs; this job declines to
+    # repeat it.
+    #
+    # It is cheap: the benchmarks run at a fixed 100 iterations, five times,
+    # over one package. Seconds, not minutes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # shellcheck ships on the ubuntu runner image. The scripts below are the
+      # gate, so they get linted before they are trusted to enforce anything.
+      - run: shellcheck scripts/*.sh
+      - run: ./scripts/check-independence.sh
+      - run: ./scripts/bench.sh --check
+      # The gate's own comparison logic, replayed against committed synthetic
+      # captures: one regression that moves ONLY B/op, and one where a gated
+      # benchmark vanished from the output. Both must fail. Without this, a
+      # broken comparison would report a cheerful OK forever.
+      - name: the gate must fail on a regressed capture
+        run: |
+          set -uo pipefail
+          for fixture in scripts/testdata/regression-bytes-only.txt \
+                         scripts/testdata/missing-benchmark.txt; do
+            status=0
+            ./scripts/bench.sh --check --input "$fixture" >/dev/null 2>&1 || status=$?
+            # Exactly 1 (a detected regression). A `!` negation would also
+            # accept exit 2 — bench.sh's "I could not run" status — and pass a
+            # gate that is merely broken as a gate that works.
+            if [ "$status" -ne 1 ]; then
+              echo "::error::$fixture: expected bench.sh --check to exit 1, got $status" >&2
+              exit 1
+            fi
+            echo "ok: $fixture correctly failed the gate"
+          done
+
   race:
     # Both integration-branch prefixes in use. `milestone/*` came first (M5,
     # M7); `integration/contract-hardening` is the same topology under a
