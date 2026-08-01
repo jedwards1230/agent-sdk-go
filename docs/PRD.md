@@ -84,6 +84,7 @@ socket, or network — same messages).
 | Event | Delivery |
 |---|---|
 | `session.created / .resumed / .forked{at?, label?} / .compacted{replaces_through?, messages_compacted?, model?, usage, summary?} / .killed / .archived` | must-deliver |
+| `session.compaction_started{replaces_through?, messages?}` · `session.compaction_failed{replaces_through?, messages?, error}` | must-deliver — a compaction that publishes the start publishes exactly one terminal: `session.compacted` on success, `session.compaction_failed` otherwise |
 | `session.info{title}` (embedder-set title change) | must-deliver |
 | `session.config{options}` (embedder config-option snapshot, e.g. current model) | must-deliver |
 | `plan{entries}` (agent task-plan snapshot via `update_plan`) | must-deliver |
