@@ -105,9 +105,16 @@ they call for opposite responses:
   oversight:
 
   ```bash
-  gh api repos/<owner>/<repo>/issues/<pr>/timeline \
+  gh api --paginate repos/<owner>/<repo>/issues/<pr>/timeline \
     --jq '.[] | select(.event=="convert_to_draft") | "\(.created_at) by \(.actor.login)"'
   ```
+
+  **`--paginate` is required, not optional.** The timeline API pages at 30 and
+  says nothing when it truncates. On this repo's own integration PR the
+  timeline held 44 events, so the un-paginated form saw 30 and printed
+  nothing — which reads as "nobody drafted it", the exact wrong branch of the
+  two this section distinguishes. A `convert_to_draft` follows a review, so on
+  a long-lived PR it is precisely the event that lands past page 1.
 
   Fix the findings, resolve the threads, then undraft to re-trigger.
 

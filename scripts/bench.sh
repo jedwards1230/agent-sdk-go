@@ -280,7 +280,7 @@ compare() {
 			# shapes produce a confident, wrong answer:
 			#
 			#   "500x" -> 500. The row gates against a number nobody wrote,
-			#   and a -99.8% collapse is reported as an improvement at exit 0.
+			#   and a -99.6% collapse is reported as an improvement at exit 0.
 			#   This is the one that actually got through; it is what
 			#   scripts/testdata/baselines/numeric-looking.txt locks.
 			#

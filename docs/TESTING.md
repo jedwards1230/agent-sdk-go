@@ -121,8 +121,10 @@ get a green gate having measured nothing.
 The nastiest of those was a metric that merely *looks* numeric. `500x` is
 coerced to `500` by awk without complaint, so the row became a plausible
 baseline nobody wrote and the resulting −99.6% collapse was reported as
-`improved` — **exit 0, green gate, nothing measured**. Unlike a bare `abc` it
-never crashes, so there is no symptom to notice. Fixture:
+`improved` — **exit 0, green gate, nothing measured**. A bare `abc` does not
+crash either (`judge()` catches the coerced zero baseline before `pct()`
+divides), but it at least reports something; this shape reports nothing at all,
+so there is no symptom to notice. Fixture:
 `scripts/testdata/baselines/numeric-looking.txt`.
 
 ### The small row is load-bearing — do not delete it

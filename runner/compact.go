@@ -253,6 +253,14 @@ func (r *Runner) Compact(ctx context.Context, instructions string) error {
 		if terminal {
 			return
 		}
+		// A nil recover() means Goexit, not a panic — panic(nil) became
+		// *runtime.PanicNilError in Go 1.21, so it arrives here non-nil like
+		// any other value. The one exception is GODEBUG=panicnil=1, which
+		// restores the pre-1.21 behavior: a summarizer's panic(nil) would then
+		// be reported with the Goexit wording and NOT re-raised. That setting
+		// is off by default and opting into it means opting into an
+		// indistinguishable nil panic everywhere, so this is documented rather
+		// than worked around.
 		p := recover()
 		reason := "runner: compaction abandoned: the summarizer exited via runtime.Goexit without returning"
 		if p != nil {

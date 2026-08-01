@@ -63,7 +63,7 @@ readonly FORBIDDEN_MODULE="github.com/jedwards1230/gofer"
 # can be preceded by start-of-line, whitespace or `[`, and must be followed by
 # `/`, `.`, `]`, whitespace or end-of-line. `gofergo` is followed by `g` and so
 # does not match; `gofer/internal/daemon`, `gofer.test` and `gofer` all do.
-readonly FORBIDDEN_RE='(^|[[:space:]]|\[)github\.com/jedwards1230/gofer([/.]|\]|[[:space:]]|$)' 
+readonly FORBIDDEN_RE='(^|[[:space:]]|\[)github\.com/jedwards1230/gofer([/.]|\]|[[:space:]]|$)'
 
 FROM_STDIN=0
 
