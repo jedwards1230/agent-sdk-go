@@ -388,8 +388,11 @@ type SessionCompactionFailed struct {
 	// Messages is the number of provider messages the abandoned compaction
 	// would have replaced.
 	Messages int
-	// Err is the failure message, the string form of the error Compact
-	// returned.
+	// Err is the failure message. Usually the string form of the error
+	// Compact returned — but the panic and [runtime.Goexit] paths return no
+	// error at all, so for those it is a message this package synthesizes to
+	// name the cause. Treat it as human-readable text, not as something to
+	// parse or compare against a sentinel.
 	Err string
 }
 
