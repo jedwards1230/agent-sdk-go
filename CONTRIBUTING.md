@@ -75,11 +75,49 @@ are all in [`docs/TESTING.md`](docs/TESTING.md).
 Keep documentation current as part of the change, not as a follow-up — update
 the README and `docs/` in the same PR.
 
+**When a change makes a doc claim false, the claim is part of the diff.** Every
+late defect found in the benchmark/compaction round was of one shape: a
+statement that was true when written and that a later change in the same round
+falsified — a script header naming the command it no longer runs, a doc
+pointing at `Subscription.Forced` after a second cut-off path existed, a
+"nothing was journaled" claim after the `Sync`-failure path was understood.
+None was a code defect; the shipped behavior was right every time.
+
+They surface late because per-PR review structurally cannot catch them: a
+reviewer reading added lines cannot see a sentence three files away that just
+became wrong. So when you change behavior, grep for prose that describes it —
+the sentence you have to fix is usually not in the file you edited.
+
 ## Known false positives
 
 Findings the automated review has raised that were refuted with evidence.
 Refute with a command someone else can re-run, not an assertion — and only add
 an entry once you have.
+
+### "`SessionCompactionFailed.Err`'s doc omits the panic / `runtime.Goexit` paths"
+
+Raised on
+[#141](https://github.com/jedwards1230/agent-sdk-go/pull/141) against
+`event/event.go`, asking that the doc mention the two exits that return no
+error. It already did, at both doc sites, on the exact commit the review read
+(`f62d971`):
+
+```bash
+git show f62d971:event/event.go | sed -n '377,382p'   # type-level doc
+git show f62d971:event/event.go | sed -n '408,413p'   # field-level doc
+```
+
+The type-level doc reads "…the string form of the same error
+`runner.Runner.Compact` returns (or, for the two exits that return nothing, a
+message naming the panic or the Goexit)", and the field doc names
+`runtime.Goexit` explicitly. The finding quotes only the leading clause and
+stops before the parenthetical that answers it.
+
+Worth knowing because the *first* pass of this same finding, one commit
+earlier, was real — the field doc genuinely was stale then and was fixed in
+[#147](https://github.com/jedwards1230/agent-sdk-go/pull/147). A re-raise
+against a fixed tree reads identically to the original. Check the doc on the
+reviewed SHA before treating a repeat as outstanding work.
 
 ### "Returning `&param` stores a dangling pointer to the stack"
 
