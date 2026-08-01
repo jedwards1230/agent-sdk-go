@@ -1,9 +1,13 @@
 package announce
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/jedwards1230/agent-sdk-go/device"
 )
@@ -52,17 +56,44 @@ type Payload struct {
 	Sessions []SessionSummary `json:"sessions,omitempty" yaml:"sessions,omitempty"`
 
 	// Credential is the opaque credential slot. See [Credential]: the SDK
-	// carries it and does nothing else with it.
-	Credential Credential `json:"credential,omitempty" yaml:"credential,omitempty"`
-
-	// DeviceKey is this device's session-encryption public key — the field the
-	// key from the sealed-envelope work rides in, so a client can seal an
-	// envelope for this server that a relay in the middle cannot open.
+	// carries it and does nothing else with it. Optional.
 	//
-	// The zero key means "no key advertised" and is accepted: a deployment that
-	// has not adopted sealed envelopes announces without one. Readers test
-	// presence with device.PublicKey.Valid, never against the encoded form —
-	// the zero key encodes as its all-zero base64 string, not as an empty one.
+	// The tags differ between the two codecs on purpose, and both are load
+	// bearing. Credential is a struct, and encoding/json's omitempty does NOT
+	// omit a zero struct — only Go 1.24+'s omitzero does (via the IsZero
+	// method). yaml.v3, meanwhile, does not know the word "omitzero" at all:
+	// an unrecognized flag makes it PANIC at marshal time, and its omitempty
+	// already omits a zero struct (it consults IsZero through its own
+	// IsZeroer interface). So: omitzero for JSON, omitempty for YAML. Both
+	// were measured, not assumed; TestPayloadOmitsEmptyCredential pins the
+	// emitted bytes.
+	Credential Credential `json:"credential,omitzero" yaml:"credential,omitempty"`
+
+	// DeviceKey is this device's session-encryption public key: the key a
+	// client seals an envelope to, so a relay in the middle carries session
+	// content it cannot read. REQUIRED — [Payload.Validate] rejects the zero
+	// key.
+	//
+	// A keyless server is not a degraded server, it is one that cannot take
+	// part. End-to-end encryption is a hard requirement of this protocol, and
+	// a server with no key offers nothing an envelope can be sealed to.
+	// Accepting a keyless announce would open a silent downgrade path: a
+	// client reads a well-formed, validated payload, finds no key, and either
+	// falls back to cleartext or fails at the first envelope — in both cases
+	// having already trusted a peer it can never encrypt to. Rejecting it in
+	// Validate makes that failure loud, early, and impossible to miss.
+	//
+	// This does not change device.PublicKey. The zero key stays
+	// REPRESENTABLE and stays PARSEABLE — a fixed-size array leaves no room
+	// for an "absent" state, and device.ParsePublicKey must accept a
+	// well-formed all-zero encoding like any other. It is simply no longer
+	// VALID IN A PAYLOAD. That is the same parse-versus-validity split
+	// device.PublicKey.Valid documents, applied one level up: parsing says the
+	// bytes are well formed, validity says the value is usable here.
+	//
+	// Readers still test presence with device.PublicKey.Valid, never against
+	// the encoded form — the zero key encodes as its all-zero base64 string,
+	// not as an empty one.
 	DeviceKey device.PublicKey `json:"device_key" yaml:"device_key"`
 
 	// Scope is the capability the holder of this payload is being granted. It
@@ -161,15 +192,214 @@ type SessionSummary struct {
 // back to the server, carried verbatim.
 //
 // The SDK NEVER touches it. It does not fetch it, mint it, refresh it, expire
-// it, validate it, decode it, or interpret it — it is a string to this package
-// and nothing more. That is why it is not a parsed token type: giving it
-// structure here would imply the SDK understands (and therefore must keep up
+// it, validate it, decode it, or interpret it — it is an opaque string to this
+// package and nothing more. That is why it is not a parsed token type: giving
+// it structure here would imply the SDK understands (and therefore must keep up
 // with) whatever scheme the application chose. Issuing and checking credentials
 // is the application's job, on both ends.
 //
 // It is optional. A deployment that authenticates some other way announces
 // without one.
-type Credential string
+//
+// # Why it is a struct with a hidden pointer field
+//
+// The value is a bearer secret: whoever holds it can act as the holder of this
+// payload. The obvious modelling — a defined string type — puts that secret one
+// careless format verb away from a log line, because a [Payload] is exactly the
+// sort of value that gets printed while debugging. Wrapping it means the raw
+// string is reachable only through [Credential.Reveal], so `grep -rn Reveal`
+// enumerates every legitimate read of the secret in a codebase.
+//
+// # Exactly what printing covers
+//
+// Under EVERY format verb — %v, %+v, %#v, %s, %q, %x, and the verbs the type
+// was never meant for like %d and %t — the secret does not appear when the
+// value is reached through an EXPORTED path:
+//
+//   - a [Credential] or a *Credential printed directly;
+//   - a [Payload] or a *Payload, and a slice or map of either;
+//   - any of those held in an exported field of another struct;
+//   - the verb-less wrappers — fmt.Print, fmt.Sprint, fmt.Sprintln — and the
+//     implicit %v inside fmt.Errorf.
+//
+// [Credential.Format] is what buys that. fmt consults a [fmt.Formatter] before
+// every other method and for every verb, whereas it reaches a [fmt.Stringer]
+// only for %v, %s, %q, %x and %X. A redacting String alone was considered and
+// rejected: measured, before Format existed, %d on a struct holding a
+// Credential printed `{{%!d(string=s3cr3t)}}` — the secret, in clear. Partial
+// protection that looks total is worse than none, because it invites false
+// confidence.
+//
+// # The one path where the redaction methods are bypassed
+//
+// A [Payload] reached through another struct's UNEXPORTED field:
+//
+//	type client struct{ p announce.Payload }
+//	fmt.Sprintf("%+v", client{p})
+//
+// fmt only calls Format, String or GoString when the reflected value it holds
+// reports CanInterface, and that is false for anything reached through an
+// unexported field. It falls through to reflection over the struct instead, and
+// reflection does not care that Credential's own field is unexported either.
+//
+// That is why value is a *string and not a string. fmt renders a pointer at
+// depth > 0 as a hex address and never follows it, so the reflection dump above
+// yields `Credential:{value:0x14000120020}` — an address, not the secret. The
+// redaction METHODS are bypassed on this path; the secret still does not print.
+// Measured both ways, and pinned by
+// TestCredentialDoesNotLeakThroughFormatting.
+//
+// # Serialization is open on purpose — structured logging included
+//
+// This is containment, not encryption, and the boundary is drawn deliberately:
+// the JSON and YAML codecs carry the REAL value, because the credential's whole
+// job is to ride the wire. Treat an encoded payload as secret-bearing.
+//
+// The case that will actually bite is a structured-log call, so it is named
+// here rather than left to be discovered:
+//
+//	slog.New(slog.NewJSONHandler(w, nil)).Info("m", "payload", p)
+//
+// emits the credential IN CLEAR. slog's JSON handler resolves the value through
+// [Credential.MarshalJSON], not through fmt, so no redaction runs — the same is
+// true of any handler that marshals rather than formats. Log a payload's
+// ServerID; do not log the payload.
+type Credential struct {
+	// The zero-width func field makes Credential NON-COMPARABLE on purpose.
+	// value is a pointer, so `c1 == c2` would compare ADDRESSES rather than
+	// secrets: two credentials carrying the same string would compare unequal,
+	// silently and plausibly. A compile error is strictly better than a silent
+	// wrong answer in a security type. Compare with [Credential.Reveal], or
+	// with reflect.DeepEqual, which follows the pointer.
+	//
+	// It costs nothing one level up: [Payload] holds slices and is already
+	// non-comparable.
+	_ [0]func()
+
+	// value is nil when no credential is announced. The empty string and "no
+	// credential" have exactly ONE representation — nil — so a decoded payload
+	// is reflect.DeepEqual to the one it was encoded from; see NewCredential.
+	value *string
+}
+
+// NewCredential wraps s as a Credential. The empty string yields the zero
+// Credential, which is what "no credential announced" means — the two are the
+// same value, not merely equivalent, so a "" that survives a round trip through
+// either codec comes back reflect.DeepEqual to the zero Credential.
+func NewCredential(s string) Credential {
+	if s == "" {
+		return Credential{}
+	}
+	return Credential{value: &s}
+}
+
+// Reveal returns the raw credential. It is the ONLY way to read the value, and
+// that is the point: every legitimate use of the secret is a call to a method
+// named Reveal, so they are all greppable in a codebase and all reviewable.
+//
+// Call it where the value goes on the wire. Do not park the result in a
+// variable, put it in an error, or hand it to a logger — the wrapper stops
+// being worth anything the moment a bare string escapes.
+//
+// The zero Credential reveals the empty string.
+func (c Credential) Reveal() string {
+	if c.value == nil {
+		return ""
+	}
+	return *c.value
+}
+
+// IsZero reports whether no credential is set.
+//
+// It is also load-bearing for both codecs: encoding/json's omitzero calls it,
+// and yaml.v3's omitempty calls it through that package's IsZeroer interface.
+// Changing it changes what gets emitted — see the tags on
+// [Payload.Credential].
+func (c Credential) IsZero() bool { return c.value == nil }
+
+// String implements [fmt.Stringer] with a redacted form: "[redacted]" when a
+// credential is set, and the empty string when none is. It NEVER returns the
+// value.
+func (c Credential) String() string {
+	if c.value == nil {
+		return ""
+	}
+	return "[redacted]"
+}
+
+// GoString implements [fmt.GoStringer] so %#v redacts too. It deliberately
+// emits something that is not valid Go source for reconstructing the value —
+// there is no round trip through a debug print.
+func (c Credential) GoString() string {
+	if c.value == nil {
+		return "announce.Credential{}"
+	}
+	return "announce.Credential{/* redacted */}"
+}
+
+// Format implements [fmt.Formatter], which fmt consults before every other
+// method and for EVERY verb. That is why it exists.
+//
+// String and GoString are not sufficient on their own. fmt only reaches a
+// Stringer for %v, %s, %q, %x and %X; any other verb falls through to
+// reflection over the struct's fields, and reflection does not care that the
+// field is unexported. Measured, before this method existed: %d on a struct
+// holding a Credential printed `{{%!d(string=s3cr3t)}}` — the secret, in
+// clear. Format routes every verb through the redacted forms instead, and
+// reports an unsupported verb the way fmt itself does rather than quietly
+// rendering a redaction as if it were the value.
+func (c Credential) Format(f fmt.State, verb rune) {
+	switch verb {
+	case 'v':
+		if f.Flag('#') {
+			_, _ = io.WriteString(f, c.GoString())
+			return
+		}
+		_, _ = io.WriteString(f, c.String())
+	case 's':
+		_, _ = io.WriteString(f, c.String())
+	case 'q':
+		_, _ = fmt.Fprintf(f, "%q", c.String())
+	default:
+		_, _ = fmt.Fprintf(f, "%%!%c(announce.Credential=%s)", verb, c.String())
+	}
+}
+
+// MarshalJSON implements [json.Marshaler] and emits the REAL credential, not
+// the redaction. Serializing a payload is how the credential reaches the peer
+// that must present it back; a redacting codec would break the protocol while
+// looking safe. Redaction is a defence against accidental printing, not against
+// deliberate serialization — treat encoded payloads as secret-bearing.
+func (c Credential) MarshalJSON() ([]byte, error) { return json.Marshal(c.Reveal()) }
+
+// UnmarshalJSON implements [json.Unmarshaler]. A JSON null and an empty string
+// both decode to the zero Credential — see [NewCredential] on why "" has
+// exactly one representation.
+func (c *Credential) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return fmt.Errorf("announce: unmarshal credential: %w", err)
+	}
+	*c = NewCredential(s)
+	return nil
+}
+
+// MarshalYAML implements yaml.Marshaler and, like [Credential.MarshalJSON],
+// emits the REAL credential. yaml.v3 does not consult encoding.TextMarshaler,
+// so this pair is not redundant with the JSON pair.
+func (c Credential) MarshalYAML() (any, error) { return c.Reveal(), nil }
+
+// UnmarshalYAML implements yaml.Unmarshaler. A YAML null and an empty string
+// both decode to the zero Credential — see [NewCredential] on why "" has
+// exactly one representation.
+func (c *Credential) UnmarshalYAML(n *yaml.Node) error {
+	var s string
+	if err := n.Decode(&s); err != nil {
+		return fmt.Errorf("announce: unmarshal credential: %w", err)
+	}
+	*c = NewCredential(s)
+	return nil
+}
 
 // Scope is the coarse capability a payload grants its holder.
 //
@@ -220,19 +450,26 @@ func (s Scope) Known() bool {
 func (s Scope) CanDrive() bool { return s == ScopeDriver }
 
 // Validate reports whether p is a coherent announce payload: identity present,
-// at least one usable endpoint, well-formed session rows, and a recognized
-// scope. Errors for every failing rule are joined, and each names the field it
-// is about (indexed, for slice elements), so a caller can fix them in one pass.
+// at least one usable endpoint, well-formed session rows, a usable device key,
+// and a recognized scope. Errors for every failing rule are joined, and each
+// names the field it is about (indexed, for slice elements), so a caller can
+// fix them in one pass.
 //
 // It validates SHAPE, not the world. It does not parse, resolve, or reach an
 // [Endpoint.Address] — an address is opaque here (see the package doc) — and it
-// does not judge a [Credential], which the SDK never interprets. It makes no
-// claim about the payload's authenticity: a well-formed payload is not a
-// trusted one.
+// does not judge a [Credential], which the SDK never interprets and which is
+// optional besides. It makes no claim about the payload's authenticity: a
+// well-formed payload is not a trusted one.
 //
-// Payload.DeviceKey needs no rule. device.PublicKey is a fixed-size array, so
-// its only two states are a usable key and the deliberately-absent zero key,
-// and both are accepted — an invalid key is unrepresentable, not unchecked.
+// [Payload.DeviceKey] is REQUIRED and the zero key is rejected. device.PublicKey
+// is a fixed-size array, so a malformed key is unrepresentable and there is no
+// well-formedness left to check — but the zero key IS representable, and it
+// means "no key", which is not a state a payload may be in. End-to-end
+// encryption is a hard requirement of this protocol: a server with no key
+// cannot be sealed to, so a keyless announce would leave a client holding a
+// validated payload for a peer it can never encrypt to — a silent downgrade,
+// discovered late if at all. It is rejected here instead, loudly, at the one
+// point every reader already calls.
 func (p Payload) Validate() error {
 	var errs []error
 	if p.ServerID == "" {
@@ -262,6 +499,9 @@ func (p Payload) Validate() error {
 		if s.LastActive.IsZero() {
 			errs = append(errs, fmt.Errorf("announce: sessions[%d].last_active is required", i))
 		}
+	}
+	if !p.DeviceKey.Valid() {
+		errs = append(errs, errors.New("announce: device_key is required"))
 	}
 	if !p.Scope.Known() {
 		errs = append(errs, fmt.Errorf("announce: scope %q is not recognized (want %q or %q)", string(p.Scope), ScopeObserver, ScopeDriver))

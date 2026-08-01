@@ -2,6 +2,7 @@ package announce
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,10 @@ import (
 // testKey is a 32-byte device public key: the ASCII bytes
 // "0123456789abcdef0123456789abcdef", base64 raw-URL encoded.
 const testKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+
+// testSecret is the credential value the leak tests look for. It is
+// distinctive on purpose: any output containing it came from the credential.
+const testSecret = "opaque.bearer.blob"
 
 func mustKey(t *testing.T) device.PublicKey {
 	t.Helper()
@@ -51,7 +56,7 @@ func validPayload(t *testing.T) Payload {
 				LastActive: time.Date(2026, 7, 26, 1, 5, 0, 0, time.UTC),
 			},
 		},
-		Credential: Credential("opaque.bearer.blob"),
+		Credential: NewCredential(testSecret),
 		DeviceKey:  mustKey(t),
 		Scope:      ScopeDriver,
 	}
@@ -121,12 +126,13 @@ func TestPayloadValidate(t *testing.T) {
 			wantField: "scope",
 		},
 		{
-			name:   "absent device key is accepted",
-			mutate: func(p *Payload) { p.DeviceKey = device.PublicKey{} },
+			name:      "absent device key is rejected",
+			mutate:    func(p *Payload) { p.DeviceKey = device.PublicKey{} },
+			wantField: "device_key",
 		},
 		{
 			name:   "absent credential is accepted",
-			mutate: func(p *Payload) { p.Credential = "" },
+			mutate: func(p *Payload) { p.Credential = Credential{} },
 		},
 		{
 			name:   "no sessions is accepted",
@@ -178,13 +184,13 @@ func TestPayloadValidate(t *testing.T) {
 }
 
 func TestValidateJoinsEveryFailingRule(t *testing.T) {
-	// An empty payload trips the identity, endpoint, and scope rules at once;
-	// a caller should see all of them, not just the first.
+	// An empty payload trips the identity, endpoint, device-key, and scope
+	// rules at once; a caller should see all of them, not just the first.
 	err := Payload{}.Validate()
 	if err == nil {
 		t.Fatal("Validate() on the zero payload = nil, want an error")
 	}
-	for _, field := range []string{"server_id", "account_id", "endpoints", "scope"} {
+	for _, field := range []string{"server_id", "account_id", "endpoints", "device_key", "scope"} {
 		if !strings.Contains(err.Error(), field) {
 			t.Errorf("Validate() = %q, want it to name %q", err, field)
 		}
@@ -218,18 +224,27 @@ func codecs() []codec {
 }
 
 func TestPayloadRoundTrip(t *testing.T) {
-	empty := validPayload(t)
-	empty.DeviceKey = device.PublicKey{}
-	empty.Credential = ""
-	empty.Sessions = nil
-	empty.DisplayName = ""
+	minimal := validPayload(t)
+	minimal.Credential = Credential{}
+	minimal.Sessions = nil
+	minimal.DisplayName = ""
+
+	// The zero device key no longer validates (see Payload.Validate), but it
+	// must still ROUND-TRIP: decoding is not validation, and a peer that sends
+	// a keyless payload has to decode into something a reader can reject
+	// rather than into a decode error.
+	keyless := validPayload(t)
+	keyless.DeviceKey = device.PublicKey{}
 
 	payloads := []struct {
 		name string
 		p    Payload
+		// validates says whether the decoded payload must pass Validate.
+		validates bool
 	}{
-		{"fully populated", validPayload(t)},
-		{"empty key and empty optional fields", empty},
+		{"fully populated", validPayload(t), true},
+		{"empty optional fields", minimal, true},
+		{"zero device key", keyless, false},
 	}
 
 	for _, c := range codecs() {
@@ -252,8 +267,11 @@ func TestPayloadRoundTrip(t *testing.T) {
 				if got.DeviceKey.Valid() != tc.p.DeviceKey.Valid() {
 					t.Errorf("device key presence changed: got Valid()=%v, want %v", got.DeviceKey.Valid(), tc.p.DeviceKey.Valid())
 				}
-				if err := got.Validate(); err != nil {
-					t.Errorf("decoded payload does not validate: %v", err)
+				if err := got.Validate(); (err == nil) != tc.validates {
+					t.Errorf("decoded payload Validate() = %v, want validates=%v", err, tc.validates)
+				}
+				if got.Credential.Reveal() != tc.p.Credential.Reveal() {
+					t.Error("credential value did not survive the round trip")
 				}
 			})
 		}
@@ -399,6 +417,359 @@ func TestScopeMissingFromWireIsNotDriver(t *testing.T) {
 			}
 			if err := p.Validate(); err == nil {
 				t.Error("Validate() = nil, want the missing scope rejected")
+			}
+		})
+	}
+}
+
+// minimalPayload is the smallest valid payload: every optional field left
+// unset, so the emitted bytes show exactly which fields survive omission.
+func minimalPayload(t *testing.T) Payload {
+	t.Helper()
+	return Payload{
+		ServerID:  "s",
+		AccountID: "a",
+		Endpoints: []Endpoint{{Kind: EndpointKindLAN, Address: "h:1"}},
+		DeviceKey: mustKey(t),
+		Scope:     ScopeObserver,
+	}
+}
+
+// TestPayloadOmitsEmptyCredential pins the EMITTED BYTES for both codecs. The
+// tags differ (json omitzero, yaml omitempty) because the two packages disagree
+// about zero structs, and nothing but the wire output proves the pair is right:
+// json's omitempty does not omit a zero struct, and yaml.v3 panics on a tag it
+// does not recognize. An empty credential must be absent from the wire exactly
+// as it was when Credential was a bare string.
+func TestPayloadOmitsEmptyCredential(t *testing.T) {
+	const (
+		wantJSONEmpty = `{"server_id":"s","account_id":"a","endpoints":[{"kind":"lan","address":"h:1","priority":0}],"device_key":"` + testKey + `","scope":"observer"}`
+		wantJSONSet   = `{"server_id":"s","account_id":"a","endpoints":[{"kind":"lan","address":"h:1","priority":0}],"credential":"` + testSecret + `","device_key":"` + testKey + `","scope":"observer"}`
+
+		wantYAMLEmpty = "server_id: s\n" +
+			"account_id: a\n" +
+			"endpoints:\n" +
+			"    - kind: lan\n" +
+			"      address: h:1\n" +
+			"      priority: 0\n" +
+			"device_key: " + testKey + "\n" +
+			"scope: observer\n"
+		wantYAMLSet = "server_id: s\n" +
+			"account_id: a\n" +
+			"endpoints:\n" +
+			"    - kind: lan\n" +
+			"      address: h:1\n" +
+			"      priority: 0\n" +
+			"credential: " + testSecret + "\n" +
+			"device_key: " + testKey + "\n" +
+			"scope: observer\n"
+	)
+
+	tests := []struct {
+		name       string
+		credential Credential
+		wantJSON   string
+		wantYAML   string
+	}{
+		{"empty credential is omitted", Credential{}, wantJSONEmpty, wantYAMLEmpty},
+		{"set credential rides the wire verbatim", NewCredential(testSecret), wantJSONSet, wantYAMLSet},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := minimalPayload(t)
+			p.Credential = tt.credential
+
+			gotJSON, err := json.Marshal(p)
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			if string(gotJSON) != tt.wantJSON {
+				t.Errorf("json bytes:\n got %s\nwant %s", gotJSON, tt.wantJSON)
+			}
+
+			gotYAML, err := yaml.Marshal(p)
+			if err != nil {
+				t.Fatalf("yaml.Marshal: %v", err)
+			}
+			if string(gotYAML) != tt.wantYAML {
+				t.Errorf("yaml bytes:\n got %q\nwant %q", gotYAML, tt.wantYAML)
+			}
+		})
+	}
+}
+
+// client is an entirely ordinary embedder shape: a Payload held in an
+// UNEXPORTED field of another struct. It is in the leak test's subject list
+// because it is the one path where fmt never reaches Credential's redaction
+// methods at all — fmt only calls Format, String or GoString when the reflected
+// value reports CanInterface, and that is false for anything reached through an
+// unexported field, so it falls through to reflection over the struct.
+//
+// Measured against the string-valued Credential this test now guards:
+//
+//	%+v → {p:{... Credential:{value:opaque.bearer.blob} ...}}
+//
+// The secret, in clear. Credential.value is a *string for exactly this reason:
+// fmt renders a pointer at depth > 0 as a hex address and never follows it, so
+// the same dump now yields Credential:{_:[] value:0x14000120020}.
+type client struct{ p Payload }
+
+// TestCredentialDoesNotLeakThroughFormatting is the real gate on [Credential].
+// A Payload is exactly the sort of value that gets printed while debugging, so
+// the secret must survive none of it: not %v on the payload, not %+v, not %s,
+// not %#v, and not a verb the type was never meant for.
+//
+// %d is in the list on purpose. fmt only consults a Stringer for %v, %s, %q, %x
+// and %X; every other verb falls through to reflection, which happily prints an
+// unexported field. Before Credential.Format existed, %d on a struct holding a
+// credential printed `{{%!d(string=s3cr3t)}}` — the value, in clear.
+//
+// The [client] subjects cover the complementary hole: the path where reflection
+// runs no matter what methods Credential has. Those are gated by the field
+// being a pointer, not by Format.
+func TestCredentialDoesNotLeakThroughFormatting(t *testing.T) {
+	p := validPayload(t)
+	if p.Credential.Reveal() != testSecret {
+		t.Fatalf("fixture credential = %q, want %q — this test proves nothing otherwise", p.Credential.Reveal(), testSecret)
+	}
+
+	verbs := []struct {
+		name string
+		verb string
+	}{
+		{"default", "%v"},
+		{"field names", "%+v"},
+		{"string", "%s"},
+		{"go syntax", "%#v"},
+		{"quoted", "%q"},
+		{"hex", "%x"},
+		{"upper hex", "%X"},
+		{"decimal", "%d"},
+		{"float", "%f"},
+		{"bool", "%t"},
+	}
+
+	for _, v := range verbs {
+		t.Run(v.name, func(t *testing.T) {
+			subjects := []struct {
+				what string
+				val  any
+			}{
+				{"payload", p},
+				{"payload pointer", &p},
+				{"credential", p.Credential},
+				{"credential pointer", &p.Credential},
+				{"payload slice", []Payload{p}},
+				{"payload map", map[string]Payload{"k": p}},
+				{"payload in an unexported field", client{p}},
+				{"pointer to a struct with an unexported field", &client{p}},
+				{"slice of structs with an unexported field", []client{{p}}},
+				{"credential in an unexported field", struct{ c Credential }{p.Credential}},
+			}
+			for _, s := range subjects {
+				got := fmt.Sprintf(v.verb, s.val)
+				if strings.Contains(got, testSecret) {
+					t.Errorf("fmt.Sprintf(%q, %s) leaked the credential: %s", v.verb, s.what, got)
+				}
+			}
+		})
+	}
+
+	// The convenience wrappers that do not name a verb route through %v, and
+	// are what a careless log line actually calls. fmt.Errorf is the same %v
+	// one indirection later — an error carrying the secret is a log line
+	// carrying the secret.
+	for _, got := range []string{
+		fmt.Sprint(p),
+		fmt.Sprintln(p),
+		fmt.Sprint(p.Credential),
+		fmt.Sprint(client{p}),
+		fmt.Errorf("boom: %v", p).Error(),
+		fmt.Errorf("boom: %v", client{p}).Error(),
+		fmt.Errorf("boom: %+v", client{p}).Error(),
+	} {
+		if strings.Contains(got, testSecret) {
+			t.Errorf("fmt.Sprint-family leaked the credential: %s", got)
+		}
+	}
+}
+
+// TestCredentialEmptyHasOneRepresentation pins the invariant the pointer field
+// makes possible to get wrong: "" and "no credential" must be the SAME value,
+// not two values that merely agree on IsZero. A non-nil pointer to "" would
+// make an encode/decode round trip come back not reflect.DeepEqual to what went
+// in, which is what TestPayloadRoundTrip compares — the failure would show up
+// as a flaky-looking round-trip mismatch far from its cause.
+func TestCredentialEmptyHasOneRepresentation(t *testing.T) {
+	decodeJSON := func(t *testing.T, data string) Credential {
+		t.Helper()
+		var c Credential
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatalf("json.Unmarshal(%s): %v", data, err)
+		}
+		return c
+	}
+	decodeYAML := func(t *testing.T, data string) Credential {
+		t.Helper()
+		var c Credential
+		if err := yaml.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatalf("yaml.Unmarshal(%q): %v", data, err)
+		}
+		return c
+	}
+
+	tests := []struct {
+		name string
+		get  func(*testing.T) Credential
+	}{
+		{"zero value", func(*testing.T) Credential { return Credential{} }},
+		{"NewCredential of the empty string", func(*testing.T) Credential { return NewCredential("") }},
+		{"json empty string", func(t *testing.T) Credential { return decodeJSON(t, `""`) }},
+		{"json null", func(t *testing.T) Credential { return decodeJSON(t, `null`) }},
+		{"yaml empty string", func(t *testing.T) Credential { return decodeYAML(t, `""`) }},
+		{"yaml null", func(t *testing.T) Credential { return decodeYAML(t, `null`) }},
+		{"decoded from a marshalled zero", func(t *testing.T) Credential {
+			data, err := json.Marshal(Credential{})
+			if err != nil {
+				t.Fatalf("json.Marshal: %v", err)
+			}
+			return decodeJSON(t, string(data))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := tt.get(t)
+			if !reflect.DeepEqual(c, Credential{}) {
+				t.Errorf("credential = %#v, want it DeepEqual to the zero Credential", c)
+			}
+			if !c.IsZero() {
+				t.Error("IsZero() = false, want true")
+			}
+			if got := c.Reveal(); got != "" {
+				t.Errorf("Reveal() = %q, want the empty string", got)
+			}
+		})
+	}
+}
+
+// TestCredentialDeepEqualComparesValues is the other half of making Credential
+// non-comparable: `==` is a compile error, so reflect.DeepEqual is the
+// supported structural comparison and it must follow the pointer rather than
+// compare addresses. The announce round-trip tests depend on this.
+func TestCredentialDeepEqualComparesValues(t *testing.T) {
+	a, b := NewCredential(testSecret), NewCredential(testSecret)
+	if !reflect.DeepEqual(a, b) {
+		t.Error("two credentials holding the same secret are not DeepEqual — the pointer is being compared, not the value")
+	}
+	if reflect.DeepEqual(a, NewCredential("other")) {
+		t.Error("credentials holding different secrets compared DeepEqual")
+	}
+	if reflect.DeepEqual(a, Credential{}) {
+		t.Error("a set credential compared DeepEqual to the zero Credential")
+	}
+}
+
+// TestCredentialRedactedForms pins the redactions themselves, so a String that
+// started returning the value would fail here as well as in the formatting
+// test.
+func TestCredentialRedactedForms(t *testing.T) {
+	set := NewCredential(testSecret)
+	if got := set.String(); got == testSecret {
+		t.Fatalf("String() = %q, want a redaction — it must never return the value", got)
+	}
+	if got, want := set.String(), "[redacted]"; got != want {
+		t.Errorf("String() = %q, want %q", got, want)
+	}
+	if got := set.GoString(); strings.Contains(got, testSecret) {
+		t.Errorf("GoString() = %q, want a redaction", got)
+	}
+
+	var zero Credential
+	if got, want := zero.String(), ""; got != want {
+		t.Errorf("zero String() = %q, want %q", got, want)
+	}
+	if got, want := zero.GoString(), "announce.Credential{}"; got != want {
+		t.Errorf("zero GoString() = %q, want %q", got, want)
+	}
+}
+
+// TestCredentialRevealIsTheOnlyReader pins the wrapper's contract: the value
+// goes in through NewCredential and comes back out through Reveal, unchanged.
+func TestCredentialRevealIsTheOnlyReader(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		wantZero   bool
+		wantReveal string
+	}{
+		{name: "empty string is the zero credential", in: "", wantZero: true},
+		{name: "value survives verbatim", in: testSecret, wantReveal: testSecret},
+		{name: "whitespace is not trimmed", in: "  padded  ", wantReveal: "  padded  "},
+		{name: "a literal redaction is still just a value", in: "[redacted]", wantReveal: "[redacted]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCredential(tt.in)
+			if got := c.IsZero(); got != tt.wantZero {
+				t.Errorf("IsZero() = %v, want %v", got, tt.wantZero)
+			}
+			if got := c.Reveal(); got != tt.in {
+				t.Errorf("Reveal() = %q, want %q", got, tt.in)
+			}
+		})
+	}
+	if !(Credential{}).IsZero() {
+		t.Error("the zero Credential reports IsZero() = false")
+	}
+}
+
+// TestCredentialCodecsCarryTheRealValue is the deliberate other half of the
+// redaction story: printing must not reveal the credential, but encoding MUST —
+// the credential's whole job is to ride the wire back to the server.
+func TestCredentialCodecsCarryTheRealValue(t *testing.T) {
+	for _, c := range codecs() {
+		t.Run(c.name, func(t *testing.T) {
+			p := validPayload(t)
+			data, err := c.marshal(p)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(data), testSecret) {
+				t.Fatalf("%s wire form does not carry the credential: %s", c.name, data)
+			}
+			var got Payload
+			if err := c.unmarshal(data, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.Credential.Reveal() != testSecret {
+				t.Errorf("decoded credential = %q, want %q", got.Credential.Reveal(), testSecret)
+			}
+		})
+	}
+}
+
+// TestCredentialDecodesNullAndAbsent covers the two ways a peer says "no
+// credential": omitting the field, and sending an explicit null.
+func TestCredentialDecodesNullAndAbsent(t *testing.T) {
+	wire := []struct {
+		name string
+		data []byte
+		fn   func([]byte, any) error
+	}{
+		{"json absent", []byte(`{"server_id":"s"}`), json.Unmarshal},
+		{"json null", []byte(`{"server_id":"s","credential":null}`), json.Unmarshal},
+		{"yaml absent", []byte("server_id: s\n"), func(b []byte, v any) error { return yaml.Unmarshal(b, v) }},
+		{"yaml null", []byte("server_id: s\ncredential: null\n"), func(b []byte, v any) error { return yaml.Unmarshal(b, v) }},
+	}
+	for _, w := range wire {
+		t.Run(w.name, func(t *testing.T) {
+			var p Payload
+			if err := w.fn(w.data, &p); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !p.Credential.IsZero() {
+				t.Errorf("credential = %q, want the zero credential", p.Credential.Reveal())
 			}
 		})
 	}

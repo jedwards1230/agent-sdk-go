@@ -1177,13 +1177,84 @@ embedder can't see and override" tenet is upheld here.
 Tools`/`ToolsetDigest`/`session.toolset`) yet — the toggle must work before the
 public surface expands to support it; that is a follow-on PR.
 
+## Device keys & sealed envelopes (device/)
+
+`device` is types only: an X25519 `PublicKey`/`KeyPair`, the opaque `Sealed`
+envelope, and the `Seal`/`Open` pair. It opens no socket, fetches no key, and
+models no account, roster, or pairing flow. The private half is unexported and
+never marshalled — persist `PrivateBytes()` and rebuild with
+`KeyPairFromPrivate`.
+
+**Construction: RFC 9180 HPKE in `mode_auth`.** Ciphersuite
+DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20Poly1305, single-shot at
+sequence 0, implemented in `internal/hpke` and checked against the CFRG
+vectors — that vector suite, not the envelope tests, is the standing
+cryptographic gate, because a mutated KEM derivation leaves the wire bytes
+identical. The sender mints a **fresh ephemeral X25519 keypair per envelope**
+(`Sealed.Ephemeral` is its public half); DHKEM's `AuthEncap` derives the shared
+secret from `DH(skE, pkR) || DH(skS, pkR)`. The long-term identity key
+therefore *authenticates* rather than contributing the secret: the ephemeral is
+bound to the identity by that second DH, not by a signature. That is what lets
+the identity key stay X25519 — X25519 cannot sign — and it makes sender
+authentication implicit and deniable.
+
+**What is bound.** The HPKE `info` is `agent-sdk-go/device/sealed/v<version>`,
+so a future v2 cannot key-collide with v1 on the same suite. The AEAD's
+associated data is `I2OSP(version,1) || Sender || Ephemeral`; `Sender` and
+`Ephemeral` are already implicit in the KEM (substituting either derives a
+different secret), so the AAD's real work is covering the version byte, which
+the KEM never sees. Nothing else about an envelope is authenticated because
+there is nothing else — **metadata that must be authenticated belongs inside
+the plaintext**. An attacker may still reorder, drop, replay, or duplicate
+envelopes; only the caller's in-plaintext sequencing detects it.
+
+**Forward secrecy is one-sided, deliberately.** Compromise of the *sender's*
+long-term private key reveals nothing historical — the per-envelope ephemeral
+private key never left the sealing process. Compromise of the *recipient's*
+still does, since the recipient contributes a static key to both DHs. Closing
+that half needs a recipient-contributed ephemeral — an interactive handshake or
+published one-time prekeys — which needs transport and application state a
+one-shot stateless envelope has nowhere to keep. Known and accepted, not an
+oversight.
+
+**Versioning fails CLOSED**, the deliberate opposite of `announce`'s open-set
+enums. `Seal` stamps `SealedVersion`; `Open` and `UnmarshalJSON` reject
+anything else with `ErrUnsupportedVersion`. An unrecognized `EndpointKind` is a
+path you skip, but an unknown envelope version is an unknown *construction*,
+and processing it under v1's rules — or relaying it as understood — is exactly
+the downgrade this rejects. `MarshalJSON` emits `s.Version` verbatim rather
+than substituting `SealedVersion`, so a hand-built envelope cannot be laundered
+into looking current.
+
+**`Open` is not a decryption oracle.** Every cryptographic failure — bad
+encapsulation, wrong sender key, forged tag — returns exactly `ErrOpen`,
+unwrapped and undifferentiated, so a caller learns one bit and nothing more.
+Only structural problems checked *before* any decryption (unsupported version,
+zero recipient, zero sender) are reported distinctly. `internal/hpke.OpenAuth`
+draws the same line at input-length validation: `ErrKeySize` for a caller-side
+length bug, bare `ErrOpen` for everything after it.
+
+**Trust is TOFU, and the pin store is the embedder's.** A successful `Open`
+proves the envelope was sealed by the holder of `Sealed.Sender`'s private key;
+it proves nothing about whether that key is trusted, so the recipient must
+check `Sender` against its own authorized set. `PublicKey.ID` — the first 8
+bytes of SHA-256(key), hex — is the pin handle: derived from the key alone,
+stable, carrying no key material, safe in a log line or a confirmation prompt.
+It is an identifier, never the check; 64 bits collide on purpose, so
+authentication compares full keys. `ErrPinnedKeyMismatch` is a sentinel this
+package never returns — it exists so an embedder can report "this is not the
+device you paired with" distinctly from a generic auth failure. Where pins
+live, how long they last, and when a re-pair is permitted are application state
+and fail the membership test: no pin store, roster, account type, or comparison
+helper ships here.
+
 ## Announce vocabulary (announce/)
 
 `announce.Payload` is the one type a server publishes to describe itself:
 identity (server id, account id, display name), candidate endpoints, coarse
-session summaries, an opaque credential, a `device.PublicKey`, and a capability
-`Scope`. Types only — the package imports no `net`, opens no socket, and knows
-nothing about rosters or fleets. Per the two-gate test, describing yourself is
+session summaries, an optional opaque credential, a **required**
+`device.PublicKey`, and a capability `Scope`. Types only — the package imports
+no `net`, opens no socket, and knows nothing about rosters or fleets. Per the two-gate test, describing yourself is
 vocabulary a second SDK-based app needs unchanged; the mDNS browser, rendezvous
 client, device-code flow, and candidate racing are plumbing that lives in a
 separate module.
@@ -1200,8 +1271,50 @@ is opaque: never parsed, resolved, validated, or dialed here.
 and `CanDrive()` is true only for `ScopeDriver` exactly, so a dropped or
 unrecognized scope can never read as drive access. The field ships now because
 adding it later is breaking, even though enforcement is the application's and
-gets refined over time. `Credential` is a slot the SDK carries and never
-fetches, refreshes, validates, or interprets.
+gets refined over time.
+
+**`DeviceKey` is required**; `Validate` rejects the zero key. End-to-end
+encryption is a hard requirement here, so a keyless server is not a degraded
+server but one that cannot take part — accepting it opens a silent downgrade
+path where a client holds a validated payload for a peer it can never seal an
+envelope to. This does not touch `device.PublicKey`: the zero key stays
+representable and still parses (a fixed-size array has no "absent" state, and
+`ParsePublicKey` must accept a well-formed all-zero encoding), it is simply no
+longer valid *in a payload* — the same parse-versus-validity split
+`PublicKey.Valid` documents, applied one level up. Test presence with `Valid`,
+never against the encoded form, which is an all-zero base64 string rather than
+an empty one.
+
+`Credential` is a slot the SDK carries and never fetches, refreshes, validates,
+or interprets — and it is a struct with an unexported `*string`, not a bare
+string, because a bearer secret inside a `Payload` is one careless format verb
+from a log line. `Reveal()` is the only read, so every legitimate use is
+greppable. `Format` is what makes the redaction total rather than partial: fmt
+consults a `fmt.Formatter` for *every* verb but a `fmt.Stringer` only for
+`%v %s %q %x %X`, and before `Format` existed `%d` on a struct holding a
+credential printed the secret in clear. The boundary, exactly:
+
+- Reached through an **exported** path — the value itself, a pointer, a slice
+  or map, an exported field, the verb-less `fmt.Print` family, the implicit
+  `%v` in `fmt.Errorf` — no verb prints the secret.
+- Reached through another struct's **unexported** field, fmt never calls
+  `Format`/`String`/`GoString` at all (`CanInterface` is false) and falls
+  through to reflection, which does not care that `Credential`'s own field is
+  unexported either. That is why the field is a `*string`: fmt renders a
+  pointer at depth > 0 as an address and never follows it. The redaction
+  methods are bypassed on this path; the secret still does not print.
+- **Serialization carries the real value, on purpose** — both codecs, because
+  the credential's whole job is to ride the wire. That includes structured
+  logging: `slog`'s JSON handler resolves through `MarshalJSON`, not fmt, so it
+  emits the credential in clear. Log a `ServerID`, not a payload; treat an
+  encoded payload as secret-bearing.
+
+`Credential` is also deliberately **non-comparable** (a zero-width `[0]func()`
+field): with a pointer inside, `==` would compare addresses rather than
+secrets, and a compile error beats a silent wrong answer in a security type —
+compare via `Reveal`, or `reflect.DeepEqual`. `NewCredential("")` returns the
+zero `Credential`, so "" and "no credential" have exactly one representation
+and a decoded payload stays `DeepEqual` to the one it was encoded from.
 
 **Not in the compose manifest.** A manifest is static configuration an embedder
 *declares*; an announce payload is runtime state a server *emits* (endpoints

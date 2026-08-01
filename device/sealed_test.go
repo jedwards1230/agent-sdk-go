@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"testing"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
 var (
@@ -62,8 +64,17 @@ func TestSealOpenRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Seal: %v", err)
 			}
+			if sealed.Version != SealedVersion {
+				t.Errorf("Sealed.Version = %d, want %d", sealed.Version, SealedVersion)
+			}
 			if sealed.Sender != sender.Public {
 				t.Errorf("Sealed.Sender = %v, want %v", sealed.Sender, sender.Public)
+			}
+			if sealed.Ephemeral == ([KeySize]byte{}) {
+				t.Error("Sealed.Ephemeral is all zero")
+			}
+			if sealed.Ephemeral == [KeySize]byte(sender.Public) {
+				t.Error("Sealed.Ephemeral is the sender's identity key, not a per-envelope ephemeral")
 			}
 			if bytes.Contains(sealed.Ciphertext, tt.plaintext) && len(tt.plaintext) > 0 {
 				t.Error("ciphertext contains the plaintext")
@@ -79,7 +90,10 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSealFreshNoncePerMessage(t *testing.T) {
+// TestSealFreshEphemeralPerMessage covers the property the whole construction
+// rests on: the KEM contribution is fresh per envelope and is never the
+// sender's long-term identity key.
+func TestSealFreshEphemeralPerMessage(t *testing.T) {
 	sender, recipient := pair(t), pair(t)
 	plaintext := []byte("identical plaintext")
 
@@ -91,20 +105,36 @@ func TestSealFreshNoncePerMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if first.Nonce == second.Nonce {
-		t.Error("two seals reused a nonce")
+	if first.Ephemeral == second.Ephemeral {
+		t.Error("two seals reused an ephemeral key")
 	}
 	if bytes.Equal(first.Ciphertext, second.Ciphertext) {
 		t.Error("two seals of the same plaintext produced identical ciphertext")
 	}
-	if first.Nonce == ([NonceSize]byte{}) {
-		t.Error("nonce is all zero")
+	for i, s := range []Sealed{first, second} {
+		if s.Ephemeral == ([KeySize]byte{}) {
+			t.Errorf("seal %d: ephemeral is all zero", i)
+		}
+		if s.Ephemeral == [KeySize]byte(sender.Public) {
+			t.Errorf("seal %d: ephemeral equals the sender's identity key", i)
+		}
+		if s.Ephemeral == [KeySize]byte(recipient.Public) {
+			t.Errorf("seal %d: ephemeral equals the recipient's identity key", i)
+		}
 	}
 }
 
 func TestOpenRejectsTampering(t *testing.T) {
 	sender, recipient, other := pair(t), pair(t), pair(t)
 	plaintext := []byte("do not tamper")
+
+	// spare is a second, independently sealed envelope: its Ephemeral is a
+	// well-formed X25519 point, so substituting it tests the KEM binding rather
+	// than input validation.
+	spare, err := Seal(nil, recipient.Public, sender, plaintext)
+	if err != nil {
+		t.Fatalf("Seal spare: %v", err)
+	}
 
 	tests := []struct {
 		name    string
@@ -123,8 +153,18 @@ func TestOpenRejectsTampering(t *testing.T) {
 			wantErr: ErrOpen,
 		},
 		{
-			name:    "tampered nonce",
-			mutate:  func(s *Sealed) { s.Nonce[0] ^= 0x01 },
+			name:    "substituted ephemeral",
+			mutate:  func(s *Sealed) { s.Ephemeral = spare.Ephemeral },
+			wantErr: ErrOpen,
+		},
+		{
+			name:    "tampered ephemeral",
+			mutate:  func(s *Sealed) { s.Ephemeral[0] ^= 0x01 },
+			wantErr: ErrOpen,
+		},
+		{
+			name:    "zero ephemeral",
+			mutate:  func(s *Sealed) { s.Ephemeral = [KeySize]byte{} },
 			wantErr: ErrOpen,
 		},
 		{
@@ -136,6 +176,16 @@ func TestOpenRejectsTampering(t *testing.T) {
 			name:    "zero sender key",
 			mutate:  func(s *Sealed) { s.Sender = PublicKey{} },
 			wantErr: ErrInvalidKey,
+		},
+		{
+			name:    "version zero",
+			mutate:  func(s *Sealed) { s.Version = 0 },
+			wantErr: ErrUnsupportedVersion,
+		},
+		{
+			name:    "version two",
+			mutate:  func(s *Sealed) { s.Version = SealedVersion + 1 },
+			wantErr: ErrUnsupportedVersion,
 		},
 		{
 			name:    "wrong recipient keypair",
@@ -220,7 +270,7 @@ func TestSealRejectsBadInput(t *testing.T) {
 		},
 		{
 			name:      "short rand",
-			rand:      &stubReader{data: bytes.Repeat([]byte{0xab}, NonceSize-1)},
+			rand:      &stubReader{data: bytes.Repeat([]byte{0xab}, KeySize-1)},
 			recipient: recipient.Public,
 			sender:    sender,
 			wantErr:   errStubExhausted,
@@ -235,7 +285,7 @@ func TestSealRejectsBadInput(t *testing.T) {
 			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
 				t.Errorf("err = %v, want %v", err, tt.wantErr)
 			}
-			if sealed.Ciphertext != nil || sealed.Nonce != ([NonceSize]byte{}) {
+			if sealed.Ciphertext != nil || sealed.Ephemeral != ([KeySize]byte{}) || sealed.Version != 0 {
 				t.Error("Seal returned envelope material alongside an error")
 			}
 		})
@@ -253,15 +303,41 @@ func TestSealedJSONRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal: %v", err)
 	}
+
+	// The wire form is the relay's contract, so pin its shape: a version
+	// integer, the sender, the encapsulated key, the ciphertext — and no nonce,
+	// which HPKE derives rather than transmits.
+	var raw map[string]any
+	if err := json.Unmarshal(b, &raw); err != nil {
+		t.Fatalf("Unmarshal into map: %v", err)
+	}
+	if got, want := len(raw), 4; got != want {
+		t.Errorf("wire fields = %v, want exactly %d", raw, want)
+	}
+	if v, ok := raw["v"].(float64); !ok || int(v) != SealedVersion {
+		t.Errorf(`wire "v" = %v, want %d`, raw["v"], SealedVersion)
+	}
+	for _, key := range []string{"sender", "enc", "ciphertext"} {
+		if _, ok := raw[key].(string); !ok {
+			t.Errorf("wire %q = %v, want a string", key, raw[key])
+		}
+	}
+	if _, ok := raw["nonce"]; ok {
+		t.Error(`wire carries a "nonce"; HPKE derives the AEAD nonce from the key schedule`)
+	}
+
 	var got Sealed
 	if err := json.Unmarshal(b, &got); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}
+	if got.Version != sealed.Version {
+		t.Errorf("Version = %d, want %d", got.Version, sealed.Version)
+	}
 	if got.Sender != sealed.Sender {
 		t.Errorf("Sender = %v, want %v", got.Sender, sealed.Sender)
 	}
-	if got.Nonce != sealed.Nonce {
-		t.Errorf("Nonce = %x, want %x", got.Nonce, sealed.Nonce)
+	if got.Ephemeral != sealed.Ephemeral {
+		t.Errorf("Ephemeral = %x, want %x", got.Ephemeral, sealed.Ephemeral)
 	}
 	if !bytes.Equal(got.Ciphertext, sealed.Ciphertext) {
 		t.Errorf("Ciphertext = %x, want %x", got.Ciphertext, sealed.Ciphertext)
@@ -277,29 +353,144 @@ func TestSealedJSONRoundTrip(t *testing.T) {
 }
 
 func TestSealedUnmarshalJSONRejectsMalformed(t *testing.T) {
-	valid := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, NonceSize))
-	short := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, NonceSize-1))
-	long := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, NonceSize+1))
+	valid := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, KeySize))
+	short := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, KeySize-1))
+	long := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, KeySize+1))
 	sender := pair(t).Public
 
 	tests := []struct {
-		name string
-		in   string
+		name    string
+		in      string
+		wantErr error
 	}{
-		{name: "short nonce", in: fmt.Sprintf(`{"sender":%q,"nonce":%q,"ciphertext":"AAAA"}`, sender, short)},
-		{name: "long nonce", in: fmt.Sprintf(`{"sender":%q,"nonce":%q,"ciphertext":"AAAA"}`, sender, long)},
-		{name: "empty nonce", in: fmt.Sprintf(`{"sender":%q,"nonce":"","ciphertext":"AAAA"}`, sender)},
-		{name: "nonce not base64", in: fmt.Sprintf(`{"sender":%q,"nonce":"!!!!","ciphertext":"AAAA"}`, sender)},
-		{name: "ciphertext not base64", in: fmt.Sprintf(`{"sender":%q,"nonce":%q,"ciphertext":"!!!!"}`, sender, valid)},
-		{name: "sender not base64", in: fmt.Sprintf(`{"sender":"!!!!","nonce":%q,"ciphertext":"AAAA"}`, valid)},
+		{name: "short enc", in: fmt.Sprintf(`{"v":1,"sender":%q,"enc":%q,"ciphertext":"AAAA"}`, sender, short)},
+		{name: "long enc", in: fmt.Sprintf(`{"v":1,"sender":%q,"enc":%q,"ciphertext":"AAAA"}`, sender, long)},
+		{name: "empty enc", in: fmt.Sprintf(`{"v":1,"sender":%q,"enc":"","ciphertext":"AAAA"}`, sender)},
+		{name: "enc not base64", in: fmt.Sprintf(`{"v":1,"sender":%q,"enc":"!!!!","ciphertext":"AAAA"}`, sender)},
+		{name: "ciphertext not base64", in: fmt.Sprintf(`{"v":1,"sender":%q,"enc":%q,"ciphertext":"!!!!"}`, sender, valid)},
+		{name: "sender not base64", in: fmt.Sprintf(`{"v":1,"sender":"!!!!","enc":%q,"ciphertext":"AAAA"}`, valid)},
 		{name: "not an object", in: `["nope"]`},
+		{
+			name:    "missing version",
+			in:      fmt.Sprintf(`{"sender":%q,"enc":%q,"ciphertext":"AAAA"}`, sender, valid),
+			wantErr: ErrUnsupportedVersion,
+		},
+		{
+			name:    "version zero",
+			in:      fmt.Sprintf(`{"v":0,"sender":%q,"enc":%q,"ciphertext":"AAAA"}`, sender, valid),
+			wantErr: ErrUnsupportedVersion,
+		},
+		{
+			name:    "version two",
+			in:      fmt.Sprintf(`{"v":2,"sender":%q,"enc":%q,"ciphertext":"AAAA"}`, sender, valid),
+			wantErr: ErrUnsupportedVersion,
+		},
+		{
+			name:    "legacy nonce envelope",
+			in:      fmt.Sprintf(`{"sender":%q,"nonce":%q,"ciphertext":"AAAA"}`, sender, valid),
+			wantErr: ErrUnsupportedVersion,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var s Sealed
-			if err := json.Unmarshal([]byte(tt.in), &s); err == nil {
+			err := json.Unmarshal([]byte(tt.in), &s)
+			if err == nil {
 				t.Fatalf("Unmarshal accepted %s", tt.in)
 			}
+			if tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Errorf("err = %v, want %v", err, tt.wantErr)
+			}
 		})
+	}
+}
+
+// TestSealForwardSecrecyAgainstSenderKeyCompromise is the proof obligation for
+// the move to HPKE mode_auth: an attacker who later steals the SENDER's
+// long-term private key must not be able to decrypt an envelope it captured off
+// the relay.
+//
+// The attacker's view is exactly three things — the sender's long-term private
+// key bytes, the recipient's public key, and the envelope's wire JSON — and the
+// recovery attempted is the pre-HPKE one: NaCl box under the static-static
+// X25519 shared secret. The wire is decoded into a map, never into Sealed, so
+// this test compiles and runs against BOTH the old envelope and the new one. It
+// FAILS against the old construction, where that recovery succeeds; that
+// mutation is the evidence, since against the new construction the test can only
+// pass.
+//
+// # What this test does and does not gate, honestly
+//
+// It is the ARTIFACT of that migration, not the standing cryptographic gate.
+// Against the current tree the NaCl recovery has no wire nonce to run under, so
+// what this test now asserts is the WIRE SHAPE: no `nonce` field, and — if one
+// ever reappears — that the static-static recovery still fails under it. A
+// reintroduced nonce field fails here loudly instead of silently skipping the
+// only assertion in the function, which is what it did before.
+//
+// The cryptographic property itself is gated in internal/hpke, by the RFC 9180
+// vector suite. That is not a hope: an independent reviewer mutated authEncap's
+// derivation to dh = DH(skS,pkR) || DH(skS,pkR) — which destroys forward
+// secrecy while leaving the wire shape byte-for-byte identical, so nothing in
+// THIS file could notice — and the vector tests caught it. Look there when
+// changing the KEM; look here when changing the envelope's fields.
+func TestSealForwardSecrecyAgainstSenderKeyCompromise(t *testing.T) {
+	sender, recipient := pair(t), pair(t)
+	plaintext := []byte("compromise the sender key after the fact")
+
+	sealed, err := Seal(nil, recipient.Public, sender, plaintext)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	wire, err := json.Marshal(sealed)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var env map[string]any
+	if err := json.Unmarshal(wire, &env); err != nil {
+		t.Fatalf("Unmarshal wire: %v", err)
+	}
+
+	field := func(key string) ([]byte, bool) {
+		s, ok := env[key].(string)
+		if !ok {
+			return nil, false
+		}
+		b, err := base64.RawURLEncoding.DecodeString(s)
+		if err != nil {
+			return nil, false
+		}
+		return b, true
+	}
+
+	ciphertext, ok := field("ciphertext")
+	if !ok {
+		t.Fatalf("wire carries no decodable ciphertext: %s", wire)
+	}
+	// Assertion 1 — the wire shape. HPKE derives its AEAD nonce from the key
+	// schedule and publishes none, so the absence of this field is something to
+	// ASSERT, not to skip on: a reappearing `nonce` means the envelope grew a
+	// field, which changes what an attacker holding the sender key can attempt.
+	// Errorf, not Fatalf, so assertion 2 still runs and reports under it.
+	if raw, present := env["nonce"]; present {
+		t.Errorf("the envelope grew a wire nonce (%v): HPKE publishes none, so this test's premise no longer holds — re-derive it; wire: %s", raw, wire)
+	}
+
+	// Assertion 2 — the recovery itself, always reached. With a nonce on the
+	// wire this is the original pre-HPKE attack, run verbatim. With none, the
+	// zero nonce stands in: it is the most the attacker can do with the
+	// material the current wire actually gives it, and it keeps this branch
+	// from being a silent no-op.
+	nonceBytes, _ := field("nonce")
+	var nonce [24]byte
+	copy(nonce[:], nonceBytes)
+
+	senderPriv := sender.PrivateBytes()
+	recipientPub := [KeySize]byte(recipient.Public)
+	var shared [32]byte
+	box.Precompute(&shared, &recipientPub, &senderPriv)
+
+	if got, ok := box.OpenAfterPrecomputation(nil, ciphertext, &nonce, &shared); ok {
+		t.Fatalf("the sender's long-term key alone recovered the plaintext %q; there is no forward secrecy against sender key compromise", got)
 	}
 }

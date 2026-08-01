@@ -4,8 +4,20 @@
 //
 // The payload carries six things and nothing else: an identity (server, account,
 // display name), a LIST of candidate [Endpoint] values, coarse [SessionSummary]
-// rows, an opaque [Credential] the SDK never interprets, a device.PublicKey,
-// and a capability [Scope].
+// rows, an optional opaque [Credential] the SDK never interprets, a REQUIRED
+// device.PublicKey, and a capability [Scope].
+//
+// Two of those are secret-adjacent and are modelled accordingly. A [Credential]
+// is a bearer secret, so it hides its value behind [Credential.Reveal] and
+// redacts under every format verb — on every path where fmt will consult a
+// method at all. On the one path where fmt will not, a payload reached through
+// another struct's unexported field, the credential renders as a pointer
+// address rather than the secret. It still serializes verbatim through JSON and
+// YAML, and therefore through a structured logger; [Credential] states the
+// boundary precisely and names the slog case. The device
+// key is mandatory, so [Payload.Validate] rejects the zero key: end-to-end
+// encryption is a hard requirement here, and a server nobody can seal an
+// envelope to must not be able to announce itself as if it could.
 //
 // # What this package deliberately excludes
 //
