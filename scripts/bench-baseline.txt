@@ -1,0 +1,22 @@
+# agent-sdk-go allocation baseline — see docs/TESTING.md.
+#
+# Regenerate DELIBERATELY with scripts/bench.sh --update and review the diff
+# like code. Never regenerate as a reflex because CI is red: the gate going red
+# means either a real allocation regression or a benchmark that changed shape,
+# and both need a human sentence in the PR description.
+#
+# This file is also the ALLOWLIST: bench.sh runs exactly the packages named
+# here and gates exactly the benchmark names here. It contains no session/
+# entries on purpose — those benchmarks belong to another workstream and must
+# not be able to turn this gate red.
+#
+# Captured with: -run='^$' -bench=. -benchmem -benchtime=100x -count=5
+# (median per metric). ns/op is intentionally absent: it is not gated.
+#
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=512	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=64	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=512	8709	1310974
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=64	1091	162361
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=8	137	19128

@@ -20,6 +20,27 @@ Golden-file tests compare event streams against `testdata/*.golden.jsonl`;
 regenerate deliberately with `go test ./compose/... -update` and review the
 diff like code.
 
+The `bench` CI job runs two more gates, both runnable locally:
+
+```bash
+./scripts/check-independence.sh   # no dependency may mention the consuming app
+./scripts/bench.sh --check        # allocs/op and B/op vs scripts/bench-baseline.txt
+./scripts/bench.sh                # just run the gated benchmarks and print them
+./scripts/bench.sh --update       # re-baseline — deliberate, reviewed like code
+```
+
+`--check` gates `allocs/op` and `B/op` at ±1% each (never `ns/op`) against
+serial benchmarks at a fixed iteration count. The tolerance is **symmetric**: a
+benchmark that stops doing its work allocates *less*, so an outsized drop fails
+too and a genuine optimization has to land a `--update` commit. If it goes red,
+decide whether the move is a real regression, a real win, or a benchmark that
+went blind *before* reaching for `--update`, and say which in the PR.
+
+Thresholds, the measured run-to-run spread they were chosen from, the four
+anti-blindness rules for writing benchmarks (including where to hook a guard so
+it proves something), and why a `RunParallel` benchmark must never be baselined
+are all in [`docs/TESTING.md`](docs/TESTING.md).
+
 ## Hard rules
 
 - **The SDK never imports application code.** It must build and test green

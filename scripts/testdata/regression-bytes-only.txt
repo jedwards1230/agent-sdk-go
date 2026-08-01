@@ -1,0 +1,46 @@
+# Synthetic `go test -bench` capture: B/op regressed, allocs/op UNCHANGED
+#
+# Feed it to the gate with:
+#   scripts/bench.sh --check --input scripts/testdata/regression-bytes-only.txt
+#
+# It exists so the comparison logic itself is mutation-tested without having to
+# hand-write a regression into real SDK code every time. It is the signature an allocs-only gate
+# walks straight past, which is why B/op is gated too. It also carries one
+# unbaselined benchmark, which must be reported as ignored rather than fail.
+goos: darwin
+goarch: arm64
+pkg: github.com/jedwards1230/agent-sdk-go/internal/benchguard
+cpu: Apple M2 Pro
+BenchmarkIndexWrap/n=8-12   	     100	     14395 ns/op	   19136 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=8-12   	     100	     12943 ns/op	   19136 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=8-12   	     100	     12517 ns/op	   19136 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=8-12   	     100	     12494 ns/op	   19136 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=8-12   	     100	     13341 ns/op	   19136 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    116426 ns/op	  162474 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    115554 ns/op	  162367 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    231211 ns/op	  162377 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    189427 ns/op	  162432 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    115780 ns/op	  162365 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	    944796 ns/op	 1311024 B/op	    8709 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	    951236 ns/op	 1310936 B/op	    8708 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	    946604 ns/op	 1310949 B/op	    8708 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	    925463 ns/op	 1310951 B/op	    8709 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	   1022698 ns/op	 1310996 B/op	    8709 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       221.2 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       174.6 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       168.3 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       153.8 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       158.3 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       177.9 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       224.2 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       178.3 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       170.0 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       207.9 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       212.9 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       204.2 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       175.8 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       182.9 ns/op	     912 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       160.4 ns/op	     912 B/op	       2 allocs/op
+PASS
+ok  	github.com/jedwards1230/agent-sdk-go/internal/benchguard	0.925s
+BenchmarkSomeoneElsesNewBenchmark-12   	     100	      42.0 ns/op	   99999 B/op	     777 allocs/op
