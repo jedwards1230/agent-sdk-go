@@ -75,11 +75,77 @@ are all in [`docs/TESTING.md`](docs/TESTING.md).
 Keep documentation current as part of the change, not as a follow-up — update
 the README and `docs/` in the same PR.
 
+**When a change makes a doc claim false, the claim is part of the diff.** Every
+late defect found in the benchmark/compaction round was of one shape: a
+statement that was true when written and that a later change in the same round
+falsified — a script header naming the command it no longer runs, a doc
+pointing at `Subscription.Forced` after a second cut-off path existed, a
+"nothing was journaled" claim after the `Sync`-failure path was understood.
+None was a code defect; the shipped behavior was right every time.
+
+They surface late because per-PR review structurally cannot catch them: a
+reviewer reading added lines cannot see a sentence three files away that just
+became wrong. So when you change behavior, grep for prose that describes it —
+the sentence you have to fix is usually not in the file you edited.
+
+## A skipped check is not a passed check
+
+`gh pr checks` prints `skipping` in the same column as `pass`, and a PR whose
+review never ran reads exactly as green as one that passed. **Before merging,
+confirm `review / review` is at a terminal `pass` — not merely non-failing.**
+
+The review workflow skips drafts. Two different situations produce that, and
+they call for opposite responses:
+
+- **The PR is draft because nobody undrafted it.** No review has run and none
+  will. This is the trap: it accumulates commits looking green. Undraft it.
+- **The PR is draft because `claude[bot]` converted it.** That is
+  `draft_on_blocking` — the review *did* run, found blocking findings, and
+  drafted the PR as the signal. Check the timeline before assuming an
+  oversight:
+
+  ```bash
+  gh api repos/<owner>/<repo>/issues/<pr>/timeline \
+    --jq '.[] | select(.event=="convert_to_draft") | "\(.created_at) by \(.actor.login)"'
+  ```
+
+  Fix the findings, resolve the threads, then undraft to re-trigger.
+
+Note also that `ready_for_review` can race a push: if you undraft and push
+together, the only run may be the `synchronize` one that fired while still
+draft, which skips. Push first, let it settle, then undraft — and if a run is
+still missing, close/reopen (`reopened` is in the trigger types).
+
 ## Known false positives
 
 Findings the automated review has raised that were refuted with evidence.
 Refute with a command someone else can re-run, not an assertion — and only add
 an entry once you have.
+
+### "`SessionCompactionFailed.Err`'s doc omits the panic / `runtime.Goexit` paths"
+
+Raised on
+[#141](https://github.com/jedwards1230/agent-sdk-go/pull/141) against
+`event/event.go`, asking that the doc mention the two exits that return no
+error. It already did, at both doc sites, on the exact commit the review read
+(`f62d971`):
+
+```bash
+git show f62d971:event/event.go | sed -n '377,382p'   # type-level doc
+git show f62d971:event/event.go | sed -n '408,413p'   # field-level doc
+```
+
+The type-level doc reads "…the string form of the same error
+`runner.Runner.Compact` returns (or, for the two exits that return nothing, a
+message naming the panic or the Goexit)", and the field doc names
+`runtime.Goexit` explicitly. The finding quotes only the leading clause and
+stops before the parenthetical that answers it.
+
+Worth knowing because the *first* pass of this same finding, one commit
+earlier, was real — the field doc genuinely was stale then and was fixed in
+[#147](https://github.com/jedwards1230/agent-sdk-go/pull/147). A re-raise
+against a fixed tree reads identically to the original. Check the doc on the
+reviewed SHA before treating a repeat as outstanding work.
 
 ### "Returning `&param` stores a dangling pointer to the stack"
 

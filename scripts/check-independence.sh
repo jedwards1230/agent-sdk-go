@@ -2,7 +2,7 @@
 #
 # check-independence.sh — the SDK never imports application code.
 #
-#   scripts/check-independence.sh            check `go list -deps ./...`
+#   scripts/check-independence.sh            check `go list -deps -test ./...`
 #   scripts/check-independence.sh --stdin    check a dependency list on stdin
 #
 # CLAUDE.md architecture invariant #2 says the SDK builds standalone; this makes
@@ -71,9 +71,12 @@ usage() {
 	cat <<'EOF'
 usage: scripts/check-independence.sh [--stdin]
 
-  (no flag)   run `go list -deps ./...` and check its output
+  (no flag)   run `go list -deps -test ./...` and check its output.
+              -test is load-bearing, not incidental: a gofer import reachable
+              only from a _test.go file leaves `go build ./...` green and is
+              invisible to `go list -deps ./...`, which finds ZERO matches.
+              Running the un-flagged form locally does NOT reproduce this gate.
   --stdin     read the dependency list from stdin instead (one path per line)
-              (the default form runs `go list -deps -test ./...`)
 
   The stdin form exists so the check itself is testable: pipe a synthetic list
   containing a gofer path and it must exit non-zero, without touching go.mod.
