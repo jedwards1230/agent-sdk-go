@@ -31,31 +31,103 @@ import (
 	"testing"
 )
 
-// Counter records how many times a benchmark fixture routed real work through
-// it. The zero value is ready to use, and it is safe for concurrent use — not
-// because guarded benchmarks should be parallel (they must not be; see
-// docs/TESTING.md), but so a fixture whose target itself fans out internally
-// still counts correctly.
+// Counter records how many times a callback the measured target invokes was
+// reached, and a digest of the arguments it was handed. The zero value is ready
+// to use, and it is safe for concurrent use — not because guarded benchmarks
+// should be parallel (they must not be; see docs/TESTING.md), but so a target
+// that fans out internally still records correctly.
+//
+// # Where to hook it, and why it matters
+//
+// Hook a Counter into a callback the TARGET owns the calling of — a
+// construction-time option closure, a decorator the target must route through
+// to do its own work — not into a method the benchmark body can call itself.
+// The distinction is the whole guard:
+//
+//	// Weak: the benchmark holds fixture and can call fixture.Specs() directly,
+//	// so the count survives deleting the target from the loop entirely.
+//	sink = fixture.Specs()
+//
+//	// Strong: only toolindex.Index.Wrap ever calls Options.Resident, once per
+//	// indexed entry, with names that could only have come from base.Specs().
+//	toolindex.New(toolindex.Options{Resident: func(n string) bool { c.HitWith(n); … }})
+//
+// See [Check] for the limits of what this can prove.
 type Counter struct {
-	n atomic.Int64
+	n      atomic.Int64
+	digest atomic.Uint64
 }
 
-// Hit records one invocation and returns the new total. A fixture calls it on
-// every path that reaches the measured target, and on no other path — a Hit
-// on a path that does not reach the target is exactly the blindness the guard
-// exists to prevent.
+// Hit records one invocation and returns the new total.
 func (c *Counter) Hit() int64 { return c.n.Add(1) }
+
+// HitWith records one invocation and folds token into the digest, so the
+// assertion can pin WHAT the target passed in and not merely how often it
+// called. Folding is addition of per-token FNV-1a hashes: commutative, so it
+// does not depend on the target's iteration order, and accumulating, so a
+// repeated token is not silently cancelled the way an XOR would cancel it.
+//
+// It allocates nothing, so hooking it into a callback inside a measured loop
+// does not perturb the allocation numbers the gate reads.
+func (c *Counter) HitWith(token string) int64 {
+	c.digest.Add(fold(token))
+	return c.n.Add(1)
+}
 
 // Count reports the invocations recorded so far.
 func (c *Counter) Count() int64 { return c.n.Load() }
 
-// Reset returns the counter to zero. Use it between the setup phase and the
-// measured loop when setup also reaches the target, so the floor is stated
-// purely per measured iteration.
-func (c *Counter) Reset() { c.n.Store(0) }
+// Observe snapshots the counter as a value [Check] can be applied to.
+func (c *Counter) Observe() Observation {
+	return Observation{Count: c.n.Load(), Digest: c.digest.Load()}
+}
+
+// Reset returns the counter to zero, digest included. Use it between the setup
+// phase and the measured loop when setup also reaches the target, so the floor
+// is stated purely per measured iteration.
+func (c *Counter) Reset() {
+	c.n.Store(0)
+	c.digest.Store(0)
+}
+
+// Observation is what a [Counter] recorded: the plain invocation count and the
+// folded digest of every token passed to [Counter.HitWith].
+type Observation struct {
+	Count  int64
+	Digest uint64
+}
+
+// Digest folds tokens the same way [Counter.HitWith] does, so a benchmark can
+// compute the value it expects the target to have been handed:
+//
+//	want := benchguard.Digest(namesTheIndexMustSee...)
+func Digest(tokens ...string) uint64 {
+	var sum uint64
+	for _, t := range tokens {
+		sum += fold(t)
+	}
+	return sum
+}
+
+// FNV-1a 64-bit. Written out rather than using hash/fnv because that returns an
+// interface whose Write escapes, which would allocate inside a measured loop.
+const (
+	fnvOffset64 uint64 = 14695981039346656037
+	fnvPrime64  uint64 = 1099511628211
+)
+
+func fold(token string) uint64 {
+	h := fnvOffset64
+	for i := 0; i < len(token); i++ {
+		h ^= uint64(token[i])
+		h *= fnvPrime64
+	}
+	return h
+}
 
 // Floor is the contract a guarded benchmark asserts: the target named by Name
-// must be reached at least PerIteration times per measured iteration.
+// must be reached at least PerIteration times per measured iteration, and —
+// when Digest is set — must have been handed exactly the expected tokens.
 //
 // PerIteration is a floor, not an equality, on purpose: a target that is
 // reached more often than the floor is not a blindness failure, and pinning an
@@ -63,25 +135,48 @@ func (c *Counter) Reset() { c.n.Store(0) }
 // benchmark. The floor must be positive — a floor of zero can never fire.
 type Floor struct {
 	// Name identifies the target in failure output, e.g.
-	// "loop.ToolRegistry.Specs via toolindex.Index.Wrap".
+	// "toolindex.Options.Resident via Index.Wrap".
 	Name string
 	// PerIteration is the minimum invocations each measured iteration must
 	// contribute. Document at the call site why it is that number.
 	PerIteration int64
+	// Digest, when non-zero, is the [Digest] of the tokens the target must
+	// have passed to [Counter.HitWith] over ONE iteration. It upgrades the
+	// assertion from "something called this N times" to "the target walked
+	// exactly this data" — a count alone can be produced by a loop that calls
+	// Hit and nothing else, where a digest match additionally requires
+	// reproducing the target's whole argument stream.
+	//
+	// Zero means "not asserted", so a Counter used with plain Hit still works.
+	Digest uint64
 }
 
-// Check is the whole policy, as a pure function: it reports whether counted
-// invocations over iterations measured iterations satisfy f.
+// Check is the whole policy, as a pure function: it reports whether obs, over
+// iterations measured iterations, satisfies f.
 //
 // It is an error, not a pass, when:
 //   - f.PerIteration is not positive (a floor that can never fire is blind),
 //   - iterations is not positive (nothing was measured, so nothing was proven),
-//   - counted is below iterations * f.PerIteration.
+//   - obs.Count is below iterations * f.PerIteration,
+//   - f.Digest is set and obs.Digest is not iterations * f.Digest.
 //
-// The returned error names the target, the expected floor, and the observed
-// count, because the whole point of firing is telling the reader which fixture
-// stopped reaching which target.
-func Check(f Floor, iterations, counted int64) error {
+// # What this proves, and what it cannot
+//
+// The guard is a permanent detector of DRIFT — a fixture or a measured loop
+// that quietly stops doing the work it claims — not a sandbox against a
+// benchmark author who sets out to write a lie. Nothing in Go can make a
+// counter unreachable from the file that owns it, and any claim otherwise is
+// the same overconfidence this package exists to correct.
+//
+// What hooking a target-owned callback buys is that both the count and the
+// argument digest are produced INSIDE the target, from data only the target
+// could have assembled. Faking it stops being a one-line slip during a
+// refactor and becomes a deliberate reconstruction of the target's argument
+// stream — visible in review as exactly that. The numeric gate in
+// scripts/bench.sh is the second, independent line: it fails on an outsized
+// drop as well as a rise, so a benchmark that goes blind and gets cheaper is
+// caught by the numbers even where a guard could be bypassed.
+func Check(f Floor, iterations int64, obs Observation) error {
 	if f.PerIteration <= 0 {
 		return fmt.Errorf("floor %q: PerIteration = %d, must be positive (a zero floor can never fire)",
 			f.Name, f.PerIteration)
@@ -91,25 +186,36 @@ func Check(f Floor, iterations, counted int64) error {
 			f.Name, iterations)
 	}
 	want := iterations * f.PerIteration
-	if counted < want {
-		return fmt.Errorf("floor %q: fixture reached the target %d times over %d iterations, want >= %d (%d/iteration); the fixture is no longer exercising the code this benchmark claims to measure",
-			f.Name, counted, iterations, want, f.PerIteration)
+	if obs.Count < want {
+		return fmt.Errorf("floor %q: target callback reached %d times over %d iterations, want >= %d (%d/iteration); the measured loop is no longer exercising the code this benchmark claims to measure",
+			f.Name, obs.Count, iterations, want, f.PerIteration)
+	}
+	if f.Digest != 0 {
+		// Every iteration must walk the same token set, so the expected total
+		// scales with the iteration count.
+		wantDigest := f.Digest * uint64(iterations)
+		if obs.Digest != wantDigest {
+			return fmt.Errorf("floor %q: argument digest is %#x over %d iterations, want %#x; the target was reached often enough but was handed different data than this benchmark claims to feed it",
+				f.Name, obs.Digest, iterations, wantDigest)
+		}
 	}
 	return nil
 }
 
-// Assert applies [Check] to c's count and fails b on violation. Call it after
-// the measured loop, with the iteration count the loop actually ran:
+// Assert applies [Check] to c's observation and fails b on violation. Call it
+// after the measured loop, with the iteration count the loop actually ran:
 //
 //	var seen benchguard.Counter
-//	base := newFixture(&seen)
+//	target := newTarget(&seen) // seen is hooked into a TARGET-owned callback
 //	var iters int64
 //	b.ReportAllocs()
 //	for b.Loop() {
-//		sink = doWork(base)
+//		sink = doWork(target)
 //		iters++
 //	}
-//	benchguard.Assert(b, benchguard.Floor{Name: "…", PerIteration: 1}, iters, &seen)
+//	benchguard.Assert(b, benchguard.Floor{
+//		Name: "…", PerIteration: 1, Digest: benchguard.Digest(wantTokens...),
+//	}, iters, &seen)
 //
 // iters is counted by the benchmark rather than read from b.N so the assertion
 // does not depend on how the loop was driven (b.Loop, an explicit b.N loop, or
@@ -142,7 +248,7 @@ func assert(r reporter, f Floor, iterations int64, c *Counter) {
 		r.Errorf("benchguard: floor %q: nil Counter", f.Name)
 		return
 	}
-	if err := Check(f, iterations, c.Count()); err != nil {
+	if err := Check(f, iterations, c.Observe()); err != nil {
 		r.Errorf("benchguard: %v", err)
 	}
 }

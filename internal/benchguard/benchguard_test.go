@@ -18,6 +18,7 @@ func TestCheck(t *testing.T) {
 		floor      Floor
 		iterations int64
 		counted    int64
+		digest     uint64
 		wantErr    bool
 		wantSubstr string
 	}{
@@ -53,7 +54,7 @@ func TestCheck(t *testing.T) {
 			iterations: 100,
 			counted:    0,
 			wantErr:    true,
-			wantSubstr: "reached the target 0 times",
+			wantSubstr: "target callback reached 0 times",
 		},
 		{
 			name:       "a multi-invocation floor fires on a single-invocation fixture",
@@ -69,7 +70,7 @@ func TestCheck(t *testing.T) {
 			iterations: 100,
 			counted:    1,
 			wantErr:    true,
-			wantSubstr: "reached the target 1 times",
+			wantSubstr: "target callback reached 1 times",
 		},
 		{
 			name:       "a zero floor is rejected, never passed vacuously",
@@ -115,7 +116,7 @@ func TestCheck(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := Check(tc.floor, tc.iterations, tc.counted)
+			err := Check(tc.floor, tc.iterations, Observation{Count: tc.counted, Digest: tc.digest})
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("Check(%+v, %d, %d) = nil, want an error",
@@ -137,6 +138,133 @@ func TestCheck(t *testing.T) {
 	}
 }
 
+// TestCheckDigest covers the witness half: a count alone can be produced by a
+// loop that calls Hit and nothing else, so the digest has to fire when the
+// target was reached often enough but handed different data.
+func TestCheckDigest(t *testing.T) {
+	names := []string{"read", "write", "mcp__github__issue_list"}
+	perIter := Digest(names...)
+	const iterations = 100
+
+	base := Floor{Name: "resident", PerIteration: int64(len(names)), Digest: perIter}
+
+	t.Run("matching digest is quiet", func(t *testing.T) {
+		obs := Observation{Count: iterations * int64(len(names)), Digest: perIter * iterations}
+		if err := Check(base, iterations, obs); err != nil {
+			t.Fatalf("Check = %v, want nil", err)
+		}
+	})
+
+	t.Run("right count, wrong tokens fires", func(t *testing.T) {
+		// The classic fake: a loop that hits the counter the right number of
+		// times without the target ever assembling the argument stream.
+		obs := Observation{Count: iterations * int64(len(names)), Digest: Digest("x", "y", "z") * iterations}
+		err := Check(base, iterations, obs)
+		if err == nil {
+			t.Fatal("Check = nil, want a digest mismatch error")
+		}
+		if !strings.Contains(err.Error(), "argument digest") {
+			t.Errorf("Check error = %q, want it to mention the argument digest", err)
+		}
+	})
+
+	t.Run("right count, no digest at all fires", func(t *testing.T) {
+		obs := Observation{Count: iterations * int64(len(names))}
+		if err := Check(base, iterations, obs); err == nil {
+			t.Fatal("Check = nil, want an error: a plain Hit loop records no digest")
+		}
+	})
+
+	t.Run("a subset of the tokens fires", func(t *testing.T) {
+		// Indexing fewer tools than claimed: count could still be padded, but
+		// the digest cannot be.
+		obs := Observation{
+			Count:  iterations * int64(len(names)),
+			Digest: Digest(names[:2]...) * iterations,
+		}
+		if err := Check(base, iterations, obs); err == nil {
+			t.Fatal("Check = nil, want an error on a partial token set")
+		}
+	})
+
+	t.Run("zero Digest means not asserted", func(t *testing.T) {
+		f := Floor{Name: "resident", PerIteration: int64(len(names))}
+		obs := Observation{Count: iterations * int64(len(names)), Digest: 12345}
+		if err := Check(f, iterations, obs); err != nil {
+			t.Fatalf("Check = %v, want nil when Floor.Digest is unset", err)
+		}
+	})
+}
+
+// TestDigestFold pins the properties the witness relies on: order independence
+// (the target's iteration order is not part of the contract) and no cancelling
+// on repeats (an XOR fold would silently zero a duplicated token).
+func TestDigestFold(t *testing.T) {
+	if Digest("a", "b", "c") != Digest("c", "a", "b") {
+		t.Error("Digest is order dependent; it must not be")
+	}
+	if Digest("a", "a") == 0 {
+		t.Error("Digest cancels a repeated token; duplicates must accumulate")
+	}
+	if Digest("a", "a") == Digest("a") {
+		t.Error("Digest ignores a repeated token")
+	}
+	if Digest() != 0 {
+		t.Error("Digest of nothing must be 0, the not-asserted sentinel")
+	}
+	if Digest("read") == Digest("reads") {
+		t.Error("Digest collides on a one-character difference")
+	}
+}
+
+// TestCounterHitWith proves the Counter side agrees with the standalone Digest
+// helper — if they ever disagreed, every digest assertion would fire forever
+// and get deleted as noise.
+func TestCounterHitWith(t *testing.T) {
+	names := []string{"read", "write", "edit"}
+
+	var c Counter
+	for range 3 {
+		for _, n := range names {
+			c.HitWith(n)
+		}
+	}
+
+	got := c.Observe()
+	if want := int64(9); got.Count != want {
+		t.Errorf("Count = %d, want %d", got.Count, want)
+	}
+	if want := Digest(names...) * 3; got.Digest != want {
+		t.Errorf("Digest = %#x, want %#x", got.Digest, want)
+	}
+
+	c.Reset()
+	if after := c.Observe(); after.Count != 0 || after.Digest != 0 {
+		t.Errorf("after Reset = %+v, want a zero Observation", after)
+	}
+}
+
+// TestHitWithDoesNotAllocate is load-bearing, not hygiene: the guard is hooked
+// into a closure that runs inside a measured loop, so if folding allocated it
+// would move the very numbers scripts/bench.sh gates on.
+func TestHitWithDoesNotAllocate(t *testing.T) {
+	var c Counter
+	names := benchmarkTokens()
+
+	got := testing.AllocsPerRun(100, func() {
+		for _, n := range names {
+			c.HitWith(n)
+		}
+	})
+	if got != 0 {
+		t.Errorf("HitWith allocated %.1f times per run, want 0", got)
+	}
+}
+
+func benchmarkTokens() []string {
+	return []string{"read", "write", "mcp__github__issue_list", "mcp__postgres__query"}
+}
+
 // TestCheckBoundary walks the count across the floor one invocation at a time,
 // so the exact transition point is pinned rather than inferred from two
 // far-apart samples.
@@ -146,7 +274,7 @@ func TestCheckBoundary(t *testing.T) {
 	const want = iterations * 2
 
 	for counted := want - 3; counted <= want+3; counted++ {
-		err := Check(f, iterations, int64(counted))
+		err := Check(f, iterations, Observation{Count: int64(counted)})
 		wantErr := counted < want
 		if wantErr != (err != nil) {
 			t.Errorf("Check(counted=%d) err = %v, wantErr = %v", counted, err, wantErr)

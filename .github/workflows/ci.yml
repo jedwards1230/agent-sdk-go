@@ -69,26 +69,73 @@ jobs:
       - run: shellcheck scripts/*.sh
       - run: ./scripts/check-independence.sh
       - run: ./scripts/bench.sh --check
-      # The gate's own comparison logic, replayed against committed synthetic
-      # captures: one regression that moves ONLY B/op, and one where a gated
-      # benchmark vanished from the output. Both must fail. Without this, a
-      # broken comparison would report a cheerful OK forever.
-      - name: the gate must fail on a regressed capture
+      # The gate's own logic, replayed against committed synthetic inputs.
+      # Without this, a broken comparison reports a cheerful OK forever — and
+      # every one of these cases was a real hole found in review, not a
+      # hypothetical.
+      #
+      # Exit codes are asserted EXACTLY. A `!` negation would accept 2
+      # ("bench.sh could not run") as if it were 1 ("bench.sh found a
+      # regression"), passing a gate that is merely broken as a gate that works.
+      - name: the gate must fail on regressed, blinded, and unusable inputs
         run: |
           set -uo pipefail
-          for fixture in scripts/testdata/regression-bytes-only.txt \
-                         scripts/testdata/missing-benchmark.txt; do
+          # <expected exit>|<args>
+          cases=(
+            # 1 = a violation was detected and reported
+            "1|--input scripts/testdata/regression-bytes-only.txt"
+            "1|--input scripts/testdata/missing-benchmark.txt"
+            "1|--input scripts/testdata/improvement-collapse.txt"
+            "1|--baseline scripts/testdata/baselines/zero-metrics.txt --input scripts/testdata/regression-bytes-only.txt"
+            # 2 = the baseline is unusable; refuse rather than pass vacuously
+            "2|--baseline scripts/testdata/baselines/malformed.txt --input scripts/testdata/regression-bytes-only.txt"
+            "2|--baseline scripts/testdata/baselines/no-rows.txt --input scripts/testdata/regression-bytes-only.txt"
+            "2|--baseline scripts/testdata/baselines/unmatched-rows.txt --input scripts/testdata/regression-bytes-only.txt"
+          )
+          fails=0
+          for entry in "${cases[@]}"; do
+            want="${entry%%|*}"
+            args="${entry#*|}"
             status=0
-            ./scripts/bench.sh --check --input "$fixture" >/dev/null 2>&1 || status=$?
-            # Exactly 1 (a detected regression). A `!` negation would also
-            # accept exit 2 — bench.sh's "I could not run" status — and pass a
-            # gate that is merely broken as a gate that works.
-            if [ "$status" -ne 1 ]; then
-              echo "::error::$fixture: expected bench.sh --check to exit 1, got $status" >&2
-              exit 1
+            # shellcheck disable=SC2086 # args is a deliberately word-split flag list
+            ./scripts/bench.sh --check $args >/dev/null 2>&1 || status=$?
+            if [ "$status" -ne "$want" ]; then
+              echo "::error::bench.sh --check $args: expected exit $want, got $status"
+              fails=$((fails + 1))
+            else
+              echo "ok (exit $status): bench.sh --check $args"
             fi
-            echo "ok: $fixture correctly failed the gate"
           done
+          [ "$fails" -eq 0 ]
+      # check-independence.sh must be precise in BOTH directions: it has to fire
+      # on the consuming application's module path and stay quiet on an
+      # unrelated module that merely contains the string "gofer". A gate that
+      # cries wolf on someone else's dependency gets switched off.
+      - name: the independence check must be precise in both directions
+        run: |
+          set -uo pipefail
+          sdk=github.com/jedwards1230/agent-sdk-go/loop
+          fails=0
+          assert() { # <expected exit> <dep line>
+            local want="$1" dep="$2" status=0
+            printf '%s\n%s\n' "$sdk" "$dep" | ./scripts/check-independence.sh --stdin >/dev/null 2>&1 || status=$?
+            if [ "$status" -ne "$want" ]; then
+              echo "::error::check-independence.sh on '$dep': expected exit $want, got $status"
+              fails=$((fails + 1))
+            else
+              echo "ok (exit $status): $dep"
+            fi
+          }
+          assert 1 github.com/jedwards1230/gofer
+          assert 1 github.com/jedwards1230/gofer/internal/daemon
+          assert 1 github.com/jedwards1230/gofer.test
+          assert 0 github.com/unrelated/gofergo
+          assert 0 github.com/someone/gofer-utils
+          # An empty or implausible list must refuse, not pass vacuously.
+          status=0
+          printf '' | ./scripts/check-independence.sh --stdin >/dev/null 2>&1 || status=$?
+          [ "$status" -eq 2 ] || { echo "::error::empty stdin: expected exit 2, got $status"; fails=$((fails + 1)); }
+          [ "$fails" -eq 0 ]
 
   race:
     # Both integration-branch prefixes in use. `milestone/*` came first (M5,

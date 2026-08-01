@@ -20,6 +20,14 @@
 # past it. The reverse (pooling bytes into many small allocations) keeps bytes
 # flat and grows the count.
 #
+# The comparison is SYMMETRIC: a move beyond tolerance in either direction
+# fails. A gate that only fires upward cannot see the failure this harness
+# exists to catch — a benchmark that stops doing its work allocates LESS, and
+# an upward-only gate reports that collapse as an improvement. A genuine
+# optimization therefore has to land a --update commit, which is the right
+# outcome: the win becomes explicit and reviewed instead of silently absorbed
+# into the noise floor.
+#
 # The baseline file is the allowlist
 # ----------------------------------
 # It names the packages to run and the benchmarks to gate. A benchmark that
@@ -69,8 +77,8 @@ usage: scripts/bench.sh [--check | --update] [--input FILE] [--baseline FILE]
 environment overrides:
   BENCH_BENCHTIME              (default 100x)   fixed iteration count
   BENCH_COUNT                  (default 5)      repeats; median is taken
-  BENCH_ALLOCS_TOLERANCE_PCT   (default 1)      allocs/op regression tolerance
-  BENCH_BYTES_TOLERANCE_PCT    (default 1)      B/op regression tolerance
+  BENCH_ALLOCS_TOLERANCE_PCT   (default 1)      allocs/op drift tolerance, +/-
+  BENCH_BYTES_TOLERANCE_PCT    (default 1)      B/op drift tolerance, +/-
 EOF
 }
 
@@ -215,32 +223,70 @@ compare() {
 	awk -F'\t' \
 		-v allocs_tol="${ALLOCS_TOLERANCE_PCT}" \
 		-v bytes_tol="${BYTES_TOLERANCE_PCT}" '
-		function limit(base, tol) { return base + (base * tol / 100.0) }
-		function pct(base, obs) { return base == 0 ? 0 : (obs - base) * 100.0 / base }
+		function isnum(v) { return v ~ /^[0-9]+$/ }
+		function pct(base, obs) { return (obs - base) * 100.0 / base }
 
-		function judge(pkg, name, metric, base, obs, tol,   lim) {
-			lim = limit(base, tol)
-			if (obs > lim) {
+		# judge is SYMMETRIC: a move beyond tolerance in EITHER direction fails.
+		#
+		# The upward half is the obvious one. The downward half exists because
+		# the failure this whole harness is built to catch — a benchmark that
+		# stops doing the work it claims — shows up as allocations going DOWN.
+		# Reporting that as "improved, nice work" is the gate cheering for its
+		# own blindness. A genuine optimization is therefore required to land a
+		# re-baseline commit, which is the correct outcome: it makes the win
+		# explicit and reviewed instead of silently absorbed.
+		function judge(pkg, name, metric, base, obs, tol,   hi, lo) {
+			# A zero baseline has no percentage: x/0 is undefined, and the old
+			# code printed a flat "+0.00%" for what could be an unbounded
+			# regression. Treat any nonzero observation against a zero baseline
+			# as a hard failure stated in absolute terms.
+			if (base == 0) {
+				if (obs == 0) return 0
 				printf "REGRESSION  %s\n            %s\n", pkg, name
-				printf "            %-10s baseline %d, observed %d  (delta %+d, %+.2f%%; tolerance %s%% allows up to %.2f)\n",
-					metric ":", base, obs, obs - base, pct(base, obs), tol, lim
+				printf "            %-10s baseline 0, observed %d (delta %+d; percentage undefined against a zero baseline — any allocation here is a regression from none)\n",
+					metric ":", obs, obs
 				return 1
 			}
-			# Only announce an improvement that is bigger than the tolerance.
-			# Reporting a 13-byte drop on a 1.3 MB benchmark as "improved,
-			# re-baseline to lock it in" trains the reader to skip this output,
-			# and skipped output is how a real regression gets waved through.
-			if (obs < base - (base * tol / 100.0)) {
-				printf "improved    %s %s: %s baseline %d, observed %d (%+.2f%%) — re-baseline to lock it in\n",
-					pkg, name, metric, base, obs, pct(base, obs)
+
+			hi = base + (base * tol / 100.0)
+			lo = base - (base * tol / 100.0)
+
+			if (obs > hi) {
+				printf "REGRESSION  %s\n            %s\n", pkg, name
+				printf "            %-10s baseline %d, observed %d  (delta %+d, %+.2f%%; tolerance %s%% allows up to %.2f)\n",
+					metric ":", base, obs, obs - base, pct(base, obs), tol, hi
+				return 1
+			}
+			if (obs < lo) {
+				printf "UNEXPLAINED IMPROVEMENT  %s\n            %s\n", pkg, name
+				printf "            %-10s baseline %d, observed %d  (delta %+d, %+.2f%%; tolerance %s%% allows down to %.2f)\n",
+					metric ":", base, obs, obs - base, pct(base, obs), tol, lo
+				printf "            Either the benchmark stopped doing its work (the blindness this gate exists to catch),\n"
+				printf "            or this is a real optimization. If it is real, lock it in with scripts/bench.sh --update.\n"
+				return 1
 			}
 			return 0
 		}
 
 		FNR == NR {
-			if ($0 ~ /^#/ || NF < 4) next
+			if ($0 ~ /^#/ || $0 ~ /^[ \t]*$/) next
+			if (NF < 4) {
+				printf "MALFORMED   baseline line %d has %d tab-separated fields, want 4: %s\n", FNR, NF, $0
+				malformed++
+				next
+			}
+			# Validate before use. Without this a non-numeric field is coerced
+			# to 0 by awk, which both silently turns the row into a zero
+			# baseline and (because "abc" == 0 is a STRING comparison that is
+			# false) reaches a division by zero. Fail loudly instead.
+			if (!isnum($3) || !isnum($4)) {
+				printf "MALFORMED   baseline line %d: allocs/op \"%s\" and B/op \"%s\" must both be non-negative integers\n", FNR, $3, $4
+				malformed++
+				next
+			}
 			key = $1 SUBSEP $2
-			bpkg[key] = $1; bname[key] = $2; ballocs[key] = $3; bbytes[key] = $4
+			bpkg[key] = $1; bname[key] = $2; ballocs[key] = $3 + 0; bbytes[key] = $4 + 0
+			baselined++
 			next
 		}
 		{
@@ -251,23 +297,41 @@ compare() {
 				next
 			}
 			saw[key] = 1
-			failures += judge($1, $2, "allocs/op", ballocs[key], $3, allocs_tol)
-			failures += judge($1, $2, "B/op", bbytes[key], $4, bytes_tol)
+			failures += judge($1, $2, "allocs/op", ballocs[key], $3 + 0, allocs_tol)
+			failures += judge($1, $2, "B/op", bbytes[key], $4 + 0, bytes_tol)
 			gated++
 		}
 		END {
+			if (malformed > 0) {
+				printf "\nFAIL: %d malformed baseline row(s); refusing to gate against a baseline it cannot parse.\n", malformed
+				exit 2
+			}
 			for (key in ballocs) {
 				if (key in saw) continue
 				printf "MISSING     %s\n            %s\n", bpkg[key], bname[key]
 				printf "            baselined but absent from the benchmark output; deleting or renaming a gated benchmark must be a deliberate --update\n"
 				failures++
 			}
+			# The vacuity backstop. Every path above can only report on rows it
+			# actually compared, so a baseline that yields none would otherwise
+			# print a cheerful OK having gated nothing. This asserts the
+			# positive — work was done — rather than trusting the absence of
+			# complaints, and it stays correct even if the two places that
+			# parse this file ever drift apart.
+			if (baselined == 0) {
+				printf "\nFAIL: the baseline contains no usable rows; refusing to pass vacuously.\n"
+				exit 2
+			}
+			if (gated == 0) {
+				printf "\nFAIL: %d baselined benchmark(s) but ZERO were compared; refusing to pass vacuously.\n", baselined
+				exit 2
+			}
 			if (failures > 0) {
 				printf "\nFAIL: %d allocation gate violation(s) across %d gated benchmark(s).\n", failures, gated
-				printf "If the change genuinely costs more, say why in the PR and run scripts/bench.sh --update.\n"
+				printf "If the change is genuine — in either direction — say why in the PR and run scripts/bench.sh --update.\n"
 				exit 1
 			}
-			printf "\nOK: %d gated benchmark(s) within tolerance (allocs/op %s%%, B/op %s%%).\n",
+			printf "\nOK: %d gated benchmark(s) within tolerance (allocs/op +/-%s%%, B/op +/-%s%%).\n",
 				gated, allocs_tol, bytes_tol
 		}
 	' "${BASELINE}" "${observed}"

@@ -29,12 +29,16 @@ The `bench` CI job runs two more gates, both runnable locally:
 ./scripts/bench.sh --update       # re-baseline — deliberate, reviewed like code
 ```
 
-`--check` gates `allocs/op` and `B/op` at 1% each (never `ns/op`) against
-serial benchmarks at a fixed iteration count. If it goes red, decide whether
-the extra allocation is a real regression or an intended cost *before*
-reaching for `--update`, and say which in the PR. Thresholds, the measured
-run-to-run spread they were chosen from, the four anti-blindness rules for
-writing benchmarks, and why a `RunParallel` benchmark must never be baselined
+`--check` gates `allocs/op` and `B/op` at ±1% each (never `ns/op`) against
+serial benchmarks at a fixed iteration count. The tolerance is **symmetric**: a
+benchmark that stops doing its work allocates *less*, so an outsized drop fails
+too and a genuine optimization has to land a `--update` commit. If it goes red,
+decide whether the move is a real regression, a real win, or a benchmark that
+went blind *before* reaching for `--update`, and say which in the PR.
+
+Thresholds, the measured run-to-run spread they were chosen from, the four
+anti-blindness rules for writing benchmarks (including where to hook a guard so
+it proves something), and why a `RunParallel` benchmark must never be baselined
 are all in [`docs/TESTING.md`](docs/TESTING.md).
 
 ## Hard rules

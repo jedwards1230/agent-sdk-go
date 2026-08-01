@@ -20,25 +20,37 @@ import (
 // every model call in every turn of every session, and Index.Wrap snapshots the
 // entire base tool set into entries + a spec map + two sorts.
 //
-// # Why these two shapes, and why they are not structurally blind
+// # Why these two shapes, and what their guards actually prove
 //
 // A benchmark is structurally blind when nothing in its measured loop can
-// prove it still reaches its target — the fixture regresses to a stub, the
-// numbers fall, and an allocation gate applauds. Both benchmarks here route
-// the real work through a [benchguard.Counter] on a fixture method the target
-// must call, and assert a per-iteration floor after the loop:
+// prove it still reaches its target — the loop drops the target, the numbers
+// fall, and an allocation gate applauds.
 //
-//   - Wrap: toolindex.Index.Wrap calls base.Specs() exactly once
-//     (toolindex/toolindex.go, `ix.buildIndex(base.Specs())`) — verified by
-//     reading it, and it is the only base call Wrap makes. Floor: 1/iteration.
-//   - Project: toolindex.Index.Get delegates to base.Get for every name, on
-//     every call, before consulting its own promotion state
-//     (toolindex/toolindex.go, `t, ok := base.Get(name)`). Floor: 1/iteration.
+// An earlier version of this file counted invocations on the DECORATOR's own
+// Specs method and claimed that was "unreachable without actually entering
+// Wrap". That was false, and an adversarial review proved it: the benchmark
+// body holds the decorator, so `sink = base.Specs()` with toolindex deleted
+// from the loop still counted, allocations fell 29%, and the guard passed.
+// A counter on a method the benchmark can call itself is not tied to the
+// target at all.
 //
-// Index.Specs() alone has NO such seam: it reads only the snapshot taken at
-// Wrap and calls nothing on the base registry. A Specs()-only benchmark could
-// therefore never prove it reached anything, which is why the projection
-// benchmark pairs Get with Specs rather than measuring Specs by itself.
+//   - Wrap hooks the counter into toolindex.Options.Resident — a closure the
+//     TARGET owns the calling of. Verified against toolindex/toolindex.go:
+//     ix.resident is invoked only from buildResident (L202), which is called
+//     only from Wrap (L174), once per indexed entry, and those entries can only
+//     have come from base.Specs() through buildIndex (L173). Floor: n per
+//     iteration, plus a digest over the exact name set. Reaching that count
+//     without entering Wrap means rebuilding the whole entry set by hand.
+//
+//   - Project has NO target-owned callback: Index.Get delegates to base.Get
+//     (L236) and Index.Specs reads only the Wrap snapshot, so its counter is on
+//     the fixture and carries the weakness described above. It is kept because
+//     it still catches the common drift (a loop edited to stop calling Get),
+//     and the blindness case it cannot catch is covered numerically instead:
+//     scripts/bench.sh fails on an outsized DROP as well as a rise, so a
+//     projection loop that stopped doing its work fails the gate on the
+//     numbers. Guard and gate cover each other; neither is claimed to be
+//     sufficient alone.
 //
 // # Why serial, never RunParallel
 //
@@ -84,20 +96,23 @@ func (t benchTool) Run(context.Context, json.RawMessage) (tool.Result, error) {
 	return tool.Result{Content: t.name + "-ok"}, nil
 }
 
-// countingRegistry is a loop.ToolRegistry decorator that routes Get and Specs
-// through counters before delegating to a real base registry. It is the
-// permanent guard seam: it is the ONLY thing between toolindex and the real
-// tool.Registry, so a fixture change that stops reaching the base cannot avoid
-// dropping the count.
+// countingRegistry is a loop.ToolRegistry decorator that counts Get before
+// delegating to a real base registry.
+//
+// This is the WEAK guard shape and is used only where nothing better exists
+// (see BenchmarkIndexProject). The benchmark body holds this value, so it can
+// call the counted method itself; the count therefore proves the fixture is
+// wired, not that the target was entered. Where the target owns a callback —
+// toolindex.Options.Resident — the counter is hooked there instead, and that
+// is the shape to copy.
 //
 // It deliberately does not fabricate specs. Delegating to a real
 // loop.FromRegistry(*tool.Registry) means the benchmark measures toolindex
 // against the shape of registry an embedder actually wires, JSON-marshaled
 // schemas and all — a fake returning a canned slice would measure nothing.
 type countingRegistry struct {
-	base  loop.ToolRegistry
-	specs *benchguard.Counter
-	gets  *benchguard.Counter
+	base loop.ToolRegistry
+	gets *benchguard.Counter
 }
 
 func (r countingRegistry) Get(name string) (loop.Tool, bool) {
@@ -105,10 +120,7 @@ func (r countingRegistry) Get(name string) (loop.Tool, bool) {
 	return r.base.Get(name)
 }
 
-func (r countingRegistry) Specs() []provider.ToolSpec {
-	r.specs.Hit()
-	return r.base.Specs()
-}
+func (r countingRegistry) Specs() []provider.ToolSpec { return r.base.Specs() }
 
 // benchNames returns n deterministic tool names: a few local builtins followed
 // by mcp__<server>__<tool> names spread over four servers, so Entry.Source
@@ -142,7 +154,7 @@ func benchNames(n int) []string {
 // (`if _, ok := ix.specs[SearchToolName]; ok`), so a tool registered under
 // that name exercises the identical forced-resident branch. Skipping the name
 // entirely would silently skip that branch.
-func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter, *benchguard.Counter) {
+func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter) {
 	tb.Helper()
 
 	names := benchNames(n)
@@ -158,8 +170,8 @@ func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter, 
 		tb.Fatalf("bench registry has %d tools, want %d", got, n)
 	}
 
-	specs, gets := &benchguard.Counter{}, &benchguard.Counter{}
-	fixture := countingRegistry{base: loop.FromRegistry(reg), specs: specs, gets: gets}
+	gets := &benchguard.Counter{}
+	fixture := countingRegistry{base: loop.FromRegistry(reg), gets: gets}
 
 	// Warm the process-global caches this fixture touches before anything is
 	// measured. loop.FromRegistry marshals every tool.Schema with
@@ -176,10 +188,9 @@ func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter, 
 	if _, ok := fixture.Get(names[0]); !ok {
 		tb.Fatalf("warmup Get(%q) missed; the fixture is not wired to the registry", names[0])
 	}
-	specs.Reset()
 	gets.Reset()
 
-	return fixture, specs, gets
+	return fixture, gets
 }
 
 // residentCount is how many names benchResident pins: the "handful of builtins
@@ -190,13 +201,28 @@ func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter, 
 // resident-only path at every size.
 const residentCount = 4
 
-// benchResident pins the first residentCount names resident.
-func benchResident(names []string) func(string) bool {
+// benchResident pins the first residentCount names resident, and routes every
+// invocation through seen.
+//
+// This closure is the strong guard seam. toolindex never lets the benchmark
+// body near it: it is handed to toolindex.New as an Options field, and
+// ix.resident is invoked ONLY from buildResident (toolindex.go:202), which runs
+// ONLY from Wrap (toolindex.go:174) — once per indexed entry, with names that
+// buildIndex derived from base.Specs(). So the recorded count is the entry
+// count and the recorded digest is the entry-name set, both assembled inside
+// the target from data the benchmark never handed it directly.
+//
+// It allocates nothing (a map lookup and an FNV fold), so hooking it does not
+// move the numbers the gate reads.
+func benchResident(names []string, seen *benchguard.Counter) func(string) bool {
 	set := make(map[string]bool, residentCount)
 	for _, name := range names[:min(residentCount, len(names))] {
 		set[name] = true
 	}
-	return func(name string) bool { return set[name] }
+	return func(name string) bool {
+		seen.HitWith(name)
+		return set[name]
+	}
 }
 
 // BenchmarkIndexWrap measures index construction: New + Wrap + one Specs
@@ -204,15 +230,18 @@ func benchResident(names []string) func(string) bool {
 // slice, spec map, two sorts — so this is the allocation profile that scales
 // with the number of federated tools.
 //
-// Floor 1/iteration on base.Specs(): Wrap calls it exactly once, and it is
-// unreachable without actually entering Wrap. A fixture that stopped building
-// a real index would drop the count to zero and fail here rather than post a
-// suspiciously good number.
+// The guard hooks toolindex.Options.Resident, which only Wrap invokes, once
+// per indexed entry. Floor: n per iteration, with a digest over the exact
+// entry-name set. Deleting toolindex from the loop drops the count to zero;
+// keeping a call that does not index all n tools breaks the count; indexing a
+// different tool set breaks the digest.
 func BenchmarkIndexWrap(b *testing.B) {
 	for _, n := range benchSizes {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
-			base, specs, _ := newBenchBase(b, n)
-			resident := benchResident(benchNames(n))
+			base, _ := newBenchBase(b, n)
+			names := benchNames(n)
+			var seen benchguard.Counter
+			resident := benchResident(names, &seen)
 
 			var iters int64
 			b.ReportAllocs()
@@ -223,9 +252,10 @@ func BenchmarkIndexWrap(b *testing.B) {
 			}
 
 			benchguard.Assert(b, benchguard.Floor{
-				Name:         "loop.ToolRegistry.Specs via toolindex.Index.Wrap",
-				PerIteration: 1,
-			}, iters, specs)
+				Name:         "toolindex.Options.Resident via Index.Wrap",
+				PerIteration: int64(n),
+				Digest:       benchguard.Digest(names...),
+			}, iters, &seen)
 		})
 	}
 }
@@ -241,16 +271,20 @@ func BenchmarkIndexWrap(b *testing.B) {
 // the first measured iteration be the one that grows the promoted set would
 // make allocs/op depend on -benchtime.
 //
-// Floor 1/iteration on base.Get(): Index.Get delegates to the base for every
-// lookup before consulting its own state, so a fixture that stopped resolving
-// through the real registry drops the count. Specs() has no such seam by
-// itself, which is exactly why it is measured paired with Get and not alone.
+// This one has no target-owned callback to hook: Index.Get delegates to
+// base.Get and Index.Specs reads only the Wrap snapshot, so the floor below
+// sits on the fixture's own method and proves only that the loop still routes
+// through the registry — a real drift check, but not proof the target was
+// entered. The blindness case it cannot see is covered by the numeric gate
+// instead: scripts/bench.sh fails on an outsized DROP as well as a rise, and a
+// projection loop that stopped doing its work cannot hold 2 allocs/op.
 func BenchmarkIndexProject(b *testing.B) {
 	for _, n := range benchSizes {
 		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
-			base, _, gets := newBenchBase(b, n)
+			base, gets := newBenchBase(b, n)
 			names := benchNames(n)
-			ix := toolindex.New(toolindex.Options{Resident: benchResident(names)})
+			var seen benchguard.Counter
+			ix := toolindex.New(toolindex.Options{Resident: benchResident(names, &seen)})
 			wrapped := ix.Wrap(base)
 
 			// The last name is the furthest from the resident set: a

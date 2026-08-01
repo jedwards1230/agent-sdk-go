@@ -1,0 +1,5 @@
+# A baseline with non-numeric metrics. awk would coerce these to 0, silently
+# turning the row into a zero baseline and then dividing by it. Must be a hard
+# parse failure (exit 2), not a comparison.
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	abc	def

@@ -1,0 +1,6 @@
+# A baseline row whose metrics are 0. Percentage against zero is undefined, and
+# an earlier version printed "+0.00%" for an unbounded regression. Gate with:
+#   scripts/bench.sh --check --baseline scripts/testdata/baselines/zero-metrics.txt \
+#       --input scripts/testdata/regression-bytes-only.txt
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	0	0

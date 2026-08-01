@@ -1,0 +1,4 @@
+# A baseline naming a real package but benchmarks that appear nowhere in the
+# output: every row is MISSING and zero rows are compared. Must fail.
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkNoSuchThing/n=1	5	500

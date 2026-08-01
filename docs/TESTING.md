@@ -62,10 +62,25 @@ of these rules exists because the failure mode is *silence*.
    Put a `panic` in the target branch: the new benchmark must hit it, and a
    pre-existing one must not. If neither hits it, the benchmark is measuring
    something else.
-2. **Prefer a permanent guard to a one-off mutation.** A mutation proves the
-   benchmark reached its target *today*. Route the fixture's real work through
-   a closure that counts invocations, assert a documented per-iteration floor
-   after the loop, and it stays proven — see `internal/benchguard`.
+2. **Prefer a permanent guard to a one-off mutation, and hook it where the
+   TARGET owns the call.** A mutation proves the benchmark reached its target
+   *today*; a guard keeps checking. But a counter is only worth what its
+   position buys: counting a method the benchmark body itself can call proves
+   the fixture is wired, not that the target ran. Hook a construction-time
+   option closure the target invokes — `internal/benchguard` counts
+   `toolindex.Options.Resident`, which only `Index.Wrap` ever calls — and
+   assert both a per-iteration floor and a digest of the arguments the target
+   handed it.
+
+   **A guard is not a sandbox.** Nothing in Go makes a counter unreachable from
+   the file that owns it, and this document previously claimed otherwise. An
+   adversarial review disproved it: with the counter on the fixture's own
+   `Specs` method, deleting `toolindex` from the loop entirely still counted,
+   allocations fell 29%, and the guard passed. What a target-owned hook buys is
+   that faking it requires reconstructing the target's whole argument stream,
+   which is visible in review as deliberate rather than slipping in during a
+   refactor. The numeric gate is the independent second line — see the
+   symmetric tolerance below.
 3. **Use the real object, not the package's usual fake.** A fake returning a
    canned value measures nothing. The seed benchmarks wrap a genuine
    `tool.Registry` through `loop.FromRegistry`, JSON-marshaled schemas and all;
@@ -83,6 +98,26 @@ iteration count. `ns/op` is never parsed into the comparison — wall time on a
 shared runner varies by tens of percent, and a gate that fails PRs it has no
 opinion about gets ignored and then disabled.
 
+**The comparison is symmetric.** A move beyond tolerance in *either* direction
+fails. The downward half is not pedantry: a benchmark that stops doing its work
+allocates **less**, so an upward-only gate reports the exact failure this
+harness exists to catch as good news. A verified adversarial fixture drove
+`BenchmarkIndexWrap` from 8709 allocs/op to 0 while satisfying its guard
+completely; the symmetric gate caught it at −100%. A genuine optimization
+therefore has to land a `--update` commit — which is correct, because it makes
+the win explicit and reviewed instead of silently absorbed into the baseline.
+
+A **zero baseline** is handled explicitly rather than as a percentage: `x/0` is
+undefined, so any nonzero observation against a `0` row fails and is reported
+in absolute terms. Benchmarks legitimately sitting at `0 allocs/op` exist
+(`session/journal_bench_internal_test.go` has some), and reporting an unbounded
+regression as `+0.00%` would be the reporting equivalent of not gating it.
+
+The baseline is also validated before it is trusted: non-numeric metrics, rows
+with the wrong field count, a file with no usable rows, and a run that compares
+**zero** rows are each a hard exit-2 failure. Every one of those was a way to
+get a green gate having measured nothing.
+
 Both allocation metrics are gated because they move independently. The classic
 "copy the whole slice on every call" regression holds the allocation **count**
 flat and grows the **bytes** linearly; an allocs-only gate walks straight past
@@ -91,16 +126,18 @@ a fixture so CI re-proves the bytes half of the gate can still fire.
 
 ### Thresholds, and the measurements they came from
 
-| Metric | Tolerance | Worst observed run-to-run spread | Headroom |
+| Metric | Tolerance | Worst observed deviation from baseline (either direction) | Headroom |
 |---|---|---|---|
-| `allocs/op` | 1% | 0.011% (`IndexWrap/n=512`: 8708 ↔ 8709) | ~90× |
-| `B/op` | 1% | 0.018% (`IndexWrap/n=64`: 162363 ↔ 162394) | ~55× |
+| `allocs/op` | ±1% | 0.0115% (`IndexWrap/n=512`: 8708 ↔ 8709) | ~87× |
+| `B/op` | ±1% | 0.0068% (`IndexWrap/n=512`: −89 on 1310974) | ~147× |
 
 Measured over 12 consecutive `bench.sh --check` runs on darwin/arm64 plus 3 on
-linux/amd64 (`-benchtime=100x -count=5`, median per metric). `IndexProject`
-(2 allocs/op, 304 B/op) and `IndexWrap/n=8` (137, 19136) were **bit-identical
-in all 15 runs on both platforms**; only the two larger `IndexWrap` rows moved
-at all, and never by more than the numbers above.
+linux/amd64 (`-benchtime=100x -count=5`, median per metric), all 15 green.
+`IndexProject` (2 allocs/op, 304 B/op) and `IndexWrap/n=8` (137, 19128) were
+**bit-identical in all 15 runs on both platforms**; only the two larger
+`IndexWrap` rows moved at all, and never by more than the numbers above. The
+deviations are two-sided, which is what the symmetric tolerance has to absorb:
+a ±1% band is ~87× the worst drift actually observed in either direction.
 
 1% is therefore ~55–90× the observed noise while still being tight enough to
 catch a real regression: a single extra allocation on the 2-alloc
@@ -157,11 +194,42 @@ the file from the observed run.
 Re-run the gate's own proofs at any time, without touching Go code:
 
 ```bash
-scripts/bench.sh --check --input scripts/testdata/regression-bytes-only.txt  # must exit 1
-scripts/bench.sh --check --input scripts/testdata/missing-benchmark.txt      # must exit 1
+B=scripts/testdata/baselines
+# exit 1 — a violation detected and reported
+scripts/bench.sh --check --input scripts/testdata/regression-bytes-only.txt
+scripts/bench.sh --check --input scripts/testdata/missing-benchmark.txt
+scripts/bench.sh --check --input scripts/testdata/improvement-collapse.txt
+scripts/bench.sh --check --baseline $B/zero-metrics.txt --input scripts/testdata/regression-bytes-only.txt
+# exit 2 — the baseline is unusable; refuse rather than pass vacuously
+scripts/bench.sh --check --baseline $B/malformed.txt      --input scripts/testdata/regression-bytes-only.txt
+scripts/bench.sh --check --baseline $B/no-rows.txt        --input scripts/testdata/regression-bytes-only.txt
+scripts/bench.sh --check --baseline $B/unmatched-rows.txt --input scripts/testdata/regression-bytes-only.txt
+
+# exit 1 — the consuming application's module path, including under it
 printf 'github.com/jedwards1230/agent-sdk-go/loop\ngithub.com/jedwards1230/gofer/daemon\n' \
-  | scripts/check-independence.sh --stdin                                    # must exit 1
+  | scripts/check-independence.sh --stdin
+# exit 0 — an unrelated module that merely contains "gofer" must NOT fire
+printf 'github.com/jedwards1230/agent-sdk-go/loop\ngithub.com/unrelated/gofergo\n' \
+  | scripts/check-independence.sh --stdin
 ```
+
+The `bench` CI job runs this whole matrix, asserting each exit code **exactly**
+— a `!` negation would accept "the script is broken" (exit 2) as if it were
+"the script found a regression" (exit 1).
+
+The independence check runs `go list -deps **-test** ./...` (307 packages, vs
+231 without `-test`). Those ~76 test-only dependencies are the *easiest* place
+for the invariant to break — a test reaching for the application's helpers
+feels harmless while you write it — so leaving them outside the gate would have
+made "the SDK never imports application code" false as written.
+
+It matches the consuming application's full module path
+(`github.com/jedwards1230/gofer`, plus anything under it: `/…` subpackages,
+`.test` synthetic packages, `[pkg.test]` bracket forms), not the bare substring
+`gofer`, which flagged unrelated modules like `github.com/unrelated/gofergo`.
+The trade is that renaming the application means updating the pattern — a
+conscious, greppable event, where a false positive arrives unannounced on
+someone else's PR.
 
 > `rg -rn gofer --include='*.go'` is **not** an independence check. In ripgrep
 > `-r` means `--replace` and `--include` is not a flag, so it fails
@@ -175,11 +243,12 @@ printf 'github.com/jedwards1230/agent-sdk-go/loop\ngithub.com/jedwards1230/gofer
 - `go test -race` on push to main and release tags (fast non-race suite on
   PRs) — see `.github/workflows/ci.yml`.
 - **Allocation gate** (`bench` job, unconditional on every PR and push):
-  `scripts/bench.sh --check` fails on an `allocs/op` or `B/op` regression
-  beyond 1% against `scripts/bench-baseline.txt`, and `check-independence.sh`
-  fails on any dependency mentioning the consuming application. The same job
-  replays two committed synthetic captures to prove the comparison itself can
-  still fail.
+  `scripts/bench.sh --check` fails on an `allocs/op` or `B/op` move beyond
+  ±1% against `scripts/bench-baseline.txt` — in **either** direction — and
+  `check-independence.sh` fails on any dependency under the consuming
+  application's module path, test dependencies included. The same job replays a
+  matrix of committed synthetic inputs to prove both scripts can still fail,
+  and that the independence check does *not* fire on a lookalike module.
 - **Embedder gate**: the SDK builds and tests green with zero application
   imports.
 - Permission-corpus gate: fails if an imported CC `settings.json` rule ever
