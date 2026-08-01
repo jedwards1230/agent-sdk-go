@@ -5,12 +5,13 @@
 #
 # This is the nastiest of the malformed shapes and the one that actually got
 # through: awk coerces "500x" to 500 without complaint, so the row silently
-# became a plausible-looking baseline nobody wrote, and the resulting -99.8%
+# became a plausible-looking baseline nobody wrote, and the resulting -99.6%
 # collapse was reported as "improved". Exit 0, green gate, nothing measured.
 #
-# Unlike a bare "abc" this never trips a division by zero, so there is no crash
-# to notice — it just quietly gates against the wrong numbers. Must be a hard
-# parse failure (exit 2).
+# A bare "abc" does not crash either — judge() catches the coerced zero
+# baseline before pct() divides — but it at least reports something. This shape
+# reports nothing at all: it quietly gates against the wrong numbers. Must be a
+# hard parse failure (exit 2).
 #
 # fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	500x	9000x

@@ -1,5 +1,8 @@
 # A baseline with non-numeric metrics. awk would coerce these to 0, silently
-# turning the row into a zero baseline and then dividing by it. Must be a hard
-# parse failure (exit 2), not a comparison.
+# turning the row into a zero baseline. It does NOT then divide by it: judge()
+# checks base == 0 and returns before pct() is ever called. What you get
+# instead is a REGRESSION blaming a legitimate zero baseline — the right
+# verdict attributed to the wrong cause — or, when the observed value is also
+# 0, a silent pass. Must be a hard parse failure (exit 2), not a comparison.
 # fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	abc	def
