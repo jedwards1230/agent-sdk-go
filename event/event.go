@@ -178,12 +178,26 @@ func (e SessionForked) withMeta(seq uint64, ts time.Time) Event {
 //
 // Its relationship to a terminal event is TOTAL: every Compact that publishes
 // this event goes on to publish exactly one of SessionCompacted (success) or
-// SessionCompactionFailed (the summarizer failed, or the compaction entry
-// failed to append). A client may therefore latch a "compacting" indicator on
-// this event and clear it on either terminal, with no third outcome to leak.
-// Compact's early exits — a cancelled context, an empty folded context
-// (runner.ErrNothingToCompact) — happen before any long-running work and
-// publish NOTHING, so there is no start with no terminal.
+// SessionCompactionFailed (the summarizer failed, the compaction entry failed
+// to append, or the summarizer panicked — the panic is re-raised afterwards,
+// never swallowed). A client may therefore latch a "compacting" indicator on
+// this event and clear it on either terminal. Compact's early exits — a
+// cancelled context, an empty folded context (runner.ErrNothingToCompact) —
+// happen before any long-running work and publish NOTHING, so there is no start
+// with no terminal.
+//
+// The totality is over PUBLISHED events, and there is exactly one way a
+// subscriber sees the start without ever seeing a terminal: the broker
+// force-unsubscribed it. A must-deliver publish blocks up to the broker's bound
+// on a full subscriber buffer and then drops that subscription (see
+// [Broker.Publish] and [Subscription.Forced]). That is not silent — the
+// subscription's channel CLOSES, which is the out-of-band signal to clear a
+// latched indicator — but a client that only ever type-switches on events will
+// not notice it, so a client latching on this event must also treat a closed
+// subscription as clearing the latch. The exposure is real rather than
+// theoretical: an embedder that calls runner.Runner.Compact from inside the
+// same loop that drains its subscription is, by construction, not draining
+// while Compact runs.
 //
 // ReplacesThrough is the journal HEAD the compaction will replace through: the
 // same boundary the terminal event reports, and so the unambiguous correlator
@@ -322,8 +336,9 @@ func (e SessionCompacted) withMeta(seq uint64, ts time.Time) Event {
 
 // SessionCompactionFailed is emitted when a compaction that published a
 // [SessionCompactionStarted] does NOT complete: the summarizer returned an
-// error (including a cancelled context, which surfaces as one), or the
-// compaction entry failed to append to the journal. It is the second of the two
+// error (including a cancelled context, which surfaces as one), the compaction
+// entry failed to append to the journal, or the summarizer panicked (the panic
+// is re-raised after this event goes out). It is the second of the two
 // terminals that make the start's outcome total — see
 // [SessionCompactionStarted] — so a client can clear a latched "compacting"
 // indicator on every path instead of leaving it stuck.
@@ -338,6 +353,14 @@ func (e SessionCompacted) withMeta(seq uint64, ts time.Time) Event {
 // runner.Runner.Compact returns. It is carried because the embedder that CALLED
 // Compact already has that error as a return value but a SECOND attached client
 // does not, and that client is exactly who this pair of events exists for.
+//
+// Error is an UNREDACTED internal error string, on the same terms as
+// SessionError.Err. It can carry an absolute host path (the append path wraps
+// an *os.PathError naming the journal file) or a provider SDK error verbatim
+// (status, request URL, sometimes a response body). That text was previously
+// in-process to Compact's caller and is now on the event bus, so a relay that
+// forwards this stream to a less-trusted client owns the redaction — the SDK
+// reports what failed and never decides who may read it.
 type SessionCompactionFailed struct {
 	meta
 	// ReplacesThrough is the id of the last entry the abandoned compaction

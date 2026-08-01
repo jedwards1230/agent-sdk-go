@@ -87,12 +87,18 @@ func (s *drainingSummarizer) Summarize(_ context.Context, _ runner.SummarizeRequ
 // drainEvents reads every event already delivered to sub, in publish order,
 // without blocking. event.Broker.Publish delivers synchronously under its own
 // lock, so once a publishing call has returned, everything it published is
-// already in the subscription's buffer.
+// already in the subscription's buffer. A closed channel ends the drain (the
+// comma-ok is load-bearing: without it a closed subscription yields nil
+// forever, turning any future ordering slip into a hung test rather than a
+// failing one).
 func drainEvents(sub *event.Subscription) []event.Event {
 	var got []event.Event
 	for {
 		select {
-		case ev := <-sub.C:
+		case ev, ok := <-sub.C:
+			if !ok {
+				return got
+			}
 			got = append(got, ev)
 		default:
 			return got
@@ -701,6 +707,10 @@ func TestRunnerCompactSummarizerFailurePublishesFailed(t *testing.T) {
 func TestRunnerCompactAppendFailurePublishesFailed(t *testing.T) {
 	ctx := context.Background()
 	r, store := newFailingRunner(t, `"type":"compaction"`, textTurns("one", "condensed"))
+	// newFailingRunner registers no cleanup (unlike newCheckpointRunner), so
+	// close explicitly or the run leaks a consume goroutine, a broker
+	// subscription, and an unclosed journal.
+	defer func() { _ = r.Close() }()
 	id := r.ID()
 
 	// The Prompt itself must succeed — otherwise the fault is landing on the
@@ -808,6 +818,71 @@ func TestRunnerCompactCancelledMidSummarizePublishesFailed(t *testing.T) {
 	}
 }
 
+// TestRunnerCompactSummarizerPanicPublishesFailedAndRepanics covers the fourth
+// way out of a compaction that already published a start: a panic. Summarizer
+// is an embedder seam — arbitrary third-party code — so a panic there is a real
+// exit, and a host that recovers at its own per-op boundary (the daemon these
+// events exist for) would latch "compacting" forever without a terminal.
+//
+// It asserts BOTH halves, because either alone would be wrong: the terminal
+// event IS published, and the panic STILL propagates out of Compact carrying
+// its original value. Swallowing an embedder's panic would be a far worse
+// behavior change than the missing event it fixes.
+func TestRunnerCompactSummarizerPanicPublishesFailedAndRepanics(t *testing.T) {
+	ctx := context.Background()
+	const boom = "summarizer exploded"
+
+	panicking := summarizerFunc(func(context.Context, runner.SummarizeRequest) (runner.SummarizeResult, error) {
+		panic(boom)
+	})
+	r := newCheckpointRunner(t, textTurns("one"), func(o *runner.Options) { o.Summarizer = panicking })
+
+	if err := r.Prompt(ctx, "first"); err != nil {
+		t.Fatalf("Prompt: %v", err)
+	}
+	wantBoundary := headEntryID(t, r)
+	before := entryIDs(readEntries(t, r))
+
+	sub := r.EventsLive()
+	defer sub.Close()
+
+	// Call Compact inside a scope that recovers, so the test can assert both
+	// that the panic escaped Compact and what Compact published on the way out.
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = r.Compact(ctx, "")
+		t.Error("Compact returned normally; want the summarizer's panic to propagate out of it")
+	}()
+	if recovered != boom {
+		t.Fatalf("recovered %#v, want the summarizer's own panic value %q — the panic must be re-raised unchanged, never swallowed", recovered, boom)
+	}
+
+	got := drainEvents(sub)
+	want := []string{event.KindSessionCompactionStarted, event.KindSessionCompactionFailed}
+	if !slices.Equal(kindsOf(got), want) {
+		t.Fatalf("published kinds = %v, want %v — a panicking summarizer must still publish its terminal", kindsOf(got), want)
+	}
+	failed, ok := got[1].(event.SessionCompactionFailed)
+	if !ok {
+		t.Fatalf("terminal is %T, want event.SessionCompactionFailed", got[1])
+	}
+	if failed.ReplacesThrough != wantBoundary {
+		t.Errorf("failed.ReplacesThrough = %q, want the start's boundary %q", failed.ReplacesThrough, wantBoundary)
+	}
+	if failed.Messages != got[0].(event.SessionCompactionStarted).Messages {
+		t.Errorf("failed.Messages = %d, want the start's %d", failed.Messages, got[0].(event.SessionCompactionStarted).Messages)
+	}
+	if !strings.Contains(failed.Error, "panicked") || !strings.Contains(failed.Error, boom) {
+		t.Errorf("failed.Error = %q, want it to name the panic and carry %q", failed.Error, boom)
+	}
+
+	// Nothing was journaled: the panic happened before any append.
+	if after := entryIDs(readEntries(t, r)); !slices.Equal(after, before) {
+		t.Errorf("journal = %v after a panicking compaction, want it unchanged %v", after, before)
+	}
+}
+
 // TestRunnerCompactEarlyExitsPublishNoStart asserts the exits ABOVE the
 // summarizer call publish nothing at all. Both happen before any long-running
 // work and before the boundary is fixed, so there is no window to report — and
@@ -864,13 +939,20 @@ func TestRunnerCompactEarlyExitsPublishNoStart(t *testing.T) {
 }
 
 // TestRunnerCompactLegacyConsumerSeesNoChange is the portability check: an
-// embedder that consumes NEITHER new kind must observe exactly what it observed
-// before they existed. Each case drops the two new kinds from what Compact
-// published and pins the remainder against the pre-change contract — one
-// session.compacted with unchanged payload on success, and NOTHING at all on
-// either failure path — alongside Compact's return value and the journal it
-// wrote. Any change to those (a reworded error, an extra published event, a
-// different compaction entry) fails this test.
+// embedder that consumes NEITHER new kind sees no change in the events it DOES
+// decode, in Compact's return value, or in what Compact journals. Each case
+// drops the two new kinds from what Compact published and pins the remainder
+// against the pre-change contract — one session.compacted with unchanged
+// payload on success, and NOTHING at all on either failure path — alongside
+// Compact's error string and the compaction entry it wrote. Any change to those
+// (a reworded error, an extra published event, a different compaction entry)
+// fails this test.
+//
+// The claim is deliberately "no change to what it decodes", not "no change at
+// all": every publish advances the broker's per-session seq and occupies a slot
+// in its bounded replay buffer, so two extra events per compaction do renumber
+// subsequent seq values and shift the replay window ~2 events earlier. Both are
+// inherent to adding any event and are not asserted here.
 func TestRunnerCompactLegacyConsumerSeesNoChange(t *testing.T) {
 	t.Run("success publishes only session.compacted", func(t *testing.T) {
 		ctx := context.Background()
@@ -958,6 +1040,8 @@ func TestRunnerCompactLegacyConsumerSeesNoChange(t *testing.T) {
 	t.Run("append failure publishes nothing", func(t *testing.T) {
 		ctx := context.Background()
 		r, store := newFailingRunner(t, `"type":"compaction"`, textTurns("one", "condensed"))
+		// newFailingRunner registers no cleanup of its own.
+		defer func() { _ = r.Close() }()
 		id := r.ID()
 		if err := r.Prompt(ctx, "first"); err != nil {
 			t.Fatalf("Prompt: %v", err)
