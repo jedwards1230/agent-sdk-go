@@ -275,10 +275,17 @@ compare() {
 				malformed++
 				next
 			}
-			# Validate before use. Without this a non-numeric field is coerced
-			# to 0 by awk, which both silently turns the row into a zero
-			# baseline and (because "abc" == 0 is a STRING comparison that is
-			# false) reaches a division by zero. Fail loudly instead.
+			# Validate before use. awk coerces a non-numeric field with +0,
+			# and the SILENT case is the dangerous one: "500x" becomes 500,
+			# so the row gates against a number nobody wrote and a -99.8%
+			# collapse is reported as an improvement, exit 0. That is the
+			# case scripts/testdata/baselines/numeric-looking.txt locks, and
+			# it is why validating is not merely defensive.
+			#
+			# A fully non-numeric field ("abc") coerces to 0 instead and then
+			# dies on division by zero when the delta is computed — loud, but
+			# only by luck, and it reports an awk source line rather than the
+			# offending baseline row. Fail loudly and specifically for both.
 			if (!isnum($3) || !isnum($4)) {
 				printf "MALFORMED   baseline line %d: allocs/op \"%s\" and B/op \"%s\" must both be non-negative integers\n", FNR, $3, $4
 				malformed++
