@@ -281,14 +281,20 @@ func (c *Client) readLoop(r *bufio.Reader) {
 			select {
 			case <-c.closed:
 				// Deliberate Close shut the transport down: expected, not noise.
+				// Close closes c.closed strictly before transport.Close(), so a
+				// read error caused by Close is always observed here — fail
+				// pending calls with ErrClosed, not the raw transport error, so
+				// a call racing Close sees the documented sentinel whichever of
+				// its select cases wins.
 				c.log.Debug("lsp: read loop stopped on close", "session", c.session)
+				c.failPending(ErrClosed)
 			default:
 				// The transport died on its own (server crash/exit) with no
 				// Close. If no call is in flight, failPending reaches no waiter,
 				// so this is the only signal the connection is gone.
 				c.log.Warn("lsp: read loop stopped on transport error", "session", c.session, "error", err)
+				c.failPending(fmt.Errorf("lsp: connection closed: %w", err))
 			}
-			c.failPending(fmt.Errorf("lsp: connection closed: %w", err))
 			return
 		}
 		var msg inboundMessage
@@ -327,7 +333,9 @@ func (c *Client) deliver(id int64, resp responseMessage) {
 
 // failPending unblocks every still-outstanding call with err — used once, when
 // readLoop exits, so a call blocked on a connection that just died doesn't
-// hang forever waiting on ctx or Close.
+// hang forever waiting on ctx or Close. readLoop classifies err first:
+// [ErrClosed] when a deliberate Close tore the transport down, the wrapped
+// transport error when the connection died on its own.
 func (c *Client) failPending(err error) {
 	c.pendingMu.Lock()
 	pending := c.pending
