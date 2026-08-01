@@ -276,16 +276,23 @@ compare() {
 				next
 			}
 			# Validate before use. awk coerces a non-numeric field with +0,
-			# and the SILENT case is the dangerous one: "500x" becomes 500,
-			# so the row gates against a number nobody wrote and a -99.8%
-			# collapse is reported as an improvement, exit 0. That is the
-			# case scripts/testdata/baselines/numeric-looking.txt locks, and
-			# it is why validating is not merely defensive.
+			# and NEITHER coercion crashes — that is the whole problem. Both
+			# shapes produce a confident, wrong answer:
 			#
-			# A fully non-numeric field ("abc") coerces to 0 instead and then
-			# dies on division by zero when the delta is computed — loud, but
-			# only by luck, and it reports an awk source line rather than the
-			# offending baseline row. Fail loudly and specifically for both.
+			#   "500x" -> 500. The row gates against a number nobody wrote,
+			#   and a -99.8% collapse is reported as an improvement at exit 0.
+			#   This is the one that actually got through; it is what
+			#   scripts/testdata/baselines/numeric-looking.txt locks.
+			#
+			#   "abc"  -> 0. judge() catches base == 0 before pct() is ever
+			#   called, so there is no division by zero. Instead it reports a
+			#   REGRESSION blaming a legitimate zero baseline ("any allocation
+			#   here is a regression from none") — the right verdict attributed
+			#   to the wrong cause, which sends the reader after a phantom
+			#   allocation instead of the malformed row. And when the observed
+			#   value is also 0, judge() returns 0 and the row passes silently.
+			#
+			# Fail loudly and name the offending line instead.
 			if (!isnum($3) || !isnum($4)) {
 				printf "MALFORMED   baseline line %d: allocs/op \"%s\" and B/op \"%s\" must both be non-negative integers\n", FNR, $3, $4
 				malformed++
