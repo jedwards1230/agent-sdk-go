@@ -17,7 +17,7 @@ being "thin".
 | permission engine | unit | every push | table-driven over the `Tool(spec)` grammar + an imported CC-settings corpus |
 | tools | unit | every push | real FS via `t.TempDir()`; git-aware tools run real `git init` in a tempdir |
 | sandbox exec | integ | OS-gated | real subprocess under the real sandbox, build-tagged per OS (Seatbelt on macOS legs, bwrap on Linux) |
-| ACP | integ | every push | small dedicated fake protocol server for request/response fixtures, separate from the loop fakes. MCP joins this lane on the same approach when `mcp/` lands (M5) |
+| ACP | integ | every push | small dedicated fake protocol server for request/response fixtures, separate from the loop fakes. MCP is in this lane on the same approach since `mcp/` landed (M7) |
 
 ## Reasoning-replay matrix
 
@@ -261,8 +261,11 @@ someone else's PR.
 
 ## CI gates
 
-- `go test -race` on push to main and release tags (fast non-race suite on
-  PRs) — see `.github/workflows/ci.yml`.
+- `go test -race` on push to main and release tags, and on any PR into **or**
+  out of a `milestone/*` or `integration/*` integration branch — both `base_ref`
+  and `head_ref` are matched, so the tracking PR (integration branch → main) is
+  gated too, not just the per-piece PRs. Routine PRs keep the fast non-race
+  suite. See `.github/workflows/ci.yml`.
 - **Allocation gate** (`bench` job, unconditional on every PR and push):
   `scripts/bench.sh --check` fails on an `allocs/op` or `B/op` move beyond
   ±1% against `scripts/bench-baseline.txt` — in **either** direction — and

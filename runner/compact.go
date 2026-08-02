@@ -71,7 +71,9 @@ type SummarizeResult struct {
 // tests. Nil [Options.Summarizer] uses [defaultSummarizer].
 type Summarizer interface {
 	// Summarize returns the summary for req.Messages. An error aborts
-	// Compact before anything is journaled or published.
+	// Compact before anything is journaled — the compaction start has
+	// already been published by then, and the error path publishes
+	// [event.SessionCompactionFailed] as its terminal.
 	Summarize(ctx context.Context, req SummarizeRequest) (SummarizeResult, error)
 }
 

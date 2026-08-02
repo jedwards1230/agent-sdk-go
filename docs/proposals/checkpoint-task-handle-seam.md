@@ -54,18 +54,18 @@ and unusually clean. Every claim below is in the current tree.
 
 - **Pinnable identity before creation.** `Store.CreateWithID(ctx, slug, id)`
   (`session/store.go:30-40`) and `runner.Options.SessionID`
-  (`runner/runner.go:61`) let a caller assign a session's id *before the session
+  (`runner/runner.go:77`) let a caller assign a session's id *before the session
   exists* — the seam "a process-isolated worker keyed by that id for its
   socket/lock filenames" uses. Ids are UUIDv7 (`session/session.go:119`),
   time-ordered, fleet-relied-upon.
 
 - **Cross-restart resume + listing.** `FileStore.Open` (`session/store.go:313`)
-  + `runner.Resume(ctx, id, opts)` (`runner/runner.go:189`) rebuild a live
+  + `runner.Resume(ctx, id, opts)` (`runner/runner.go:299`) rebuild a live
   runner from a persisted id and fold prior context on the next `Prompt`.
-  `Store.List` (`store.go:384`) and `ReadEntries(path)` (`store.go:354`)
+  `Store.List` (`store.go:425`) and `ReadEntries(path)` (`store.go:364`)
   enumerate on-disk sessions and their metadata **without resuming** — the
   roster read path. `New` seeds a root `session_meta` entry carrying `Cwd`
-  (`runner/runner.go:176`) so a session is classifiable on disk without a fold.
+  (`runner/runner.go:240`) so a session is classifiable on disk without a fold.
 
 - **Rewind-as-branch, already.** `Journal.Fork(at) (Entry, error)`
   (`session/journal.go:146`) appends a `fork_point` parented on an existing
@@ -79,10 +79,10 @@ and unusually clean. Every claim below is in the current tree.
   [What shipped](#what-shipped).)
 
 - **Extensibility already reserved.** `MetaPayload` is explicitly extensible
-  (`session/entry.go:92-98`). The spawn seam — must-deliver
+  (`session/entry.go:112`). The spawn seam — must-deliver
   `session.spawned{child_id, agent}`, child metadata carrying `parent_id`, depth
   capped at 5 — is already committed as design-ahead M5 work
-  (`docs/DESIGN.md:574-591`).
+  (`docs/DESIGN.md:733-775`).
 
 ### What is genuinely absent
 
@@ -91,7 +91,7 @@ No task id distinct from the session id; no parent/child session linkage and no
 (the journal is strictly append-only); no detached/background execution
 (`Prompt` is synchronous and ctx-bound); and — by architecture invariant #1 —
 supervision, rosters, and detached running are explicitly **application**
-concerns (`CLAUDE.md`, `docs/DESIGN.md:574-582`).
+concerns (`CLAUDE.md`, `docs/DESIGN.md:733-775`).
 
 ## The two boundary options
 
@@ -187,12 +187,12 @@ and each passes both gates on its own.
    than in a gofer sidecar that can desync from the journal.
 
 3. ✅ **Shipped.** **A session role/kind in metadata.** Extend the already-extensible
-   `MetaPayload` (`session/entry.go:92-98`) with an optional role (e.g.
+   `MetaPayload` (`session/entry.go:112`) with an optional role (e.g.
    `"monitor"`) so `Store.List`/`ReadEntries` can classify a background task for
    the roster **without folding**. This is what lets #182's monitor "surface in
    the roster alongside sessions" through the read path the SDK already owns.
 
-4. **Land the design-ahead spawn seam** (`docs/DESIGN.md:574-591`):
+4. ✅ **Shipped.** **Land the design-ahead spawn seam** (`docs/DESIGN.md:733-775`):
    `session.spawned{child_id, agent}` + `parent_id` in child metadata + depth-5.
    A monitor spawned by a session needs the parent/child link for the roster
    tree, and #182 explicitly lives alongside the session tree. This is already
@@ -253,8 +253,10 @@ namespace; a monitor is a session with a pinned `Options.SessionID`.
 
 ## What shipped
 
-Items 1–3, additive and backward-compatible. Item 4 (spawn seam) is unchanged
-design-ahead work and is not part of this change.
+Items 1–3, additive and backward-compatible. Item 4 (spawn seam) is not part of
+this change; it shipped separately in M5 — `Runner.Spawn` publishing
+`session.spawned`, with `parent_id`/`depth` in child metadata capped at
+`runner.DefaultMaxDepth` (5).
 
 **1. Runner-level fork/rewind, and a `session.forked` producer** (`runner/runner.go`).
 

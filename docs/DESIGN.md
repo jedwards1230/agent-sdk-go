@@ -1454,7 +1454,7 @@ Three tiers, by trust and coupling:
 1. **Core** — hot path, security, or contract; compiled in (loop, broker,
    permission engine, session).
 2. **Optional SDK package** — opt-in at compile time; Go compiles only what you
-   import (`search/` and `mcp/` — see "MCP (M7)" below — both ship M7; the
+   import (`search/` and `mcp/` — see "MCP (M7)" above — both ship M7; the
    vendor settings loaders are still planned). First-party and trusted, but
    not forced on every embedder.
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
@@ -1467,7 +1467,7 @@ The tier is set by the two-gate test: would a second app need it unchanged
 
 | Need | Verdict | Source |
 |---|---|---|
-| MCP client | ~~adopt~~ **build (superseded 2026-07-29)** | Hand-rolled, following `lsp/client.go`'s stdlib-only JSON-RPC-over-stdio precedent, extended to also cover streamable-HTTP. Overrides this survey row: MCP is the same protocol family the SDK already hand-rolls for LSP, and `modelcontextprotocol/go-sdk` would land in every embedder's module graph (`go.sum`) even unimported — the optional-package tier controls compilation, not the module graph. See "MCP (M7)" below. |
+| MCP client | ~~adopt~~ **build (superseded 2026-07-29)** | Hand-rolled, following `lsp/client.go`'s stdlib-only JSON-RPC-over-stdio precedent, extended to also cover streamable-HTTP. Overrides this survey row: MCP is the same protocol family the SDK already hand-rolls for LSP, and `modelcontextprotocol/go-sdk` would land in every embedder's module graph (`go.sum`) even unimported — the optional-package tier controls compilation, not the module graph. See "MCP (M7)" above. |
 | ACP protocol | build | M2 verdict: clean-room the ACP **v1** wire shapes in `acp/` (stdlib-only, no dep) + a pure Event/Op projection; transport (WebSocket/JSON-RPC) lives in the application, not the SDK. Supersedes the earlier "adopt `coder/acp-go-sdk`" survey verdict — keeping the SDK dependency-free and the projection a first-class broker client won out. |
 | WASM plugin tier | **adopt** | `knqyf263/go-plugin` (wazero, typed interfaces) |
 | Provider + streaming | build | thin, with a cross-vendor content-block message model |

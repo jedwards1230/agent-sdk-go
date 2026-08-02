@@ -4,13 +4,13 @@ An importable, provider-agnostic **agent framework for Go**: an owned, auditable
 agent loop with sessions, permissions, tools, skills, MCP, ACP, plugins, and
 declarative agent manifests.
 
-> **Status: v0.14.1, M0–M3 shipped.** The typed Event/Op contract, the two-tier
-> event broker, real Anthropic/OpenAI providers (API key + subscription
-> OAuth), the agent loop, builtin tools, the `runner` package, a clean-room
-> `acp` (Agent Client Protocol) adapter, and M3's guardrails (permission
-> engine, guard/approval seam, spill files, headless exec, LSP) are all in
-> place. M4, the ACP v1 featureset expansion, is in progress: session-method
-> dispatch, the `diff` producer, `session_info_update`/`plan`/
+> **Status: v0.24.0, M0–M3 and M7 Round A+B shipped.** The typed Event/Op
+> contract, the two-tier event broker, real Anthropic/OpenAI providers (API key
+> + subscription OAuth), the agent loop, builtin tools, the `runner` package, a
+> clean-room `acp` (Agent Client Protocol) adapter, and M3's guardrails
+> (permission engine, guard/approval seam, spill files, headless exec, LSP) are
+> all in place. M4, the ACP v1 featureset expansion, is in progress:
+> session-method dispatch, the `diff` producer, `session_info_update`/`plan`/
 > `config_option_update` projections, and live model discovery
 > (`provider.ModelLister`) have all landed (see the [roadmap](#roadmap)).
 
@@ -117,7 +117,7 @@ branch stays in the log, stays greppable, and still counts toward
 readable off disk without resuming it, via
 `session.Checkpoints(session.ReadEntries(path))`.
 
-Planned: `skill/`, `plugin/`, `mcp/` (M5).
+Planned: `plugin/` (M5).
 
 ## Roadmap
 

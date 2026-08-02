@@ -20,7 +20,7 @@ is unchanged.
 | # | Piece | State | PR |
 |---|---|---|---|
 | 1 | `Runner.Compact` seam (`#89`) | **merged** | [#111](https://github.com/jedwards1230/agent-sdk-go/pull/111) |
-| 3 | Optional `mcp/` package: client + tool projection | pending | — |
+| 3 | Optional `mcp/` package: client + tool projection | **merged** | [#116](https://github.com/jedwards1230/agent-sdk-go/pull/116) |
 | 4 | Search `Provider` interface + Brave / SearXNG | **merged** | [#113](https://github.com/jedwards1230/agent-sdk-go/pull/113) |
 | 5 | Skills: `SKILL.md` loading, progressive disclosure | **merged** | [#115](https://github.com/jedwards1230/agent-sdk-go/pull/115) |
 | — | Index-first tool-registry contract | **merged** | [#114](https://github.com/jedwards1230/agent-sdk-go/pull/114) |
@@ -47,7 +47,7 @@ wiring and live verification are the deliverable there.
   cannot see and override. Tool and MCP schemas load **index-first**, full schemas
   on demand — federating many servers must never dump every schema into context.
   The projection point is a single line: `req.Tools = r.cfg.Tools.Specs()` in
-  `(*runner).callModel` (`loop/loop.go:276`), re-evaluated **once per model call**.
+  `(*runner).callModel` (`loop/loop.go:281`), re-evaluated **once per model call**.
   `loop.ToolRegistry` is a consumer-side interface of just `Get` + `Specs`, so
   index-first can land as a *decorator* satisfying it — leaving `tool.Tool` and
   `tool.Registry` untouched. MCP-federated tools go through that same decorator:
@@ -71,7 +71,7 @@ Recorded as they settle.
   kept as a fallback.** It is a security regression, not a style question:
   `permission.Rule.matches` compares `r.Tool != req.Tool` (`permission/rule.go:23`)
   and the guard builds `permission.Request{Tool: call.Name, …}`
-  (`loop/guard.go:105`), so every call would arrive as `Tool:"tool_call"` —
+  (`loop/guard.go:106`), so every call would arrive as `Tool:"tool_call"` —
   collapsing every rule in the grammar and making one "allow always" answer widen
   to *every* tool via `RuleGuard.Grant`.
 - **Relying on the model to call a tool absent from the request's tool array is
@@ -102,8 +102,8 @@ Recorded as they settle.
 ## Open: consumer-neutrality drift (not this round)
 
 M3 ran a deliberate independence sweep (`#45`) that took gofer mentions to zero
-**including docs**. That has since drifted to **41** prose mentions: 22 in
-`docs/proposals/checkpoint-task-handle-seam.md`, 10 in `docs/PRD.md`, 7 in
+**including docs**. That has since drifted to **49** prose mentions: 24 in
+`docs/proposals/checkpoint-task-handle-seam.md`, 13 in `docs/PRD.md`, 10 in
 `docs/DESIGN.md`, 2 in `NOTICE`. The drift is concentrated in one newer proposal
 rather than spread.
 
