@@ -28,10 +28,11 @@ var benchSizes = []int{17, 129, 513, 2049}
 
 // benchmark sinks, to keep the compiler from eliminating the calls under test.
 var (
-	sinkReport CostReport
-	sinkModel  string
-	sinkUsage  provider.Usage
-	sinkOK     bool
+	sinkReport   CostReport
+	sinkModel    string
+	sinkUsage    provider.Usage
+	sinkOK       bool
+	sinkMessages []provider.Message
 )
 
 // newBenchJournal builds an in-memory journal of exactly n entries.
@@ -177,6 +178,41 @@ func BenchmarkJournalLastUsageFullWalk(b *testing.B) {
 		})
 		b.Run(fmt.Sprintf("n=%d/parallel", n), func(b *testing.B) {
 			benchMixedParallel(b, newBenchJournal(b, n, false))
+		})
+	}
+}
+
+// BenchmarkJournalFold measures [Journal.Fold] across journal depth. Unlike
+// Cost and LastUsage above, Fold is NOT expected to be flat: #121 fixed Cost
+// and LastUsage to walk j.entries in place, but Fold still copies the whole
+// entry slice under j.mu (journal.go:207-211) before handing it to the
+// lock-free fold() — so it is the one remaining copy-under-lock path, and this
+// benchmark's job is to report its actual shape rather than assert flatness it
+// does not have. See jedwards1230/agent-sdk-go#127 (this issue) — the finding
+// belongs in the PR that adds this benchmark, and any regression it turns up
+// is a separate issue, not something to fix here.
+//
+// Serial only, deliberately: see "Never baseline a RunParallel benchmark" in
+// docs/TESTING.md. There is no /parallel twin for Fold.
+//
+// The fixture is the shared newBenchJournal tree — three distinct models with
+// varied usage, and a fork_point every 16 entries — so folding does real
+// per-entry work (unmarshaling each Entry's typed payload, copying content
+// blocks) instead of looping over uniform, trivially-foldable structs.
+//
+// It is never a cyclic journal. [chainFromHead], which Fold's pure half calls,
+// still has an unbounded walk on a cyclic parent chain (#122, open, a
+// liveness bug — not what this benchmark is measuring); a cyclic fixture would
+// hang the benchmark rather than report a number, so this deliberately does
+// not attempt to reproduce or paper over that bug.
+func BenchmarkJournalFold(b *testing.B) {
+	for _, n := range benchSizes {
+		j := newBenchJournal(b, n, true)
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				sinkMessages = j.Fold()
+			}
 		})
 	}
 }
