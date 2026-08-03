@@ -25,7 +25,7 @@ The `bench` CI job runs two more gates, both runnable locally:
 ```bash
 ./scripts/check-independence.sh   # no dependency may mention the consuming app
 ./scripts/bench.sh --check        # allocs/op and B/op vs scripts/bench-baseline.txt
-./scripts/bench.sh                # just run the gated benchmarks and print them
+./scripts/bench.sh                # run the module's benchmarks (BENCH_PKGS, default ./...) and print them
 ./scripts/bench.sh --update       # re-baseline — deliberate, reviewed like code
 ```
 
@@ -35,6 +35,15 @@ benchmark that stops doing its work allocates *less*, so an outsized drop fails
 too and a genuine optimization has to land a `--update` commit. If it goes red,
 decide whether the move is a real regression, a real win, or a benchmark that
 went blind *before* reaching for `--update`, and say which in the PR.
+
+**What the gate does and does not assert.** `bench.sh` runs every benchmark in
+the module, but `--check` only compares the allocation profile of the
+benchmark names listed in `scripts/bench-baseline.txt`. Everything else runs,
+is reported, and is explicitly marked `ignored` — an unlisted benchmark
+**cannot fail CI** no matter how badly it regresses. Adding a benchmark does
+not, by itself, add coverage; it starts appearing in the summary as one more
+of the "run but NOT gated" count until someone measures it across enough CI
+runs to trust a tolerance and lands a deliberate `--update`.
 
 Thresholds, the measured run-to-run spread they were chosen from, the four
 anti-blindness rules for writing benchmarks (including where to hook a guard so
