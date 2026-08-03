@@ -6,6 +6,13 @@
 // nothing about accounts, rosters, or pairing — those are the consuming
 // application's concerns.
 //
+// SPECULATIVE — no consumer. Only announce/ imports this package, and announce/
+// itself has no importer in this repo or any known embedder; both were built as
+// M8 pairing groundwork ahead of the application work that would use them. Per
+// the third gate in CLAUDE.md they carry no stability guarantee, and a breaking
+// change here is routine until a real consumer lands. See docs/DESIGN.md,
+// "Extension tiers → Speculative".
+//
 // # Construction
 //
 // Envelopes use RFC 9180 HPKE in mode_auth (0x02), ciphersuite

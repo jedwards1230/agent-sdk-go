@@ -40,9 +40,13 @@ the test strategy.
   can't see and override; every model call is reconstructable from the journal.
   Prompt assembly stays small and auditable — tool/MCP schemas load on demand,
   not all up front.
-- **Two-gate feature test**: a capability earns a place in core only if it
-  passes *both* gates — would a second app need it unchanged (membership), and
-  could a seam suffice instead of a built-in?
+- **Three-gate feature test**: a capability earns a place in core only if it
+  passes *all three* gates — would a second app need it unchanged (membership),
+  could a seam suffice instead of a built-in, and **is there a consumer today**?
+  The first two gates are counterfactual, so speculative code passes them both:
+  ship with a real caller in the same round, or ship it marked speculative in
+  the DESIGN.md extension-tiers table. `device/` + `announce/` are why this gate
+  exists — 1,134 lines with no importer in any repo.
 - **Declarative consumption**: the SDK owns the abstraction; embedders wire
   business logic and variables. Every capability is reachable through a
   `compose.Load()` manifest, not just the Go API.
