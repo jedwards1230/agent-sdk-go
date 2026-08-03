@@ -75,6 +75,41 @@ are all in [`docs/TESTING.md`](docs/TESTING.md).
 Keep documentation current as part of the change, not as a follow-up — update
 the README and `docs/` in the same PR.
 
+### Naming the consuming application in docs
+
+This repo is consumed by an application (currently `gofer`) that does not live
+here. Naming it in doc prose is not automatically a problem — most mentions are
+fine — but `docs/DESIGN.md` and `docs/PRD.md` are the *normative* docs: they
+specify the SDK's contract, and a second embedder has to be able to read that
+contract without needing to know anything about the first one. Classify a
+mention into one of four kinds before touching it:
+
+- **Attribution** (`NOTICE`) — arguably required by the license. Exempt,
+  permanently.
+- **Historical record** (`docs/milestones/*`, `docs/proposals/*`) — dated
+  artifacts of what happened. These *should* name the consumer; genericizing a
+  milestone doc into "a consuming application did X" makes it worse, not more
+  neutral.
+- **Motivating example** — "an embedder needed X, e.g. …" — fine, provided the
+  seam or contract is already specified in neutral terms first.
+- **Drift** — normative prose in `docs/DESIGN.md` / `docs/PRD.md` that
+  specifies the contract *in terms of* the one consumer, so a second embedder
+  cannot tell what is required of them from what this one happens to do.
+
+Only the fourth is a problem, and the test is mechanical: **delete the
+consumer's name from the sentence. If it still fully specifies the contract,
+the mention was decoration and can stay. If the sentence goes vague or
+ungrammatical because the load-bearing noun was the consumer's name, rewrite it
+with a neutral one** (`the embedder`, `an application`, `application-native`,
+…) — that is drift.
+
+**No doc linter, no mention budget, no repo-wide count.** Tracking a number
+creates exactly the scrubbing pressure this rule exists to remove — do not
+reduce a count for its own sake, and do not touch a legitimate historical or
+motivating mention to make a total look smaller. See
+[agent-sdk-go#128](https://github.com/jedwards1230/agent-sdk-go/issues/128) for
+the fuller writeup and worked examples.
+
 **When a change makes a doc claim false, the claim is part of the diff.** Every
 late defect found in the benchmark/compaction round was of one shape: a
 statement that was true when written and that a later change in the same round

@@ -1,5 +1,15 @@
 # Proposal: task-handle / checkpoint seam
 
+> **Archival record.** This proposal is settled and kept as a historical
+> record of the argument that produced Option C — it is not maintained as
+> current truth. For the ratified design as it exists today (`Runner.Fork` /
+> `Runner.Rewind`, the checkpoint entry type and its `Runner.Checkpoint(s)`
+> API, and the session-role metadata field), read
+> [`../DESIGN.md`](../DESIGN.md#checkpoint--rewind-seam-m5); for the settled
+> boundary decision (no `Task`/`TaskHandle`/`TaskStore`, task id == session
+> id), read [`../PRD.md`](../PRD.md#non-goals). If this file and DESIGN.md /
+> PRD.md ever disagree, DESIGN.md / PRD.md win.
+
 Status: **ratified — Option C adopted; items 1–3 shipped**, item 4 (the spawn
 seam) tracked separately. Resolves the open question stubbed in
 [`../PRD.md`](../PRD.md) ("Open question — in-process background-task handle")

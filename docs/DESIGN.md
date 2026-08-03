@@ -695,7 +695,7 @@ modeled yet (additive). `SessionInfo` carries `cwd`/`title`/`updatedAt`; its
 optional `additionalDirectories` is not modeled yet (additive).
 
 **Promote-if-stable** governs what projects onto this standard surface vs stays
-gofer-native — see the [PRD](PRD.md) settled decision. In short: a capability
+application-native — see the [PRD](PRD.md) settled decision. In short: a capability
 lands in `acp/` only when a stable ACP v1 spec variant exists; unstable/absent
 spec surfaces stay application-layer (`gofer/event`) and are never invented
 here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
@@ -711,9 +711,9 @@ here. `usage_update` is promoted; `set_model` and `gofer/event` stay native.
   `resource`) stay dormant until a builtin tool naturally produces them; none
   does today, so no producer was invented.
 - **Model discovery types** ✅ — `provider.ModelLister` and the vendor metadata
-  it carries on `ModelInfo` back gofer's native list-models endpoint, which
-  feeds the `session/new` model picker (see *Live model listing* above). Migrate
-  to `providers/list` only once that spec surface stabilizes.
+  it carries on `ModelInfo` back an application-native list-models endpoint,
+  which feeds the `session/new` model picker (see *Live model listing* above).
+  Migrate to `providers/list` only once that spec surface stabilizes.
 - **Capability modeling for the stretch set** — `session_info_update` **ships**:
   `session.Session` carries an embedder-set `title` (`SetTitle`/`Title`), a
   `SetTitle` change emits the must-deliver `session.info` event, and
@@ -835,6 +835,14 @@ in the append-only log is the point: a consumer-side sidecar can desync from the
 entries it addresses. `Runner.Rewind` resolves a label to its entry id, falling
 back to treating the ref as a raw entry id; with duplicate labels the **most
 recent in append order wins**, which makes a label usable as a moving bookmark.
+
+**Listing checkpoints needs no live runner.** `Runner.Checkpoint(label) (string,
+error)` appends the marker and returns its entry id; `Runner.Checkpoints()
+[]session.Checkpoint` lists them off the live journal in append order. The same
+listing is available without resuming a session: `session.Checkpoints(session.ReadEntries(path))`
+decodes every `EntryCheckpoint` out of a persisted session's entries directly —
+the read path a roster uses to show a session's checkpoints without opening it
+for append or folding its context.
 
 **Session role.** `MetaPayload.Role` is an optional, omitempty, embedder-owned
 string on the root `session_meta` entry (`runner.Options.Role` → `Runner.Role()`,
@@ -1211,8 +1219,8 @@ over-long name is a provider 400 that kills the entire request, not just the
 offending tool, which is why sanitization is mandatory rather than defensive
 polish.
 
-**Resilience is this client's contract; the connection manager is gofer's
-job.** A dead, slow, or unreachable server must never fail a whole turn:
+**Resilience is this client's contract; the connection manager is the
+embedder's job.** A dead, slow, or unreachable server must never fail a whole turn:
 `projectedTool.Run` maps a `CallTool` failure to a `tool.Result{IsError:
 true}` carrying a message the model can react to (e.g. "mcp server X tool Y
 failed: ..."), never to a Go `error` — *unless* the ctx `Run` itself was given

@@ -206,11 +206,11 @@ M0–M3 are what shipped here.
 - **Promote-if-stable, for the ACP surface (2026-07-17).** A capability projects
   onto the standard ACP surface in `acp/` only when a *stable* spec variant
   exists in the ACP v1 schema; where the spec surface is unstable or absent it
-  stays gofer-native (an application-layer `gofer/event` extension), never
+  stays application-native (an application-layer `gofer/event` extension), never
   invented into `acp/`. Consequences already settled: `usage_update` is promoted
-  (stable → projected in v0.6.0); `set_model` stays gofer-native (its real spec
-  surface, `providers/*`, is unstable); `gofer/event` stays native permanently.
-  Model discovery uses a gofer-native list-models endpoint for the `session/new`
+  (stable → projected in v0.6.0); `set_model` stays application-native (its real
+  spec surface, `providers/*`, is unstable); `gofer/event` stays native permanently.
+  Model discovery uses an application-native list-models endpoint for the `session/new`
   picker, migrating to the unstable `providers/list` only once it stabilizes.
   This is the SDK reading of the cross-repo policy; the full conformance matrix
   is tracked internally (spec ↔ SDK ↔ gofer ↔ Agmente).
