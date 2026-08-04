@@ -200,11 +200,12 @@ func BenchmarkJournalLastUsageFullWalk(b *testing.B) {
 // per-entry work (unmarshaling each Entry's typed payload, copying content
 // blocks) instead of looping over uniform, trivially-foldable structs.
 //
-// It is never a cyclic journal. [chainFromHead], which Fold's pure half calls,
-// still has an unbounded walk on a cyclic parent chain (#122, open, a
-// liveness bug — not what this benchmark is measuring); a cyclic fixture would
-// hang the benchmark rather than report a number, so this deliberately does
-// not attempt to reproduce or paper over that bug.
+// It is never a cyclic journal — but not because one would hang. [chainFromHead],
+// which Fold's pure half calls, is bounded by `for steps := len(entries);
+// steps > 0; steps--` (#137, closing #122), so a parent cycle terminates rather
+// than spinning. The fixture stays acyclic because a cyclic parent chain is
+// malformed input: it would measure the bail-out path, not the per-entry folding
+// work this benchmark exists to report.
 func BenchmarkJournalFold(b *testing.B) {
 	for _, n := range benchSizes {
 		j := newBenchJournal(b, n, true)

@@ -265,10 +265,20 @@ someone else's PR.
 `BenchmarkRegistrySpecs` (`internal/benchguard/registry_bench_test.go`) are the
 SDK's first benchmarks against this harness, added for the depth axis
 (`Journal.Fold`) and the breadth axis (`Tools.Specs()` per model call). See
-jedwards1230/agent-sdk-go#127. Both ship **run-but-ungated**:
-`scripts/bench-baseline.txt` names neither, so neither can fail CI yet, and
-`scripts/bench.sh` only runs packages already named in that baseline — run
-them directly:
+jedwards1230/agent-sdk-go#127. **Neither is gated** — `scripts/bench-baseline.txt`
+names neither, so neither can fail CI.
+
+Whether they *run* differs, and the distinction matters:
+
+- **`BenchmarkRegistrySpecs` does run in CI.** It lives in `internal/benchguard`,
+  which the baseline already names, and `scripts/bench.sh` runs every benchmark
+  in a named package — so it executes and is reported, then ignored by the
+  comparison because it has no baseline row.
+- **`BenchmarkJournalFold` does not run at all.** `session/` is not named in the
+  baseline, so the package is never selected.
+
+Running is not gating: an executed benchmark with no baseline row cannot fail CI.
+To exercise both directly:
 
 ```bash
 go test -run='^$' -bench=. -benchmem -benchtime=100x -count=5 ./session/ ./internal/benchguard/
@@ -287,11 +297,12 @@ prevent.
   before folding (`Cost` and `LastUsage` were both fixed to walk in place by
   #121) — allocs/op scales linearly with depth (measured ~10.3 allocs per
   entry, holding across all four sizes on darwin/arm64). That is the finding
-  the benchmark exists to report, not a regression to fix inline; any fix
-  belongs in its own issue. It also does not, and must not, build a cyclic
-  journal fixture: `chainFromHead`'s walk is unbounded on a parent cycle
-  (#122, open) and a cyclic fixture would hang the benchmark rather than
-  report a number.
+  the benchmark exists to report, not a regression to fix inline; the finding is
+  filed as #157. It also does not build a cyclic journal fixture — not because
+  one would hang (it would not: `chainFromHead` is bounded by
+  `for steps := len(entries); steps > 0; steps--`, fixed in #137, closing #122)
+  but because a cyclic parent chain is malformed input that measures nothing
+  this benchmark is about.
 - **`BenchmarkRegistrySpecs`** measures the plain registry adapter
   (`loop.FromRegistry(reg).Specs()`, `loop/toolreg.go:30`) at the same
   n=8/64/512 axis `BenchmarkIndexWrap`/`BenchmarkIndexProject` already use, so
