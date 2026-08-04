@@ -298,16 +298,17 @@ someone else's PR.
 SDK's first benchmarks against this harness, added for the depth axis
 (`Journal.Fold`) and the breadth axis (`Tools.Specs()` per model call). See
 jedwards1230/agent-sdk-go#127. **Neither is gated** — `scripts/bench-baseline.txt`
-names neither, so neither can fail CI.
+carries no row for either benchmark name, so neither can fail CI.
 
-Whether they *run* differs, and the distinction matters:
-
-- **`BenchmarkRegistrySpecs` does run in CI.** It lives in `internal/benchguard`,
-  which the baseline already names, and `scripts/bench.sh` runs every benchmark
-  in a named package — so it executes and is reported, then ignored by the
-  comparison because it has no baseline row.
-- **`BenchmarkJournalFold` does not run at all.** `session/` is not named in the
-  baseline, so the package is never selected.
+Both do run in CI, though, and that distinction from gating matters:
+`scripts/bench-baseline.txt` names both `internal/benchguard` (for
+`BenchmarkIndexProject`/`BenchmarkIndexWrap`'s rows) and `session` (for
+`BenchmarkJournalCost`/`BenchmarkJournalLastUsage`'s) as packages, and
+`scripts/bench.sh` runs *every* benchmark in a named package, not just the ones
+it gates. `BenchmarkJournalFold` lives in `session` and `BenchmarkRegistrySpecs`
+lives in `internal/benchguard`, so both execute on every `bench.sh` run and are
+reported as `ignored` — `present in output, absent from the baseline` — visible,
+but powerless to fail CI.
 
 Running is not gating: an executed benchmark with no baseline row cannot fail CI.
 To exercise both directly:
