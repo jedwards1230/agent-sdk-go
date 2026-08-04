@@ -57,7 +57,10 @@ jobs:
     # repeat it.
     #
     # It is cheap: the benchmarks run at a fixed 100 iterations, five times,
-    # over one package. Seconds, not minutes.
+    # over the whole module (BENCH_PKGS, default ./...) — but only the
+    # benchmark names listed in scripts/bench-baseline.txt are gated. An
+    # unlisted benchmark is run and reported, never able to fail this job.
+    # Seconds, not minutes; see the wall-time note in docs/TESTING.md.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -95,6 +98,15 @@ jobs:
             "2|--baseline scripts/testdata/baselines/numeric-looking.txt --input scripts/testdata/regression-bytes-only.txt"
             "2|--baseline scripts/testdata/baselines/no-rows.txt --input scripts/testdata/regression-bytes-only.txt"
             "2|--baseline scripts/testdata/baselines/unmatched-rows.txt --input scripts/testdata/regression-bytes-only.txt"
+            # 0 = a benchmark can be in the RUN set without being in the GATE
+            # set (#148): present-but-unbaselined must be reported as
+            # "ignored" and stay green, never fail the gate.
+            #
+            # Pinned to its own baseline, NOT scripts/bench-baseline.txt: this
+            # case asserts gate SEMANTICS, so coupling it to the live baseline
+            # made every future re-baseline break it (which is exactly what
+            # happened when session/ rows landed).
+            "0|--baseline scripts/testdata/baselines/six-benchguard-rows.txt --input scripts/testdata/ok-with-ignored.txt"
           )
           fails=0
           for entry in "${cases[@]}"; do
@@ -111,6 +123,22 @@ jobs:
             fi
           done
           [ "$fails" -eq 0 ]
+      # The run set (BENCH_PKGS) must never silently collapse to zero
+      # packages — that would make bench.sh "pass" having run nothing, the
+      # same class of vacuous-green bug the --check matrix above locks for
+      # the gate set. A whitespace-only override word-splits to an empty
+      # array; bench.sh must die (exit 2) before it ever shells out to `go
+      # test`, so this case is free even though it isn't an --input run.
+      - name: the run set must not collapse to zero packages
+        run: |
+          set -uo pipefail
+          status=0
+          BENCH_PKGS=' ' ./scripts/bench.sh --check >/dev/null 2>&1 || status=$?
+          if [ "$status" -ne 2 ]; then
+            echo "::error::BENCH_PKGS=' ': expected exit 2 (no packages to run), got $status"
+            exit 1
+          fi
+          echo "ok (exit 2): BENCH_PKGS=' ' resolves to zero packages"
       # check-independence.sh must be precise in BOTH directions: it has to fire
       # on the consuming application's module path and stay quiet on an
       # unrelated module that merely contains the string "gofer". A gate that
