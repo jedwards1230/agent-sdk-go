@@ -222,18 +222,32 @@ write_baseline() {
 #
 # This file is the GATE ALLOWLIST, not the run set: bench.sh runs the whole
 # module (BENCH_PKGS, default ./...) and gates exactly the benchmark names
-# listed here — everything else is run and reported as "ignored". It contains
-# no session/ entries on purpose: those benchmarks run and are reported on
-# every CI pass, but their numbers are not yet characterized on the runner, so
-# they must not be able to turn this gate red until a workstream measures and
-# baselines them deliberately.
+# listed here — everything else is run and reported as "ignored".
+#
+# As committed it holds no session/ rows: those benchmarks run and are reported
+# on every CI pass, but their numbers are not yet characterized on the runner,
+# so they must not be able to turn this gate red until a workstream measures and
+# baselines them deliberately. That is a property of THIS FILE as committed, not
+# a rule the script enforces — --update would add them from whatever it observed.
+#
+# The one exclusion the script DOES enforce: --update never writes a RunParallel
+# sub-benchmark (any name segment "parallel"). Their allocation numbers swing
+# with scheduling — the same journal row measured 2728 and 8520 B/op on one
+# machine — so baselining one builds a gate that fails unrelated PRs until
+# someone deletes it. See docs/TESTING.md, "Never baseline a RunParallel
+# benchmark".
 #
 # Captured with: -run='^$' -bench=. -benchmem -benchtime=${BENCHTIME} -count=${COUNT}
 # (median per metric). ns/op is intentionally absent: it is not gated.
 #
 # fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
 EOF
-		cat "${observed}"
+		# RunParallel sub-benchmarks are structurally unbaselineable — their
+		# allocation numbers move with goroutine scheduling, not with the code.
+		# Filtering here rather than trusting reviewer vigilance: --update is
+		# exactly the moment someone regenerates without reading every new row,
+		# and one parallel row is enough to make the gate fail unrelated PRs.
+		awk -F'\t' '$2 !~ /(^|\/)parallel($|\/)/' "${observed}"
 	} >"${out}"
 }
 
