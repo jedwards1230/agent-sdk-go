@@ -101,7 +101,12 @@ jobs:
             # 0 = a benchmark can be in the RUN set without being in the GATE
             # set (#148): present-but-unbaselined must be reported as
             # "ignored" and stay green, never fail the gate.
-            "0|--input scripts/testdata/ok-with-ignored.txt"
+            #
+            # Pinned to its own baseline, NOT scripts/bench-baseline.txt: this
+            # case asserts gate SEMANTICS, so coupling it to the live baseline
+            # made every future re-baseline break it (which is exactly what
+            # happened when session/ rows landed).
+            "0|--baseline scripts/testdata/baselines/six-benchguard-rows.txt --input scripts/testdata/ok-with-ignored.txt"
           )
           fails=0
           for entry in "${cases[@]}"; do
