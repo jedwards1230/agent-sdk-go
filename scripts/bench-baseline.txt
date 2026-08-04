@@ -5,14 +5,24 @@
 # means either a real allocation regression or a benchmark that changed shape,
 # and both need a human sentence in the PR description.
 #
-# This file is also the ALLOWLIST: bench.sh runs exactly the packages named
-# here and gates exactly the benchmark names here. session/ carries the
-# BenchmarkJournalCost and BenchmarkJournalLastUsage serial rows (swept over
-# journal length); their /parallel twins are deliberately absent — see
-# docs/TESTING.md "Never baseline a RunParallel benchmark". So are
-# BenchmarkJournalLastUsageFullWalk (out of scope for this pass; tracked as a
-# follow-up) and BenchmarkJournalFold / BenchmarkRegistrySpecs (deliberately
-# ungated, tracked in #157).
+# This file is the GATE ALLOWLIST, not the run set: bench.sh runs the whole
+# module (BENCH_PKGS, default ./...) and gates exactly the benchmark names
+# listed here — everything else is run and reported as "ignored".
+#
+# What is here, and why the absences are deliberate:
+#   - session/ carries the BenchmarkJournalCost and BenchmarkJournalLastUsage
+#     serial rows (swept over journal length), baselined from CI-runner numbers.
+#   - Their /parallel twins are absent and must stay absent — see docs/TESTING.md
+#     "Never baseline a RunParallel benchmark". This is the one exclusion the
+#     script itself enforces: --update filters any "parallel" name segment, so a
+#     regeneration cannot reintroduce them by accident.
+#   - BenchmarkJournalLastUsageFullWalk is out of scope for this pass (tracked as
+#     a follow-up), and BenchmarkJournalFold / BenchmarkRegistrySpecs are
+#     deliberately ungated (tracked in #157).
+#
+# Everything else about this file's contents is a property of the file as
+# committed, not an invariant the script enforces: --update writes whatever it
+# observed, minus the parallel filter above.
 #
 # Captured with: -run='^$' -bench=. -benchmem -benchtime=100x -count=5
 # (median per metric) on the CI runner (linux/amd64), from the `bench` job on

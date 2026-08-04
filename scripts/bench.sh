@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# bench.sh — run the baselined benchmarks and gate their allocation profile.
+# bench.sh — run the module's benchmarks and gate the allocation profile of
+# the ones named in the baseline.
 #
 #   scripts/bench.sh            run them and print the aggregated numbers
 #   scripts/bench.sh --check    run them and fail on an allocation regression
@@ -28,14 +29,21 @@
 # outcome: the win becomes explicit and reviewed instead of silently absorbed
 # into the noise floor.
 #
-# The baseline file is the allowlist
-# ----------------------------------
-# It names the packages to run and the benchmarks to gate. A benchmark that
-# shows up in the output but is not in the baseline is reported and IGNORED —
-# so a peer adding a benchmark in a package this gate happens to run cannot
-# turn it red. A baseline entry MISSING from the output FAILS: deleting or
+# The RUN set and the GATE set are different things
+# ---------------------------------------------------
+# The run set is every package under BENCH_PKGS (default ./..., i.e. the whole
+# module) — see the tunables below. The baseline file is the gate set: the
+# allowlist of benchmark names whose allocation profile is actually compared.
+# A benchmark that runs but is not in the baseline is reported and IGNORED —
+# so adding a benchmark anywhere in the module cannot turn this gate red by
+# accident. A baseline entry MISSING from the output FAILS: deleting or
 # renaming a gated benchmark has to be a deliberate re-baseline, not a silent
 # loss of coverage.
+#
+# Running the whole module and gating only a named subset is a deliberate,
+# narrower coverage claim than the run set implies: an unlisted benchmark
+# CANNOT fail this gate no matter how badly it regresses. See "OK: N gated, M
+# run but NOT gated" in the summary this script prints, and docs/TESTING.md.
 #
 # Determinism knobs
 # -----------------
@@ -53,6 +61,7 @@ readonly REPO_ROOT
 # Tunables. Defaults are measured, not guessed — see docs/TESTING.md for the
 # raw per-run spread they were chosen from.
 BASELINE="${BENCH_BASELINE:-${REPO_ROOT}/scripts/bench-baseline.txt}"
+BENCH_PKGS_DEFAULT="./..."
 BENCHTIME="${BENCH_BENCHTIME:-100x}"
 COUNT="${BENCH_COUNT:-5}"
 ALLOCS_TOLERANCE_PCT="${BENCH_ALLOCS_TOLERANCE_PCT:-1}"
@@ -65,8 +74,9 @@ usage() {
 	cat <<'EOF'
 usage: scripts/bench.sh [--check | --update] [--input FILE] [--baseline FILE]
 
-  (no mode)         run the baselined benchmarks and print aggregated results
-  --check           compare against the baseline; exit 1 on a regression
+  (no mode)         run the module's benchmarks and print aggregated results
+  --check           compare the baselined subset against the baseline; exit 1
+                    on a regression
   --update          rewrite the baseline from a fresh run (review the diff!)
 
   --input FILE      read pre-captured `go test -bench` output from FILE instead
@@ -75,10 +85,16 @@ usage: scripts/bench.sh [--check | --update] [--input FILE] [--baseline FILE]
   --baseline FILE   use FILE as the baseline (default scripts/bench-baseline.txt)
 
 environment overrides:
-  BENCH_BENCHTIME              (default 100x)   fixed iteration count
-  BENCH_COUNT                  (default 5)      repeats; median is taken
-  BENCH_ALLOCS_TOLERANCE_PCT   (default 1)      allocs/op drift tolerance, +/-
-  BENCH_BYTES_TOLERANCE_PCT    (default 1)      B/op drift tolerance, +/-
+  BENCH_PKGS                   (default ./...)  packages to run, space-separated
+  BENCH_BENCHTIME               (default 100x)  fixed iteration count
+  BENCH_COUNT                   (default 5)     repeats; median is taken
+  BENCH_ALLOCS_TOLERANCE_PCT    (default 1)     allocs/op drift tolerance, +/-
+  BENCH_BYTES_TOLERANCE_PCT     (default 1)     B/op drift tolerance, +/-
+
+The run set (BENCH_PKGS) and the gate set (the baseline) are independent: every
+benchmark in the run set is executed and reported, but only the ones named in
+the baseline can fail --check. See "The RUN set and the GATE set are different
+things" above.
 EOF
 }
 
@@ -122,32 +138,31 @@ trap 'rm -rf "${WORK}"' EXIT
 raw="${WORK}/raw.txt"
 observed="${WORK}/observed.tsv"
 
-# The packages to run are exactly the ones the baseline names. Comment lines
-# and blanks are skipped; the rest is <pkg>\t<bench>\t<allocs>\t<bytes>.
-packages() {
-	awk -F'\t' '/^[^#]/ && NF >= 4 { print $1 }' "${BASELINE}" | sort -u
-}
-
 # capture fills ${raw} with `go test -bench` output, or copies a pre-captured
 # file when --input was given.
+#
+# The run set is BENCH_PKGS (default ./..., the whole module), NOT the
+# baseline: a benchmark in a package the baseline has never heard of still
+# runs and is reported, just not gated. Read into an array rather than relying
+# on unquoted word-splitting, so a multi-package override
+# (BENCH_PKGS="./session/... ./event/...") is unambiguous.
 capture() {
 	if [ -n "${INPUT}" ]; then
 		cat -- "${INPUT}" >"${raw}"
 		return
 	fi
 
-	local pkgs
-	pkgs="$(packages)"
-	[ -n "${pkgs}" ] || die "baseline names no packages: ${BASELINE}"
+	local -a pkgs
+	read -ra pkgs <<<"${BENCH_PKGS:-${BENCH_PKGS_DEFAULT}}"
+	[ "${#pkgs[@]}" -gt 0 ] || die "BENCH_PKGS resolved to no packages to run"
 
 	printf 'running: go test -run=^$ -bench=. -benchmem -benchtime=%s -count=%s\n' \
 		"${BENCHTIME}" "${COUNT}" >&2
-	printf '%s\n' "${pkgs}" | sed 's/^/  /' >&2
+	printf '%s\n' "${pkgs[@]}" | sed 's/^/  /' >&2
 
 	local status=0
-	# shellcheck disable=SC2086 # pkgs is a deliberately word-split package list
 	(cd "${REPO_ROOT}" && go test -run='^$' -bench=. -benchmem \
-		-benchtime="${BENCHTIME}" -count="${COUNT}" ${pkgs}) >"${raw}" 2>&1 || status=$?
+		-benchtime="${BENCHTIME}" -count="${COUNT}" "${pkgs[@]}") >"${raw}" 2>&1 || status=$?
 	if [ "${status}" -ne 0 ]; then
 		cat "${raw}" >&2
 		die "go test exited ${status}; benchmarks must pass before they can be gated"
@@ -205,17 +220,38 @@ write_baseline() {
 # means either a real allocation regression or a benchmark that changed shape,
 # and both need a human sentence in the PR description.
 #
-# This file is also the ALLOWLIST: bench.sh runs exactly the packages named
-# here and gates exactly the benchmark names here. It contains no session/
-# entries on purpose — those benchmarks belong to another workstream and must
-# not be able to turn this gate red.
+# This file is the GATE ALLOWLIST, not the run set: bench.sh runs the whole
+# module (BENCH_PKGS, default ./...) and gates exactly the benchmark names
+# listed here — everything else is run and reported as "ignored".
+#
+# Which packages and benchmark names end up below, and any deliberate absence,
+# is a property of the file AS COMMITTED, not an invariant this script
+# enforces: --update rewrites every row from whatever it observed, minus the
+# RunParallel filter below. Review the diff like code before trusting a
+# comment that describes specific content — a claim of that shape goes stale
+# the moment the content changes without the prose changing to match. That is
+# exactly what happened to the version of this comment that used to live here:
+# it said the file "contains no session/ entries on purpose", and a later PR
+# added real session/ rows without touching the sentence.
+#
+# The one exclusion the script DOES enforce: --update never writes a RunParallel
+# sub-benchmark (any name segment "parallel"). Their allocation numbers swing
+# with scheduling — the same journal row measured 2728 and 8520 B/op on one
+# machine — so baselining one builds a gate that fails unrelated PRs until
+# someone deletes it. See docs/TESTING.md, "Never baseline a RunParallel
+# benchmark".
 #
 # Captured with: -run='^$' -bench=. -benchmem -benchtime=${BENCHTIME} -count=${COUNT}
 # (median per metric). ns/op is intentionally absent: it is not gated.
 #
 # fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
 EOF
-		cat "${observed}"
+		# RunParallel sub-benchmarks are structurally unbaselineable — their
+		# allocation numbers move with goroutine scheduling, not with the code.
+		# Filtering here rather than trusting reviewer vigilance: --update is
+		# exactly the moment someone regenerates without reading every new row,
+		# and one parallel row is enough to make the gate fail unrelated PRs.
+		awk -F'\t' '$2 !~ /(^|\/)parallel($|\/)/' "${observed}"
 	} >"${out}"
 }
 
@@ -308,6 +344,7 @@ compare() {
 			if (!(key in ballocs)) {
 				printf "ignored     %s %s: present in output, absent from the baseline (%d allocs/op, %d B/op)\n",
 					$1, $2, $3, $4
+				ignored++
 				next
 			}
 			saw[key] = 1
@@ -345,8 +382,8 @@ compare() {
 				printf "If the change is genuine — in either direction — say why in the PR and run scripts/bench.sh --update.\n"
 				exit 1
 			}
-			printf "\nOK: %d gated benchmark(s) within tolerance (allocs/op +/-%s%%, B/op +/-%s%%).\n",
-				gated, allocs_tol, bytes_tol
+			printf "\nOK: %d gated benchmark(s) within tolerance (allocs/op +/-%s%%, B/op +/-%s%%); %d run but NOT gated (unlisted benchmarks cannot fail this gate).\n",
+				gated, allocs_tol, bytes_tol, ignored + 0
 		}
 	' "${BASELINE}" "${observed}"
 }

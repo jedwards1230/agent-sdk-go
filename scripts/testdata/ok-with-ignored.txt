@@ -1,0 +1,28 @@
+# Synthetic `go test -bench` capture: every baselined benchmark matches the
+# committed baseline exactly, plus one extra benchmark the baseline has never
+# heard of.
+#
+#   scripts/bench.sh --check --input scripts/testdata/ok-with-ignored.txt
+#
+# Locks the widened-run-set behavior from #148: a benchmark can be present in
+# the RUN set (this file stands in for a package bench.sh executed under
+# BENCH_PKGS) without being in the GATE set, and that must produce a green
+# --check, not a failure — an unlisted benchmark cannot fail this gate. The
+# summary line's "N gated, M run but NOT gated" counters are exercised here:
+# 6 gated, 1 ignored.
+goos: darwin
+goarch: arm64
+pkg: github.com/jedwards1230/agent-sdk-go/internal/benchguard
+cpu: Apple M2 Pro
+BenchmarkIndexWrap/n=8-12   	     100	     14395 ns/op	   19128 B/op	     137 allocs/op
+BenchmarkIndexWrap/n=64-12  	     100	    116426 ns/op	  162361 B/op	    1091 allocs/op
+BenchmarkIndexWrap/n=512-12 	     100	    944796 ns/op	 1310974 B/op	    8709 allocs/op
+BenchmarkIndexProject/n=8-12         	     100	       221.2 ns/op	     304 B/op	       2 allocs/op
+BenchmarkIndexProject/n=64-12        	     100	       177.9 ns/op	     304 B/op	       2 allocs/op
+BenchmarkIndexProject/n=512-12       	     100	       212.9 ns/op	     304 B/op	       2 allocs/op
+PASS
+ok  	github.com/jedwards1230/agent-sdk-go/internal/benchguard	0.925s
+pkg: github.com/jedwards1230/agent-sdk-go/session
+BenchmarkJournalCost/n=17-12   	     100	       50.0 ns/op	   0 B/op	     0 allocs/op
+PASS
+ok  	github.com/jedwards1230/agent-sdk-go/session	0.010s

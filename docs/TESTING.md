@@ -48,9 +48,27 @@ handled correctly) before it could ever reach the wire.
 
 Benchmarks are not a performance hobby here — they are the only test that can
 see a regression which keeps every assertion green. `scripts/bench.sh --check`
-runs the baselined benchmarks and fails on an allocation regression;
-`scripts/check-independence.sh` fails if any dependency path mentions the
-consuming application. Both run in the unconditional `bench` CI job.
+runs every benchmark in the module (`BENCH_PKGS`, default `./...`) and fails
+on an allocation regression in the ones listed in
+`scripts/bench-baseline.txt`; `scripts/check-independence.sh` fails if any
+dependency path mentions the consuming application. Both run in the
+unconditional `bench` CI job. Widening the run set from a single seed package
+to the whole module is cheap: `-benchtime=100x -count=5` over every package
+measured ~4.5–7s wall on darwin/arm64 locally, against ~1.7s for the original
+`internal/benchguard`-only run — seconds, not minutes.
+
+**What this gate does and does not assert.** It asserts allocation behavior
+for exactly the benchmarks named in `scripts/bench-baseline.txt` — nothing
+wider. Every other benchmark in the module runs on every CI pass and is
+reported in the summary, but it is explicitly marked `ignored`: **an unlisted
+benchmark cannot fail CI**, so writing a new benchmark does not, by itself,
+add coverage. It becomes coverage only once its numbers are measured across
+enough real runs to trust a tolerance and it is deliberately added to the
+baseline (`--update`, reviewed like a code change). The run/gate split exists
+precisely so that the wide half (catching an untested package before it is
+gated) and the narrow half (only failing CI on a benchmark someone has
+actually characterized) don't have to be the same set — see "The RUN set and
+the GATE set are different things" in `scripts/bench.sh`'s own header.
 
 ### The four anti-blindness rules
 
@@ -225,8 +243,8 @@ contention analysis; keep them out of `scripts/bench-baseline.txt`.
 ### Re-baselining (deliberate, never a reflex)
 
 ```bash
-scripts/bench.sh              # run the gated benchmarks, print the numbers
-scripts/bench.sh --check      # compare against the baseline (what CI runs)
+scripts/bench.sh              # run the module's benchmarks, print the numbers
+scripts/bench.sh --check      # compare the baselined subset against the baseline (what CI runs)
 scripts/bench.sh --update     # rewrite scripts/bench-baseline.txt
 ```
 
@@ -235,14 +253,17 @@ allocation regression or a benchmark that changed shape; both need a sentence
 in the PR saying which, and why the new number is acceptable. Re-baselining
 because CI is red, without that sentence, converts the gate into decoration.
 
-The baseline is also the **allowlist**: `bench.sh` runs exactly the packages it
-names and gates exactly the benchmark names in it. A benchmark present in the
-output but absent from the baseline is reported and ignored, so a peer adding
-one cannot turn this gate red. A baseline entry missing from the output *fails*
-— deleting or renaming a gated benchmark must be a deliberate `--update`. To
-put a new package under the gate, add one placeholder row naming it
-(`<import path><TAB>PLACEHOLDER<TAB>0<TAB>0`) and run `--update`, which rewrites
-the file from the observed run.
+The baseline is the **gate allowlist**, not the run set: `bench.sh` runs every
+package under `BENCH_PKGS` (default `./...`, the whole module) and gates only
+the benchmark names listed in the baseline. A benchmark present in the output
+but absent from the baseline is reported and ignored, so writing a new
+benchmark anywhere in the module cannot turn this gate red. A baseline entry
+missing from the output *fails* — deleting or renaming a gated benchmark must
+be a deliberate `--update`. To bring a new benchmark under the gate, run
+`scripts/bench.sh` enough times to trust its spread the way "Thresholds, and
+the measurements they came from" above was measured, then hand-add its row
+(or run `--update` and review the diff once you trust every row it would
+rewrite — a wholesale `--update` also rewrites every already-trusted row).
 
 Re-run the gate's own proofs at any time, without touching Go code:
 
@@ -356,12 +377,15 @@ serial numbers reproduce to the byte.
   gated too, not just the per-piece PRs. Routine PRs keep the fast non-race
   suite. See `.github/workflows/ci.yml`.
 - **Allocation gate** (`bench` job, unconditional on every PR and push):
-  `scripts/bench.sh --check` fails on an `allocs/op` or `B/op` move beyond
-  ±1% against `scripts/bench-baseline.txt` — in **either** direction — and
-  `check-independence.sh` fails on any dependency under the consuming
-  application's module path, test dependencies included. The same job replays a
-  matrix of committed synthetic inputs to prove both scripts can still fail,
-  and that the independence check does *not* fire on a lookalike module.
+  `scripts/bench.sh --check` runs every benchmark in the module and fails on an
+  `allocs/op` or `B/op` move beyond ±1% against `scripts/bench-baseline.txt` —
+  in **either** direction — for the benchmark names that baseline lists; every
+  other benchmark it runs is reported `ignored` and cannot fail the job. See
+  "What this gate does and does not assert" above. `check-independence.sh`
+  fails on any dependency under the consuming application's module path, test
+  dependencies included. The same job replays a matrix of committed synthetic
+  inputs to prove both scripts can still fail, and that the independence check
+  does *not* fire on a lookalike module.
 - **Embedder gate**: the SDK builds and tests green with zero application
   imports.
 - Permission-corpus gate: fails if an imported CC `settings.json` rule ever

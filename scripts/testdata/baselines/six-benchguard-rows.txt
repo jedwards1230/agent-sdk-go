@@ -1,0 +1,26 @@
+# Hermetic baseline for the "present-but-unbaselined stays green" case (#148).
+#
+#   scripts/bench.sh --check \
+#     --baseline scripts/testdata/baselines/six-benchguard-rows.txt \
+#     --input    scripts/testdata/ok-with-ignored.txt
+#
+# WHY THIS EXISTS RATHER THAN REUSING THE COMMITTED BASELINE
+#
+# That case originally ran against scripts/bench-baseline.txt, and broke the
+# moment the committed baseline grew session/ rows: the fixture capture does not
+# contain them, so they came back MISSING and the expected-green case exited 1.
+# The test was asserting something real (an unlisted benchmark cannot fail the
+# gate) but was coupled to a file that legitimately changes whenever someone
+# baselines a new benchmark — so every future re-baseline would break a test
+# that has nothing to do with the re-baseline.
+#
+# Pinning it here keeps the assertion and removes the coupling. Do not "update"
+# this file to track scripts/bench-baseline.txt; they are meant to diverge.
+#
+# fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=512	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=64	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=8	2	304
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=512	8709	1310974
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=64	1091	162361
+github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=8	137	19128
