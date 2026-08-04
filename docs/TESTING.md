@@ -109,8 +109,10 @@ the win explicit and reviewed instead of silently absorbed into the baseline.
 
 A **zero baseline** is handled explicitly rather than as a percentage: `x/0` is
 undefined, so any nonzero observation against a `0` row fails and is reported
-in absolute terms. Benchmarks legitimately sitting at `0 allocs/op` exist
-(`session/journal_bench_internal_test.go` has some), and reporting an unbounded
+in absolute terms. Benchmarks legitimately sitting at `0 allocs/op` are gated
+this way today — `BenchmarkJournalLastUsage/*` in
+`session/journal_bench_internal_test.go`, whose early-exit walk allocates
+nothing on the common live-session path — and reporting an unbounded
 regression as `+0.00%` would be the reporting equivalent of not gating it.
 
 The baseline is also validated before it is trusted: non-numeric metrics, rows
@@ -145,7 +147,37 @@ flat and grows the **bytes** linearly; an allocs-only gate walks straight past
 it. `scripts/testdata/regression-bytes-only.txt` is exactly that shape, kept as
 a fixture so CI re-proves the bytes half of the gate can still fire.
 
+### What's in scope today
+
+The baseline (`scripts/bench-baseline.txt`) currently gates two packages:
+
+- `internal/benchguard` — `BenchmarkIndexProject/*` and `BenchmarkIndexWrap/*`
+  (6 rows).
+- `session` — `BenchmarkJournalCost/n=*` and `BenchmarkJournalLastUsage/n=*`,
+  the serial (non-`/parallel`) rows only (8 rows). These measure the two
+  journal derivations an embedder polls on a timer; `LastUsage`'s rows sit at
+  `0 allocs/op, 0 B/op` on the common live-session shape (its walk early-exits
+  before allocating), which exercises the zero-baseline path above rather than
+  a percentage comparison.
+
+Deliberately **not** gated, each for a stated reason:
+
+- `BenchmarkJournalCost/n=*/parallel` and `BenchmarkJournalLastUsage/n=*/parallel`
+  — see "Never baseline a `RunParallel` benchmark" below.
+- `BenchmarkJournalLastUsageFullWalk/*` — measures the no-early-exit worst case
+  and is flat at `0 allocs/op, 0 B/op` like its sibling, but is out of scope
+  for the pass that added the `session` rows; an obvious next candidate.
+- `BenchmarkJournalFold/*` and `BenchmarkRegistrySpecs/*` — `Fold` is linear by
+  design over the folded context, so a naive baseline would gate expected
+  growth rather than a regression; tracked in #157.
+
 ### Thresholds, and the measurements they came from
+
+The table below covers only the original `internal/benchguard` rows
+(`IndexProject`, `IndexWrap`) — it predates the `session` rows and has not
+been re-measured for them. The `session` rows were captured once, on the CI
+runner (linux/amd64, `bench` job on PR #155), not sampled for run-to-run
+spread the way this table's numbers were.
 
 | Metric | Tolerance | Worst observed deviation from baseline (either direction) | Headroom |
 |---|---|---|---|

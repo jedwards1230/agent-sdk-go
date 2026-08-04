@@ -6,12 +6,17 @@
 # and both need a human sentence in the PR description.
 #
 # This file is also the ALLOWLIST: bench.sh runs exactly the packages named
-# here and gates exactly the benchmark names here. It contains no session/
-# entries on purpose — those benchmarks belong to another workstream and must
-# not be able to turn this gate red.
+# here and gates exactly the benchmark names here. session/ carries the
+# BenchmarkJournalCost and BenchmarkJournalLastUsage serial rows (swept over
+# journal length); their /parallel twins are deliberately absent — see
+# docs/TESTING.md "Never baseline a RunParallel benchmark". So are
+# BenchmarkJournalLastUsageFullWalk (out of scope for this pass; tracked as a
+# follow-up) and BenchmarkJournalFold / BenchmarkRegistrySpecs (deliberately
+# ungated, tracked in #157).
 #
 # Captured with: -run='^$' -bench=. -benchmem -benchtime=100x -count=5
-# (median per metric). ns/op is intentionally absent: it is not gated.
+# (median per metric) on the CI runner (linux/amd64), from the `bench` job on
+# PR #155. ns/op is intentionally absent: it is not gated.
 #
 # fields: package<TAB>benchmark<TAB>allocs/op<TAB>B/op
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n=512	2	304
@@ -20,3 +25,11 @@ github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexProject/n
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=512	8709	1310974
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=64	1091	162361
 github.com/jedwards1230/agent-sdk-go/internal/benchguard	BenchmarkIndexWrap/n=8	137	19128
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalCost/n=129	5	1616
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalCost/n=17	5	1616
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalCost/n=2049	5	1616
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalCost/n=513	5	1616
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalLastUsage/n=129	0	0
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalLastUsage/n=17	0	0
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalLastUsage/n=2049	0	0
+github.com/jedwards1230/agent-sdk-go/session	BenchmarkJournalLastUsage/n=513	0	0
