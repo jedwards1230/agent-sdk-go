@@ -644,8 +644,9 @@ transport and method dispatch live in the consuming application (gofer); an ACP
 session is just another broker subscriber. This keeps the ACP work squarely
 inside the tenets: it is a *projection* of the one Event/Op contract, and the
 SDK still imports no application code. New capabilities are earned against the
-two gates — a type or projection belongs here only if a second ACP client would
-consume it unchanged, and only as a mapping, never a built-in behavior.
+membership and seam gates — a type or projection belongs here only if a second
+ACP client would consume it unchanged, and only as a mapping, never a built-in
+behavior.
 
 **The ACP↔Event/Op boundary lives here, both directions:**
 
@@ -1384,10 +1385,17 @@ helper ships here.
 identity (server id, account id, display name), candidate endpoints, coarse
 session summaries, an optional opaque credential, a **required**
 `device.PublicKey`, and a capability `Scope`. Types only — the package imports
-no `net`, opens no socket, and knows nothing about rosters or fleets. Per the two-gate test, describing yourself is
-vocabulary a second SDK-based app needs unchanged; the mDNS browser, rendezvous
-client, device-code flow, and candidate racing are plumbing that lives in a
-separate module.
+no `net`, opens no socket, and knows nothing about rosters or fleets. On the
+membership and seam gates, describing yourself is vocabulary a second SDK-based
+app would need unchanged; the mDNS browser, rendezvous client, device-code flow,
+and candidate racing are plumbing that lives in a separate module.
+
+**It fails the third gate: there is no consumer.** Nothing imports `announce/`
+at all; `device/` is imported only by `announce/`, which is itself speculative.
+No known embedder imports either, and `go list -deps` over the core packages
+reaches neither. The "a second app needs it unchanged" argument above is
+counterfactual — there is no *first* app. Both are marked **speculative** in the
+extension-tiers table and carry no stability guarantee until that changes.
 
 **Endpoints are a list, not an address** — that is the load-bearing choice. A
 server is reachable by several paths at once and which works depends on where
@@ -1468,8 +1476,35 @@ Three tiers, by trust and coupling:
 3. **Subprocess plugin** — third-party, runtime-installed, untrusted; isolated
    over JSON-RPC (host lands M5). Nothing untrusted runs in-process.
 
-The tier is set by the two-gate test: would a second app need it unchanged
-(core vs optional package), and could a seam suffice instead of a built-in?
+The tier is set by the three-gate test: would a second app need it unchanged
+(core vs optional package), could a seam suffice instead of a built-in, and
+**is there a consumer today**?
+
+### Speculative — no consumer
+
+A package that passes the first two gates but has **no consumer outside its own
+speculative group** is speculative, and says so here rather than sitting
+silently alongside stable packages:
+
+| Package | Shipped | Imported by | Status |
+|---|---|---|---|
+| `device/` | 2026-07 | `announce/` only — itself speculative | speculative — API may change without notice |
+| `announce/` | 2026-07 | nothing | speculative — API may change without notice |
+
+Both were built as M8 pairing groundwork. The pair imports *itself* —
+`announce/` uses `device/` — and **nothing outside the pair imports either**: no
+other package in this repo, no known embedder, and `go list -deps` over the core
+packages reaches neither. An intra-group import is not a consumer; if it were,
+any self-contained cluster of dead code could vouch for itself.
+
+So they carry **none** of the stability expectations that `loop/`, `session/`,
+`event/`, or `permission/` do. Treat a breaking change to either as routine
+until a real consumer lands, at which point they graduate to tier 2.
+
+This entry exists because the first two gates are *counterfactual* — they ask
+what a hypothetical second app **would** need. Both of these pass on that
+reading. The third gate is what they fail, and marking the failure beats
+pretending the tier table describes them.
 
 ## Component sourcing (survey verdict, 2026-07-11)
 

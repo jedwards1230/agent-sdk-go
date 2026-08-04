@@ -26,9 +26,17 @@
 // net/http, and it never will. The SDK has no inbound network surface and this
 // package does not add one. The discovery machinery (an mDNS browser, a
 // rendezvous client, a device-code flow, candidate racing) is networking and
-// identity work that lives in a separate module, per the two-gate test in
-// CLAUDE.md: describing yourself is vocabulary a second SDK-based application
-// needs unchanged; dialing is plumbing a seam can supply.
+// identity work that lives in a separate module: describing yourself is
+// vocabulary a second SDK-based application would need unchanged; dialing is
+// plumbing a seam can supply.
+//
+// SPECULATIVE — no consumer. Nothing imports this package, in this repo or in
+// any known embedder; it was built as M8 pairing groundwork ahead of the
+// application work that would use it. (It does import device/, which is
+// speculative for the same reason — an intra-group import is not a consumer.)
+// Per the third gate in CLAUDE.md it carries no stability guarantee, and a
+// breaking change here is routine until a real consumer lands. See
+// docs/DESIGN.md, "Extension tiers → Speculative".
 //
 // It also knows nothing about rosters, supervision, or fleets. A roster is an
 // application-side projection of many payloads; this package models one server
