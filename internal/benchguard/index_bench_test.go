@@ -131,6 +131,22 @@ func (r countingRegistry) Get(name string) (loop.Tool, bool) {
 
 func (r countingRegistry) Specs() []provider.ToolSpec { return r.base.Specs() }
 
+// benchTools builds one benchTool per name, sharing the same shape newBenchBase
+// and BenchmarkRegistrySpecs (registry_bench_test.go) both need: a description
+// deliberately longer than the default summary bound, so a summarizer
+// (toolindex) or a marshaler (loop.FromRegistry) has real per-tool work to do
+// instead of passing a canned value through.
+func benchTools(names []string) []tool.Tool {
+	tools := make([]tool.Tool, len(names))
+	for i, name := range names {
+		tools[i] = benchTool{
+			name: name,
+			desc: "Operate on " + name + ": a deliberately long description, longer than the default summary bound, so summarization has to cut it rather than pass it through.",
+		}
+	}
+	return tools
+}
+
 // benchNames returns n deterministic tool names: a few local builtins followed
 // by mcp__<server>__<tool> names spread over four servers, so Entry.Source
 // derivation does real string work instead of hitting one constant. The name
@@ -167,14 +183,7 @@ func newBenchBase(tb testing.TB, n int) (countingRegistry, *benchguard.Counter) 
 	tb.Helper()
 
 	names := benchNames(n)
-	tools := make([]tool.Tool, len(names))
-	for i, name := range names {
-		tools[i] = benchTool{
-			name: name,
-			desc: "Operate on " + name + ": a deliberately long description, longer than the default summary bound, so summarization has to cut it rather than pass it through.",
-		}
-	}
-	reg := tool.NewRegistry(tools...)
+	reg := tool.NewRegistry(benchTools(names)...)
 	if got := reg.Len(); got != n {
 		tb.Fatalf("bench registry has %d tools, want %d", got, n)
 	}

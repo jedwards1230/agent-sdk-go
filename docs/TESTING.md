@@ -291,6 +291,63 @@ someone else's PR.
 > every grep exit status explicitly and refuses to search an empty or
 > implausible dependency list.
 
+### The first two SDK benchmarks, and what they do and do not assert
+
+`BenchmarkJournalFold` (`session/journal_bench_internal_test.go`) and
+`BenchmarkRegistrySpecs` (`internal/benchguard/registry_bench_test.go`) are the
+SDK's first benchmarks against this harness, added for the depth axis
+(`Journal.Fold`) and the breadth axis (`Tools.Specs()` per model call). See
+jedwards1230/agent-sdk-go#127. **Neither is gated** — `scripts/bench-baseline.txt`
+names neither, so neither can fail CI.
+
+Whether they *run* differs, and the distinction matters:
+
+- **`BenchmarkRegistrySpecs` does run in CI.** It lives in `internal/benchguard`,
+  which the baseline already names, and `scripts/bench.sh` runs every benchmark
+  in a named package — so it executes and is reported, then ignored by the
+  comparison because it has no baseline row.
+- **`BenchmarkJournalFold` does not run at all.** `session/` is not named in the
+  baseline, so the package is never selected.
+
+Running is not gating: an executed benchmark with no baseline row cannot fail CI.
+To exercise both directly:
+
+```bash
+go test -run='^$' -bench=. -benchmem -benchtime=100x -count=5 ./session/ ./internal/benchguard/
+```
+
+Gating them is deliberate follow-up work: their numbers so far are laptop
+(darwin/arm64) numbers, and the gate's ±1% tolerance was sized against
+linux/amd64 CI-runner spread (see the table above) — baselining a number never
+measured on the runner is the exact mistake this whole gate exists to
+prevent.
+
+- **`BenchmarkJournalFold`** sweeps the same `benchSizes` (17/129/513/2049) as
+  `BenchmarkJournalCost` and `BenchmarkJournalLastUsage` in the same file, and
+  its claim is the **opposite** of theirs: it is not asserted flat, and it is
+  not flat. `Journal.Fold` still copies the whole entry slice under `j.mu`
+  before folding (`Cost` and `LastUsage` were both fixed to walk in place by
+  #121) — allocs/op scales linearly with depth (measured ~10.3 allocs per
+  entry, holding across all four sizes on darwin/arm64). That is the finding
+  the benchmark exists to report, not a regression to fix inline; the finding is
+  filed as #157. It also does not build a cyclic journal fixture — not because
+  one would hang (it would not: `chainFromHead` is bounded by
+  `for steps := len(entries); steps > 0; steps--`, fixed in #137, closing #122)
+  but because a cyclic parent chain is malformed input that measures nothing
+  this benchmark is about.
+- **`BenchmarkRegistrySpecs`** measures the plain registry adapter
+  (`loop.FromRegistry(reg).Specs()`, `loop/toolreg.go:30`) at the same
+  n=8/64/512 axis `BenchmarkIndexWrap`/`BenchmarkIndexProject` already use, so
+  index mode's per-model-call cost (`BenchmarkIndexProject`, flat at 2
+  allocs/op regardless of n) can be read against the plain-registry cost
+  (growing from 101 to 6150 allocs/op over the same range) instead of assumed.
+  It warms the process-global `encoding/json` type-encoder cache with one
+  untimed call before the measured loop, for the same reason `newBenchBase`
+  does in `index_bench_test.go`.
+
+Neither benchmark has a `RunParallel` twin, for the reason given above: only
+serial numbers reproduce to the byte.
+
 ## CI gates
 
 - `go test -race` on push to main and release tags, and on any PR into **or**
