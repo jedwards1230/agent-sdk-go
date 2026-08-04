@@ -306,9 +306,16 @@ Both do run in CI, though, and that distinction from gating matters:
 `BenchmarkJournalCost`/`BenchmarkJournalLastUsage`'s) as packages, and
 `scripts/bench.sh` runs *every* benchmark in a named package, not just the ones
 it gates. `BenchmarkJournalFold` lives in `session` and `BenchmarkRegistrySpecs`
-lives in `internal/benchguard`, so both execute on every `bench.sh` run and are
-reported as `ignored` — `present in output, absent from the baseline` — visible,
-but powerless to fail CI.
+lives in `internal/benchguard`, so both execute on every `bench.sh` run and both
+appear in the printed table.
+
+The `ignored` label is narrower than the execution, and the two are worth keeping
+apart: `ignored ... present in output, absent from the baseline` is emitted by the
+comparison phase, which only `--check` performs. So a plain `scripts/bench.sh`
+runs these benchmarks and prints their numbers without ever calling them
+`ignored`; `scripts/bench.sh --check` — the mode CI runs — is where they are
+named as seen-but-not-gated. Either way they are visible and powerless to fail
+CI, which is the property that matters.
 
 Running is not gating: an executed benchmark with no baseline row cannot fail CI.
 To exercise both directly:
