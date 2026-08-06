@@ -215,8 +215,9 @@ contacted in tests or at build time.
 
 ```
 rule       := ToolName | ToolName "(" specifier ")"
-specifier  := prefix ":*"          Bash(git status:*)      command prefix
-            | glob                 Read(src/**) · Edit(*.env)
+specifier  := ""  |  "*"           Read(*)                 matches ANY target
+            | prefix ":*"          Bash(git status:*)      string prefix
+            | glob                 Read(src/*.go) · Edit(*.env)
             | mcp tool             mcp__search__*(*)
 lists      := deny[] > ask[] > allow[]     first match in that order wins
 unmatched  ⇒ ask (fail-safe)
@@ -225,6 +226,38 @@ dangerous  ⇒ grants force-downgraded to exact-match, TTL'd, audited
 sources    := embedded defaults < global config < project config < session grants
               (deny from ANY source is un-overridable)
 ```
+
+> **The SDK has two glob dialects — do not carry a pattern between them.** The
+> `Glob` and `Grep` *tools* use `tool.matchGlob`, a segment matcher where a
+> `**` segment matches zero or more path segments, so `Glob("**/*.go")` walks
+> recursively as expected. The *permission engine* does not use that matcher.
+> The rules below apply to permission specifiers only.
+
+**Glob semantics: `path.Match`, so there is no `**`.** `*` never crosses `/`,
+and `**` is not special — it behaves exactly like `*`. A specifier written
+`Read(src/**)` therefore matches `src/a.go` but **not** `src/deep/b.go`, and
+`Read(**)` matches only top-level files. This matters most on a **deny** rule:
+`deny: ["Read(secrets/**)"]` does not cover `secrets/prod/key.pem`, and a
+broader allow rule alongside it wins instead.
+
+To match recursively, use the prefix form — it is a plain string prefix, so it
+spans `/` — and keep the trailing slash:
+
+| intent | write | not |
+|---|---|---|
+| any target at all | `Read(*)` | `Read(**)` |
+| everything under `src/`, recursive | `Read(src/:*)` | `Read(src/**)` |
+| one level under `src/` | `Read(src/*)` | — |
+
+Omitting the slash in `Read(src:*)` also matches `srcfoo/evil.go` and
+`src-backup/x.go`, since the prefix is compared as a raw string, not a path.
+
+**Known gap: recursive *suffix* matching is currently inexpressible.** The
+prefix form anchors at the start and globs cannot cross `/`, so no specifier
+matches "any `.env` at any depth" — `Read(*.env)` covers a top-level `.env`
+only, leaving `config/.env` unmatched. Deny rules that need depth-independent
+suffix matching have to be written per-directory until the grammar grows a
+doublestar or suffix form.
 
 The engine consumes typed `[]Rule`; vendor formats are import adapters that
 produce those rules. Claude Code `settings.json` allow/ask/deny is one such
@@ -378,9 +411,9 @@ tools:
 lsp: { auto: true }                    # registry auto-detect; per-server overrides
 skills: [./skills, ~/.config/agent-sdk/skills]
 permissions:
-  allow: ["Bash(kubectl get:*)", "Read(**)"]
-  ask:   ["Bash(kubectl:*)", "Edit(**)"]
-  deny:  ["Bash(rm -rf:*)", "Read(*.env)"]
+  allow: ["Bash(kubectl get:*)", "Read(*)"]
+  ask:   ["Bash(kubectl:*)", "Edit(*)"]
+  deny:  ["Bash(rm -rf:*)", "Read(*.env)", "Read(secrets/:*)"]
 sandbox: { mode: workspace-write, network: false }
 auto_mode: { reviewer: same-provider, fail: closed }   # rails → sandbox → reviewer
 session: { store: jsonl, compact_at: 0.8 }
