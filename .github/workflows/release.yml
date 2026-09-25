@@ -107,7 +107,7 @@ jobs:
     name: Tag & Release
     needs: [detect]
     if: needs.detect.outputs.release == 'true'
-    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@915facd9a46f88da767d2d7122ab4fced5c2c1d6 # v1
+    uses: jedwards1230/release-workflows/.github/workflows/ai-release.yml@ac78f4af7ed28f4e149ba21e482f390777a204ce # v1
     with:
       service_name: agent-sdk-go
       service_description: "a Go framework for building coding agents on a typed Event/Op contract"
