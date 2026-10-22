@@ -1561,7 +1561,7 @@ internal design notes; this table is the settled, repo-facing summary.
 
 - **Platforms**: macOS + Linux first-class (including sandbox backends);
   Windows later, no sandbox v1. Single static binary; `go install` works.
-- **Go 1.25** (matches `go.mod`); range-over-func iterators (available since
+- **Go 1.26.10** (matches `go.mod`); range-over-func iterators (available since
   Go 1.23) are load-bearing in the event stream and per-test stream fakes.
 - **Streaming budget**: first provider token reaches an attached client with
   ≤ one frame of added latency; the lossy delta tier exists so a slow client
