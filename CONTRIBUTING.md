@@ -5,7 +5,7 @@ the workflow below.
 
 ## Prerequisites
 
-Go ≥ 1.25 and `golangci-lint`.
+Go ≥ 1.26.10 and `golangci-lint`.
 
 ## Build, test & lint
 
