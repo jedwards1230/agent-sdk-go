@@ -138,29 +138,22 @@ the sentence you have to fix is usually not in the file you edited.
 review never ran reads exactly as green as one that passed. **Before merging,
 confirm `review / review` is at a terminal `pass` — not merely non-failing.**
 
-The review workflow skips drafts. Two different situations produce that, and
-they call for opposite responses:
+A blocking review does not draft the PR. Since release-workflows v1.13.0
+(jedwards1230/release-workflows#71), `claude[bot]` submits a formal
+`REQUEST_CHANGES` review instead, and the PR's review decision reads "Changes
+requested":
 
-- **The PR is draft because nobody undrafted it.** No review has run and none
-  will. This is the trap: it accumulates commits looking green. Undraft it.
-- **The PR is draft because `claude[bot]` converted it.** That is
-  `draft_on_blocking` — the review *did* run, found blocking findings, and
-  drafted the PR as the signal. Check the timeline before assuming an
-  oversight:
+```bash
+gh pr view <pr> --json reviewDecision --jq .reviewDecision
+```
 
-  ```bash
-  gh api --paginate repos/<owner>/<repo>/issues/<pr>/timeline \
-    --jq '.[] | select(.event=="convert_to_draft") | "\(.created_at) by \(.actor.login)"'
-  ```
+Read the `claude[bot]` review, fix the findings and push; the next review with
+no blocking findings dismisses it automatically. Where the base branch requires
+no approving reviews, it is advisory rather than merge-blocking. (Drafting is
+opt-in via `draft_on_blocking: true`, which this repo does not set.)
 
-  **`--paginate` is required, not optional.** The timeline API pages at 30 and
-  says nothing when it truncates. On this repo's own integration PR the
-  timeline held 44 events, so the un-paginated form saw 30 and printed
-  nothing — which reads as "nobody drafted it", the exact wrong branch of the
-  two this section distinguishes. A `convert_to_draft` follows a review, so on
-  a long-lived PR it is precisely the event that lands past page 1.
-
-  Fix the findings, resolve the threads, then undraft to re-trigger.
+The review workflow skips drafts, so a PR left in draft accumulates commits
+looking green: no review has run and none will. Undraft it.
 
 Note also that `ready_for_review` can race a push: if you undraft and push
 together, the only run may be the `synchronize` one that fired while still
